@@ -2,6 +2,7 @@ import torch
 import torch.nn as nn
 from torchkbnufft import KbNufft, KbNufftAdjoint
 import numpy as np
+from einops import rearrange
 
 class RadialDCLayerSingleCoil(nn.Module):
     def __init__(
@@ -22,14 +23,26 @@ class RadialDCLayerSingleCoil(nn.Module):
 
     def forward(self, x, y_radial, ktraj):
         """
-        x: (batch, 1, H, W) real or complex
-        y_radial: (batch, 1, n_samples, n_spokes) complex
-        ktraj: (n_samples*n_spokes, 2) float
+        x: (batch, 1, H, W, 2) real
+        y_radial: (n_samples, n_spokes, 2) real
+        ktraj: (1, 2, n_samples*n_spokes) float
         """
-        x_c = x.to(dtype=torch.complex64)
+        # x_c = x.to(dtype=torch.complex64)
 
         # (1) Forward NUFFT (no smaps => single‐coil)
-        A_x = self.nufft_op(x_c, ktraj, smaps=None, norm='ortho')  # (batch, 1, n_samples, n_spokes)
+        A_x = self.nufft_op(x.contiguous(), ktraj.contiguous(), smaps=None, norm='ortho')  # (batch, 1, n_samples*n_spokes, 2)
+
+        # reshape simulated k-space
+        A_x = rearrange(A_x, "b c r i -> b c i r ")#.to(dtype)
+        A_x = torch.reshape(A_x, (1, 1, 2, 288, 640, 1)).squeeze()
+        A_x = rearrange(A_x, 'i sp sam -> sam sp i')
+
+        # apply density compensation function to simulated k-space
+        dcf = np.sqrt(ktraj[..., 0] ** 2 + ktraj[..., 1] ** 2)  # shape: (N_TIME, N_SPOKES)
+        dcf_tensor = (
+            torch.tensor(dcf).unsqueeze(0).unsqueeze(0).unsqueeze(0)
+        )
+        A_x = A_x * dcf_tensor
 
         # (2) Weighted combine
         lambda_c = torch.sigmoid(self.lambda_).type(torch.complex64)
@@ -38,6 +51,10 @@ class RadialDCLayerSingleCoil(nn.Module):
         # (3) Adjoint NUFFT
         x_dc = self.adjnufft_op(k_dc, ktraj, smaps=None, norm='ortho')  # (batch, 1, H, W)
         return x_dc
+    
+    def extra_repr(self):
+        return f"lambda (raw)={self.lambda_.item():.4g}, learnable={self.lambda_.requires_grad}"
+
 
 
 

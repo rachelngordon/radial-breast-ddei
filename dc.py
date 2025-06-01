@@ -33,7 +33,7 @@ def get_ktraj(N_spokes, N_time, base_res, device):
     traj = rearrange(traj, 't len i -> len t i')
     
     # normalize
-    traj /= torch.mean(torch.abs(traj))
+    # traj /= torch.mean(torch.abs(traj))
 
     traj = traj*torch.tensor([1, -1]).to(device)
 
@@ -198,10 +198,10 @@ sim_kspace = simulate_kspace(NUFFT_op, ktraj_tensor, image, csmap, device)
 print("final simulate k-space shape: ", sim_kspace.shape)
 
 
-# # use single coil
-# print("Traj shape: ", ktraj_tensor.shape)
-# sim_kspace_single_coil = simulate_kspace_single_coil(NUFFT_op, ktraj_tensor, image, device)
-# print("final single coil simulate k-space shape: ", sim_kspace_single_coil.shape)
+# use single coil
+print("Traj shape: ", ktraj_tensor.shape)
+sim_kspace_single_coil = simulate_kspace_single_coil(NUFFT_op, ktraj_tensor, image, device)
+print("final single coil simulate k-space shape: ", sim_kspace_single_coil.shape)
 
 
 

@@ -27,8 +27,8 @@ with open(split_file, "r") as fp:
         splits = json.load(fp)
 
 # NOTE: select only a subset of the data for now
-train_patient_ids = splits["train"][:25]
-val_patient_ids   = splits["val"][:5]
+train_patient_ids = splits["train"][:2]
+val_patient_ids   = splits["val"][:1]
 
 
 train_dataset = KSpaceSliceDataset(
@@ -119,6 +119,42 @@ for epoch in range(start_epoch, epochs+1):
 
         optimizer.step()
 
+        if epoch % save_interval == 0:
+
+                x_recon_mag = torch.abs(x_recon[..., 0, :] + 1j * x_recon[..., 1, :])
+
+                batch_idx = 0
+                n_timeframes = x_recon_mag.shape[-1]
+
+                # Create a row of subplots, one for each time‐frame
+                fig, axes = plt.subplots(
+                    nrows=1,
+                    ncols=n_timeframes,
+                    figsize=(n_timeframes * 3, 6),
+                    squeeze=False
+                )
+
+                for t in range(n_timeframes):
+                    img = x_recon_mag[batch_idx, :, :, t].detach().cpu().numpy()
+                    ax = axes[0, t]
+                    ax.imshow(img, cmap='gray')
+                    ax.set_title(f"T = {t}")
+                    ax.axis("off")
+
+                plt.tight_layout()
+                plt.savefig(f'output/train_sample_epoch_{epoch}.png')
+                plt.close()
+
+
+                # Plot train + val losses
+                plt.plot(train_mc_losses, label='Training MC Loss')
+                plt.plot(val_mc_losses, label='Validation MC Loss')
+                plt.xlabel('Epoch')
+                plt.ylabel('Loss')
+                plt.legend()
+                plt.savefig(os.path.join('output', f'losses.png'))
+                plt.close()
+
     # average losses 
     epoch_train_mc_loss = running_mc_loss / len(train_loader)
     train_mc_losses.append(epoch_train_mc_loss)
@@ -154,7 +190,7 @@ for epoch in range(start_epoch, epochs+1):
                 fig, axes = plt.subplots(
                     nrows=1,
                     ncols=n_timeframes,
-                    figsize=(n_timeframes * 3, 3),
+                    figsize=(n_timeframes * 3, 6),
                     squeeze=False
                 )
 
@@ -167,6 +203,7 @@ for epoch in range(start_epoch, epochs+1):
 
                 plt.tight_layout()
                 plt.savefig(f'output/val_sample_epoch_{epoch}.png')
+                plt.close()
 
 
                 # Plot train + val losses

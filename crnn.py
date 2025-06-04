@@ -1,8 +1,9 @@
 import torch
 import torch.nn as nn
+from einops import rearrange
 
-from ..utils.fft import *
-from .datalayer import DCLayer
+# from ..utils.fft import *
+from radial_dclayer_singlecoil import RadialDCLayer
 
 
 class CRNN(nn.Module):
@@ -10,7 +11,7 @@ class CRNN(nn.Module):
             self,
             num_cascades: int = 10,
             chans: int = 64,
-            datalayer=DCLayer(),
+            datalayer=RadialDCLayer(im_size=(320,320,1)),
     ):
         super().__init__()
 
@@ -34,7 +35,7 @@ class CRNN(nn.Module):
             dcs.append(self.datalayer)
         self.dcs = dcs
 
-    def forward(self, x, y, mask):
+    def forward(self, x, y, traj, dcf):
         """
         Args:
             x: Input image, shape (b, w, h, t, ch)
@@ -92,7 +93,10 @@ class CRNN(nn.Module):
             net['t%d_out' % i] = net['t%d_out' % i].permute(1, 3, 4, 0, 2) #b w h t ch
             net['t%d_out' % i].contiguous()
             # print(net['t%d_out' % i].shape)
-            net['t%d_out' % i] = self.dcs[i - 1](net['t%d_out' % i], y.permute(0, 2, 3, 4, 1), mask).permute(0, 4, 1, 2, 3)
+
+            ## NOTE: squeeze removes coil dimension for now (single coil implementation)
+            net['t%d_out' % i] = self.dcs[i - 1](net['t%d_out' % i], y.permute(0, 2, 3, 4, 1), traj, dcf).squeeze(1).permute(0, 4, 1, 2, 3)
+
             #x: b w h t ch; y: b w h t ch; mask: b w h ch t -> x: b w h t ch -> x: b ch w h t
             #NOTE here mask has ch and t swapped which looks like a mistake.
             net['t%d_out' % i] = net['t%d_out' % i]
@@ -187,6 +191,10 @@ class BCRNNlayer(nn.Module):
         Returns:
             Output tensor of shape `(t, b, hidden_size, h, w)`.
         """
+        
+        if input.shape[0] == 2 and 2 not in input.shape[1:]:
+            input = rearrange(input, 'i b t h w -> t b i h w')
+
         t, b, ch, h, w = input.shape
         size_h = [b, self.hidden_size, h, w]
 
@@ -243,12 +251,17 @@ class ArtifactRemovalCRNN(nn.Module):
             physics = physics.module
 
         x_init = physics.A_adjoint(y) # B,C,T,H,W
-        mask = physics.mask.float() # B,C,T,H,W
+        # mask = physics.mask.float() # B,C,T,H,W
+        traj = physics.traj
+        dcf = physics.dcf
 
-        x_init = x_init.permute(0, 4, 3, 2, 1) # -> B,W,H,T,C
-        y = y.permute(0, 4, 3, 2, 1)
-        mask = mask.permute(0, 4, 3, 2, 1)
+        x_init = rearrange(x_init, 'b h w t c -> b w h t c')
         
-        x_hat = self.backbone_net(x_init, y, mask) # B,W,H,T,C
+        # x_init = x_init.permute(0, 4, 3, 2, 1) # -> B,W,H,T,C
+
+        y = y.permute(0, 4, 3, 2, 1)
+        # mask = mask.permute(0, 4, 3, 2, 1)
+        
+        x_hat = self.backbone_net(x_init, y, traj, dcf) # B,W,H,T,C
 
         return x_hat.permute(0, 4, 3, 2, 1) #B,C,T,H,W

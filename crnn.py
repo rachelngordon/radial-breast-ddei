@@ -240,6 +240,43 @@ class ArtifactRemovalCRNN(nn.Module):
         super().__init__()
         self.backbone_net = backbone_net
 
+
+    def compute_image_rms(self, x: torch.Tensor) -> torch.Tensor:
+        """
+        Args:
+            x: Zero-filled images, shape [B, H, W, T, C]
+        Returns:
+            scale: Per-frame RMS scale, shape [B, T]
+        """
+        # Compute magnitude (for complex-valued images)
+        x_mag = torch.sqrt((x ** 2).sum(dim=-1))  # [B, H, W, T]
+        x_mag = rearrange(x_mag, 'b h w t -> b t h w')
+
+        rms = x_mag.flatten(2).pow(2).mean(dim=-1).sqrt()  # [B, T]
+
+        return rms
+    
+    def normalize_kspace(self, y: torch.Tensor, scale: torch.Tensor) -> torch.Tensor:
+        """
+        Args:
+            y: [B, C=1, 2, Nrad, T – complex k-space
+            scale: [B, T] – RMS scale per frame from zero-filled image
+        """
+        B, T = y.shape[0], y.shape[-1]
+        scale = scale.view(B, 1, 1, 1, T)
+
+        return y / (scale + 1e-8)
+    
+
+    def normalize_image(self, x: torch.Tensor, scale: torch.Tensor) -> torch.Tensor:
+        """
+        Args:
+            x: [B, H, W, T, C]
+            scale: [B, T]
+        """
+        return x / (scale.unsqueeze(1).unsqueeze(1).unsqueeze(-1) + 1e-8)
+
+
     def forward(self, y: torch.Tensor, physics, **kwargs):
         r"""
         Reconstructs a signal estimate from measurements y
@@ -251,17 +288,20 @@ class ArtifactRemovalCRNN(nn.Module):
             physics = physics.module
 
         x_init = physics.A_adjoint(y) # B,C,T,H,W
-        # mask = physics.mask.float() # B,C,T,H,W
+
+        # normalize k-space and image
+        scale = self.compute_image_rms(x_init)
+        y = self.normalize_kspace(y, scale)
+        x_init = self.normalize_image(x_init, scale)
+
         traj = physics.traj
         dcf = physics.dcf
 
         x_init = rearrange(x_init, 'b h w t c -> b w h t c')
-        
-        # x_init = x_init.permute(0, 4, 3, 2, 1) # -> B,W,H,T,C
-
         y = y.permute(0, 4, 3, 2, 1)
-        # mask = mask.permute(0, 4, 3, 2, 1)
         
         x_hat = self.backbone_net(x_init, y, traj, dcf) # B,W,H,T,C
+        x_hat = x_hat.permute(0, 4, 3, 2, 1) #B,C,T,H,W
 
-        return x_hat.permute(0, 4, 3, 2, 1) #B,C,T,H,W
+        # return normalized output
+        return x_hat, scale

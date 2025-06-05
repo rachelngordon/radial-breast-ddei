@@ -72,7 +72,7 @@ class RadialDCLayer(nn.Module):
         #     xrec_list = [self.AdjNUFFT(k_tensor[...,kt].contiguous(),
         #                         ktraj[...,kt].to(self.dtype).contiguous(), smaps=self.csmap, norm=self.norm) for kt in range(self.im_size[2])] 
         # else:
-
+ 
         xrec_list = [self.AdjNUFFT(k_tensor[...,kt].contiguous(),
                             ktraj[...,kt].to(self.dtype).contiguous(), norm=self.norm) for kt in range(self.im_size[2])] 
 
@@ -179,7 +179,7 @@ class RadialPhysics():
 
         # compute the density compensation function from trajectory
         dcf = np.sqrt(traj[..., 0] ** 2 + traj[..., 1] ** 2)
-        dcf = (torch.tensor(dcf).unsqueeze(0).unsqueeze(0).unsqueeze(0)) 
+        dcf = dcf.clone().detach().unsqueeze(0).unsqueeze(0).unsqueeze(0)
 
         # combine real and imaginary components in k-space trajectory
         traj = rearrange(traj, "r t i -> i r t").unsqueeze(0)

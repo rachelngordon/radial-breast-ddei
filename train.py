@@ -4,11 +4,13 @@ from radial_dclayer_singlecoil import RadialPhysics, RadialDCLayer
 from crnn import CRNN, ArtifactRemovalCRNN
 import torch
 from tqdm import tqdm
-from deepinv.loss.mc import MCLoss
+from deepinv.loss import MCLoss, EILoss
 from einops import rearrange
 import json
 import matplotlib.pyplot as plt
 import os
+from torchvision.transforms import InterpolationMode
+import deepinv as dinv
 
 
 # parameters: need to pass as command line arguments later
@@ -19,7 +21,10 @@ dataset_key = "ktspace"
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 start_epoch = 1
 epochs = 25
-save_interval = 1
+save_interval = 10
+exp_name = 'mc_loss_norm'
+output_dir = os.path.join('output', exp_name)
+os.makedirs(output_dir, exist_ok=True)
 
 # load data
 split_file = 'patient_splits.json'
@@ -82,14 +87,27 @@ backbone = CRNN(
 model = ArtifactRemovalCRNN(backbone_net=backbone).to(device)
 
 
-# define loss function and optimizer
-loss_fn = MCLoss()
+
+
+# define transformations
+# rotate = dinv.transform.Rotate(n_trans=1, interpolation_mode=InterpolationMode.BILINEAR)
+# tempad = dinv.transform.ShiftTime(n_trans=1)
+# diffeo = dinv.transform.CPABDiffeomorphism(n_trans=1, device=device)
+
+# define loss functions and optimizer
+mc_loss_fn = MCLoss()
+# ei_loss_fn = EILoss(tempad | (diffeo | rotate))
+
 optimizer = torch.optim.Adam(model.parameters(), lr=0.00005, betas = (0.9, 0.999), eps=0.000000001, weight_decay=0.0)
 
 
 # Training Loop
 train_mc_losses = []
 val_mc_losses = []
+train_ei_losses = []
+val_ei_losses = []
+
+
 
 for epoch in range(start_epoch, epochs+1):
 
@@ -97,6 +115,7 @@ for epoch in range(start_epoch, epochs+1):
     model.train()
 
     running_mc_loss = 0.0
+    running_ei_loss = 0.0
 
     train_loader_tqdm = tqdm(train_loader, desc=f"Epoch {epoch}/{epochs}  Training", unit="batch")
 
@@ -105,17 +124,25 @@ for epoch in range(start_epoch, epochs+1):
         optimizer.zero_grad()
 
         # expected k-space shape: (B C Ch TotSam T)
-        x_recon = model(kspace_batch.to(device), physics)
+        x_recon, scale = model(kspace_batch.to(device), physics)
 
         # expected k-space shape: (B C TotSam Ch T)
         y_meas = rearrange(kspace_batch, 'b c i s t -> b c s i t')
         x_recon = rearrange(x_recon, 'b t i h w -> b h w i t')
 
-        loss = loss_fn(y_meas.to(device), x_recon, physics)
+        # unnormalize output
+        unnorm_x_recon = x_recon * scale.unsqueeze(1).unsqueeze(1).unsqueeze(1)
 
-        running_mc_loss += loss.item()
+        
+        # NOTE: adding coil dim=1 for now to x_recon, will need to adjust for multi-coil implementation later
+        mc_loss = mc_loss_fn(y_meas.to(device), unnorm_x_recon.unsqueeze(1), physics)
+        # ei_loss = ei_loss_fn(x_recon, physics, model)
 
-        loss.backward()
+        running_mc_loss += mc_loss.item()
+        # running_ei_loss += ei_loss.item()
+
+        total_loss = mc_loss #+ ei_loss
+        total_loss.backward()
 
         optimizer.step()
 
@@ -159,25 +186,34 @@ for epoch in range(start_epoch, epochs+1):
     epoch_train_mc_loss = running_mc_loss / len(train_loader)
     train_mc_losses.append(epoch_train_mc_loss)
 
+    epoch_train_ei_loss = running_ei_loss / len(train_loader)
+    train_ei_losses.append(epoch_train_ei_loss)
+
 
     # Validation step
     model.eval()
     val_running_mc_loss = 0.0
+    val_running_ei_loss = 0.0
     val_loader_tqdm = tqdm(val_loader, desc=f"Epoch {epoch}/{epochs}  Validation", unit="batch", leave=False)
 
     with torch.no_grad():
         for val_kspace_batch in val_loader_tqdm:
 
             # expected k-space shape: (B C Ch TotSam T)
-            val_x_recon = model(val_kspace_batch.to(device), physics)
+            val_x_recon, scale = model(val_kspace_batch.to(device), physics)
 
             # expected k-space shape: (B C TotSam Ch T)
             val_y_meas = rearrange(val_kspace_batch, 'b c i s t -> b c s i t')
             val_x_recon = rearrange(val_x_recon, 'b t i h w -> b h w i t')
 
-            val_loss = loss_fn(val_y_meas.to(device), val_x_recon, physics)
+            # unnormalize output
+            unnorm_val_x_recon = val_x_recon * scale.unsqueeze(1).unsqueeze(1).unsqueeze(1)
 
-            val_running_mc_loss += val_loss.item()
+            val_mc_loss = mc_loss_fn(val_y_meas.to(device), unnorm_val_x_recon, physics)
+            # val_ei_loss = ei_loss_fn(val_x_recon, physics, model)
+
+            val_running_mc_loss += val_mc_loss.item()
+            # val_running_ei_loss += val_ei_loss.item()
 
             if epoch % save_interval == 0:
 
@@ -221,7 +257,11 @@ for epoch in range(start_epoch, epochs+1):
     epoch_val_mc_loss = val_running_mc_loss / len(val_loader)
     val_mc_losses.append(epoch_val_mc_loss)
 
+    # epoch_val_ei_loss = val_running_ei_loss / len(val_loader)
+    # val_ei_losses.append(epoch_val_ei_loss)
 
-    print(f'Epoch {epoch}: Training MC Loss: {epoch_train_mc_loss}, Validation SSIM Loss: {epoch_val_mc_loss}')
+
+    print(f'Epoch {epoch}: Training MC Loss: {epoch_train_mc_loss}, Validation MC Loss: {epoch_val_mc_loss}')
+    # print(f'Epoch {epoch}: Training EI Loss: {epoch_train_ei_loss}, Validation EI Loss: {epoch_val_ei_loss}')
 
 

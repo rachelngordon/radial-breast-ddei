@@ -4,6 +4,7 @@ from torch import Tensor
 import numpy as np
 from torchkbnufft import KbNufft, KbNufftAdjoint
 from einops import rearrange
+import deepinv as dinv
 
 
 class RadialDCLayer(nn.Module):
@@ -97,8 +98,13 @@ class RadialDCLayer(nn.Module):
         # need to implement for all timeframes still (either loop over them or pass all to NUFFT)
         A_x = self.apply_A(x, ktraj)
 
-        ## NOTE: check that this is necessary to rearrange (verify output shapes within the model)
-        y = rearrange(y, 'b t s i c -> b c s i t')
+        # NOTE: temporary fix, only works when Nrad is shifted forward one in shape
+        if y.shape[2] != 2:
+            y = rearrange(y, 'b t s i c -> b c s i t')
+        else:
+            y = rearrange(y, 'b t i s c -> b c s i t')
+
+
         k_dc = self.lambda_.to(x.device) * A_x + (1 - self.lambda_.to(x.device)) * y
 
         x_dc = self.apply_Adag(k_dc, ktraj, dcf)
@@ -110,7 +116,7 @@ class RadialDCLayer(nn.Module):
     
 
 
-class RadialPhysics():
+class RadialPhysics(dinv.physics.Physics):
     """
     Physics operator that obtains radial trajectory and performs NUFFT and Adjoint NUFFT on radial data for unrolled network.
     """
@@ -182,7 +188,7 @@ class RadialPhysics():
         dcf = dcf.clone().detach().unsqueeze(0).unsqueeze(0).unsqueeze(0)
 
         # combine real and imaginary components in k-space trajectory
-        traj = rearrange(traj, "r t i -> i r t").unsqueeze(0)
+        traj = rearrange(traj, "s t i -> i s t").unsqueeze(0)
 
 
         return traj, dcf
@@ -190,8 +196,11 @@ class RadialPhysics():
     
     def apply_dcf(self, y):
 
-		# multiply k-space data with dcomp
-        # y = rearrange(y, 'b c Nrad i t -> b c i Nrad t')
+        # NOTE: temporary fix, only works when Nrad is shifted forward one in shape
+        if y.shape[-2] != self.dcf.shape[-2]:
+            y = rearrange(y, 'b c s i t -> b c i s t')
+
+
         y = self.dcf * y
         y = y.permute(0, 1, 3, 2, 4) # shape: (1, 12, 11520, 2, 20)
 
@@ -206,9 +215,14 @@ class RadialPhysics():
         #     kdat_list = [self.NUFFT(x_tensor[...,kt].contiguous(),
         #                     self.ktraj_tensor[...,kt].contiguous(), smaps=self.csmap, norm=self.norm) for kt in range(self.im_size[2])]
         # else:
+        
+        # remove coil dimension if necessary for now
+        if len(x.shape) == 5:
+            x = x.unsqueeze(1)
+
         y = [self.NUFFT(x[...,kt].to(self.device).contiguous(),
                         self.traj[...,kt].to(self.device).contiguous(), norm=self.norm) for kt in range(self.im_size[2])]
-			
+
         y = torch.stack(y, dim=-1).to(self.dtype)
 		
         return y
@@ -252,35 +266,3 @@ class RadialPhysics():
 		
     def A_dagger(self, y: Tensor, **kwargs) -> torch.Tensor:
         return self.A_adjoint(y, **kwargs)
-
-    # def check_mask(self, mask: torch.Tensor = None, **kwargs) -> None:
-    #     r"""
-    #     Updates MRI mask and verifies mask shape to be B,C,T,H,W.
-
-    #     :param torch.nn.parameter.Parameter, float MRI subsampling mask.
-    #     """
-    #     while mask is not None and len(mask.shape) < 5:  # to B,C,T,H,W
-    #         mask = mask.unsqueeze(0)
-
-    #     return super().check_mask(mask=mask, device=self.device, three_d=self.three_d)
-
-    # def noise(self, x, **kwargs):
-    #     r"""
-    #     Incorporates noise into the measurements :math:`\tilde{y} = N(y)`
-
-    #     :param torch.Tensor x:  clean measurements
-    #     :return torch.Tensor: noisy measurements
-    #     """
-    #     return self.noise_model(x, **kwargs) * self.mask
-
-    # def to_static(self, mask: Optional[torch.Tensor] = None) -> MRI:
-    #     """Convert dynamic MRI to static MRI by removing time dimension.
-
-    #     :param torch.Tensor mask: new static MRI mask. If None, existing mask is flattened (summed) along the time dimension.
-    #     :return MRI: static MRI physics
-    #     """
-    #     return MRI(
-    #         mask=torch.clip(self.mask.sum(2), 0.0, 1.0) if mask is None else mask,
-    #         img_size=self.img_size,
-    #         device=self.device,
-    #     )

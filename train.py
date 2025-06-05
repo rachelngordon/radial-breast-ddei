@@ -1,6 +1,6 @@
-from ddei_data_loader import KSpaceSliceDataset
+from dataloader import KSpaceSliceDataset
 from torch.utils.data import DataLoader
-from radial_dclayer_singlecoil import RadialPhysics, RadialDCLayer
+from radial import RadialPhysics, RadialDCLayer
 from crnn import CRNN, ArtifactRemovalCRNN
 import torch
 from tqdm import tqdm
@@ -11,20 +11,21 @@ import matplotlib.pyplot as plt
 import os
 from torchvision.transforms import InterpolationMode
 import deepinv as dinv
+from utils import OverTime
 
 
 # parameters: need to pass as command line arguments later
 
 root_dir = "/ess/scratch/scratch1/rachelgordon/dce-12tf/binned_kspace"
-# root_dir = "/ess/scratch/scratch1/rachelgordon/fastMRI_breast_data/fastMRI_breast_IDS_001_010"
 dataset_key = "ktspace"
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 start_epoch = 1
 epochs = 25
-save_interval = 10
-exp_name = 'mc_loss_norm'
+save_interval = 1
+exp_name = 'mc_ei_loss_norm'
 output_dir = os.path.join('output', exp_name)
 os.makedirs(output_dir, exist_ok=True)
+use_ei_loss = True
 
 # load data
 split_file = 'patient_splits.json'
@@ -88,17 +89,24 @@ model = ArtifactRemovalCRNN(backbone_net=backbone).to(device)
 
 
 
-
-# define transformations
-# rotate = dinv.transform.Rotate(n_trans=1, interpolation_mode=InterpolationMode.BILINEAR)
-# tempad = dinv.transform.ShiftTime(n_trans=1)
-# diffeo = dinv.transform.CPABDiffeomorphism(n_trans=1, device=device)
-
 # define loss functions and optimizer
-mc_loss_fn = MCLoss()
-# ei_loss_fn = EILoss(tempad | (diffeo | rotate))
-
 optimizer = torch.optim.Adam(model.parameters(), lr=0.00005, betas = (0.9, 0.999), eps=0.000000001, weight_decay=0.0)
+mc_loss_fn = MCLoss()
+
+
+if use_ei_loss == True:
+    # define transformations
+    rotate = dinv.transform.Rotate(n_trans=1, interpolation_mode=InterpolationMode.BILINEAR)
+    tempad = dinv.transform.ShiftTime(n_trans=1)
+    diffeo = dinv.transform.CPABDiffeomorphism(n_trans=1, device=device)
+
+    spatial_per_frame = OverTime(rotate | diffeo)   # (B,C,T,H,W) in, same out
+    T = tempad | spatial_per_frame                  # final 5-D transform
+
+    ei_loss_fn = dinv.loss.EILoss(T, apply_noise=False)
+
+    # ei_loss_fn = EILoss(tempad | (diffeo | rotate))
+
 
 
 # Training Loop
@@ -123,8 +131,9 @@ for epoch in range(start_epoch, epochs+1):
 
         optimizer.zero_grad()
 
+
         # expected k-space shape: (B C Ch TotSam T)
-        x_recon, scale = model(kspace_batch.to(device), physics)
+        x_recon, scale = model(kspace_batch.to(device), physics, return_scale=True)
 
         # expected k-space shape: (B C TotSam Ch T)
         y_meas = rearrange(kspace_batch, 'b c i s t -> b c s i t')
@@ -133,15 +142,18 @@ for epoch in range(start_epoch, epochs+1):
         # unnormalize output
         unnorm_x_recon = x_recon * scale.unsqueeze(1).unsqueeze(1).unsqueeze(1)
 
-        
-        # NOTE: adding coil dim=1 for now to x_recon, will need to adjust for multi-coil implementation later
-        mc_loss = mc_loss_fn(y_meas.to(device), unnorm_x_recon.unsqueeze(1), physics)
-        # ei_loss = ei_loss_fn(x_recon, physics, model)
-
+        mc_loss = mc_loss_fn(y_meas.to(device), unnorm_x_recon, physics)
         running_mc_loss += mc_loss.item()
-        # running_ei_loss += ei_loss.item()
 
-        total_loss = mc_loss #+ ei_loss
+        if use_ei_loss == True:
+
+            ei_loss = ei_loss_fn(unnorm_x_recon, physics, model)
+            running_ei_loss += ei_loss.item()
+
+            total_loss = mc_loss + ei_loss
+        else:
+            total_loss = mc_loss
+
         total_loss.backward()
 
         optimizer.step()
@@ -169,18 +181,9 @@ for epoch in range(start_epoch, epochs+1):
                     ax.axis("off")
 
                 plt.tight_layout()
-                plt.savefig(f'output/train_sample_epoch_{epoch}.png')
+                plt.savefig(os.path.join(output_dir, f'train_sample_epoch_{epoch}.png'))
                 plt.close()
 
-
-                # Plot train + val losses
-                plt.plot(train_mc_losses, label='Training MC Loss')
-                plt.plot(val_mc_losses, label='Validation MC Loss')
-                plt.xlabel('Epoch')
-                plt.ylabel('Loss')
-                plt.legend()
-                plt.savefig(os.path.join('output', f'losses.png'))
-                plt.close()
 
     # average losses 
     epoch_train_mc_loss = running_mc_loss / len(train_loader)
@@ -200,7 +203,7 @@ for epoch in range(start_epoch, epochs+1):
         for val_kspace_batch in val_loader_tqdm:
 
             # expected k-space shape: (B C Ch TotSam T)
-            val_x_recon, scale = model(val_kspace_batch.to(device), physics)
+            val_x_recon, scale = model(val_kspace_batch.to(device), physics, return_scale=True)
 
             # expected k-space shape: (B C TotSam Ch T)
             val_y_meas = rearrange(val_kspace_batch, 'b c i s t -> b c s i t')
@@ -210,10 +213,11 @@ for epoch in range(start_epoch, epochs+1):
             unnorm_val_x_recon = val_x_recon * scale.unsqueeze(1).unsqueeze(1).unsqueeze(1)
 
             val_mc_loss = mc_loss_fn(val_y_meas.to(device), unnorm_val_x_recon, physics)
-            # val_ei_loss = ei_loss_fn(val_x_recon, physics, model)
-
             val_running_mc_loss += val_mc_loss.item()
-            # val_running_ei_loss += val_ei_loss.item()
+
+            if use_ei_loss == True:
+                val_ei_loss = ei_loss_fn(unnorm_val_x_recon, physics, model)
+                val_running_ei_loss += val_ei_loss.item()
 
             if epoch % save_interval == 0:
 
@@ -238,7 +242,7 @@ for epoch in range(start_epoch, epochs+1):
                     ax.axis("off")
 
                 plt.tight_layout()
-                plt.savefig(f'output/val_sample_epoch_{epoch}.png')
+                plt.savefig(os.path.join(output_dir, f'val_sample_epoch_{epoch}.png'))
                 plt.close()
 
 
@@ -246,10 +250,20 @@ for epoch in range(start_epoch, epochs+1):
                 plt.plot(train_mc_losses, label='Training MC Loss')
                 plt.plot(val_mc_losses, label='Validation MC Loss')
                 plt.xlabel('Epoch')
-                plt.ylabel('Loss')
+                plt.ylabel('MC Loss')
                 plt.legend()
-                plt.savefig(os.path.join('output', f'losses.png'))
+                plt.savefig(os.path.join(output_dir, f'mc_losses.png'))
                 plt.close()
+
+                if use_ei_loss == True:
+                    # Plot train + val losses
+                    plt.plot(train_ei_losses, label='Training EI Loss')
+                    plt.plot(val_ei_losses, label='Validation EI Loss')
+                    plt.xlabel('Epoch')
+                    plt.ylabel('EI Loss')
+                    plt.legend()
+                    plt.savefig(os.path.join(output_dir, f'ei_losses.png'))
+                    plt.close()
 
                 
 
@@ -257,11 +271,12 @@ for epoch in range(start_epoch, epochs+1):
     epoch_val_mc_loss = val_running_mc_loss / len(val_loader)
     val_mc_losses.append(epoch_val_mc_loss)
 
-    # epoch_val_ei_loss = val_running_ei_loss / len(val_loader)
-    # val_ei_losses.append(epoch_val_ei_loss)
-
-
     print(f'Epoch {epoch}: Training MC Loss: {epoch_train_mc_loss}, Validation MC Loss: {epoch_val_mc_loss}')
-    # print(f'Epoch {epoch}: Training EI Loss: {epoch_train_ei_loss}, Validation EI Loss: {epoch_val_ei_loss}')
+
+    if use_ei_loss == True:
+        epoch_val_ei_loss = val_running_ei_loss / len(val_loader)
+        val_ei_losses.append(epoch_val_ei_loss)
+
+        print(f'Epoch {epoch}: Training EI Loss: {epoch_train_ei_loss}, Validation EI Loss: {epoch_val_ei_loss}')
 
 

@@ -1,9 +1,7 @@
 import torch
 import torch.nn as nn
 from einops import rearrange
-
-# from ..utils.fft import *
-from radial_dclayer_singlecoil import RadialDCLayer
+from radial import RadialDCLayer
 
 
 class CRNN(nn.Module):
@@ -240,7 +238,6 @@ class ArtifactRemovalCRNN(nn.Module):
         super().__init__()
         self.backbone_net = backbone_net
 
-
     def compute_image_rms(self, x: torch.Tensor) -> torch.Tensor:
         """
         Args:
@@ -277,7 +274,7 @@ class ArtifactRemovalCRNN(nn.Module):
         return x / (scale.unsqueeze(1).unsqueeze(1).unsqueeze(-1) + 1e-8)
 
 
-    def forward(self, y: torch.Tensor, physics, **kwargs):
+    def forward(self, y: torch.Tensor, physics, return_scale: bool = False, **kwargs):
         r"""
         Reconstructs a signal estimate from measurements y
 
@@ -304,4 +301,8 @@ class ArtifactRemovalCRNN(nn.Module):
         x_hat = x_hat.permute(0, 4, 3, 2, 1) #B,C,T,H,W
 
         # return normalized output
-        return x_hat, scale
+        if return_scale == True:
+            return x_hat, scale
+        else:
+            x_hat = rearrange(x_hat, 'b t i h w -> b h w i t')
+            return x_hat

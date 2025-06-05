@@ -2,11 +2,11 @@
 
 # Parameters
 #SBATCH --cpus-per-task=4
-#SBATCH --error=train.err
-#SBATCH --output=train.out
+#SBATCH --error=train_ei_loss.err
+#SBATCH --output=train_ei_loss.out
 #SBATCH --exclude=''
 #SBATCH --gpus-per-node=1
-#SBATCH --job-name=train
+#SBATCH --job-name=train_ei_loss
 #SBATCH --mem-per-gpu=490000
 #SBATCH --nodes=1
 #SBATCH --ntasks-per-node=1

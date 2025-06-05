@@ -15,7 +15,7 @@ class KSpaceSliceDataset(Dataset):
       - Splits each volume into Z separate examples (one per slice).
       - Returns each slice as a torch.Tensor.
     """
-    def __init__(self, root_dir, patient_ids, dataset_key="kspace", file_pattern="*.h5"):
+    def __init__(self, root_dir, patient_ids, slice_idx=41, dataset_key="kspace", file_pattern="*.h5"):
         """
         Args:
             root_dir (str): Path to the folder containing all HDF5 k-space files.
@@ -25,47 +25,46 @@ class KSpaceSliceDataset(Dataset):
         super().__init__()
         self.root_dir = root_dir
         self.dataset_key = dataset_key
+        self.slice_idx = slice_idx
 
         # Find all matching HDF5 files under root_dir
         all_files = sorted(glob.glob(os.path.join(root_dir, file_pattern)))
         if len(all_files) == 0:
             raise RuntimeError(f"No files found in {root_dir} matching pattern {file_pattern}")
 
-        # If patient_ids is specified, filter file list by patient ID substring
-        if patient_ids is not None:
-            filtered = []
-            for fp in all_files:
-                fname = os.path.basename(fp)
-                # Check if any patient_id appears in the filename
-                if any(pid in fname for pid in patient_ids):
-                    filtered.append(fp)
-            self.file_list = filtered
-        else:
-            self.file_list = all_files
+        # filter file list by patient ID substring
+        filtered = []
+        for fp in all_files:
+            fname = os.path.basename(fp)
+            # Check if any patient_id appears in the filename
+            if any(pid in fname for pid in patient_ids):
+                filtered.append(fp)
+        self.file_list = filtered
+
 
         if len(self.file_list) == 0:
             raise RuntimeError("No files matched the provided patient_ids filter.")
 
         # Build a list of (file_path, slice_index) for every slice in every volume
-        self.slice_index_map = []
-        for fp in self.file_list:
-            with h5py.File(fp, "r") as f:
-                if self.dataset_key not in f:
-                    raise KeyError(f"Dataset key '{self.dataset_key}' not found in file {fp}")
-                ds = f[self.dataset_key]
-                num_slices = ds.shape[0]
+        # self.slice_index_map = []
+        # for fp in self.file_list:
+        #     with h5py.File(fp, "r") as f:
+        #         if self.dataset_key not in f:
+        #             raise KeyError(f"Dataset key '{self.dataset_key}' not found in file {fp}")
+        #         ds = f[self.dataset_key]
+        #         num_slices = ds.shape[0]
 
-            for z in range(num_slices):
-                self.slice_index_map.append((fp, z))
+        #     for z in range(num_slices):
+        #         self.slice_index_map.append((fp, z))
 
     def __len__(self):
-        return len(self.slice_index_map)
+        return len(self.file_list)
 
     def __getitem__(self, idx):
         """
         Returns a single slice of k-space as a torch.Tensor.
         """
-        file_path, slice_idx = self.slice_index_map[idx]
+        file_path = self.file_list[idx]
 
         # Open HDF5 and read only the requested slice
         with h5py.File(file_path, "r") as f:
@@ -73,7 +72,7 @@ class KSpaceSliceDataset(Dataset):
 
             # perform fft before extracting slice
             kspace_spatial_z = torch.fft.ifft(ds, dim=0, norm='ortho')
-            kspace_slice = kspace_spatial_z[slice_idx] 
+            kspace_slice = kspace_spatial_z[self.slice_idx] 
 
         # stack real and imaginary components
         real_part = kspace_slice.real

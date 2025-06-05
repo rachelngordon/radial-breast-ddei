@@ -26,9 +26,9 @@ split_file = 'patient_splits.json'
 with open(split_file, "r") as fp:
         splits = json.load(fp)
 
-# NOTE: select only a subset of the data for now
-train_patient_ids = splits["train"][:2]
-val_patient_ids   = splits["val"][:1]
+# NOTE: need to look into why I am only loading 88 training samples and not 192
+train_patient_ids = splits["train"]
+val_patient_ids   = splits["val"]
 
 
 train_dataset = KSpaceSliceDataset(

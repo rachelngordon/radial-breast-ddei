@@ -1,6 +1,6 @@
 from dataloader import KSpaceSliceDataset
 from torch.utils.data import DataLoader
-from radial import RadialPhysics, RadialDCLayer
+from radial import DynamicRadialPhysics, RadialDCLayer
 from crnn import CRNN, ArtifactRemovalCRNN
 import torch
 from tqdm import tqdm
@@ -16,7 +16,7 @@ from utils import OverTime
 
 # parameters: need to pass as command line arguments later
 
-root_dir = "/ess/scratch/scratch1/rachelgordon/dce-12tf/binned_kspace"
+root_dir = "/ess/scratch/scratch1/rachelgordon/dce-8tf/binned_kspace"
 dataset_key = "ktspace"
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 start_epoch = 1
@@ -71,8 +71,9 @@ val_loader = DataLoader(
 
 # define physics operators
 H, W = 320, 320
-N_time, N_spokes, N_samples, N_coils = 12, 24, 640, 1
-physics = RadialPhysics(im_size=(H, W, N_time), N_spokes=N_spokes, N_samples=N_samples, N_time=N_time, N_coils=N_coils)
+N_time, N_samples, N_coils = 8, 640, 1
+N_spokes = int(288 / N_time)
+physics = DynamicRadialPhysics(im_size=(H, W, N_time), N_spokes=N_spokes, N_samples=N_samples, N_time=N_time, N_coils=N_coils)
 
 
 # define model
@@ -101,12 +102,12 @@ if use_ei_loss == True:
     tempad = dinv.transform.ShiftTime(n_trans=1)
     diffeo = dinv.transform.CPABDiffeomorphism(n_trans=1, device=device)
 
-    # spatial_per_frame = OverTime(rotate | diffeo)   # (B,C,T,H,W) in, same out
+    ei_loss_fn = EILoss(tempad | (diffeo | rotate))
+
+        # spatial_per_frame = OverTime(rotate | diffeo)   # (B,C,T,H,W) in, same out
     # T = tempad | spatial_per_frame                  # final 5-D transform
 
     # ei_loss_fn = dinv.loss.EILoss(T, apply_noise=False)
-
-    ei_loss_fn = EILoss(tempad | (diffeo | rotate))
 
 
 
@@ -149,6 +150,7 @@ for epoch in range(start_epoch, epochs+1):
             # flatten batch dimension before transforms
             # B, C, T, H, W = unnorm_x_recon.shape
             # unnorm_x_recon = unnorm_x_recon.reshape(B * T, C, H, W)
+            unnorm_x_recon = rearrange(unnorm_x_recon, 'b c t h w -> b t c h w')
 
             print("ei loss image input shape: ", unnorm_x_recon.shape)
             

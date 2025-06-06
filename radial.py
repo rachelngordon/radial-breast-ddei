@@ -5,6 +5,7 @@ import numpy as np
 from torchkbnufft import KbNufft, KbNufftAdjoint
 from einops import rearrange
 import deepinv as dinv
+from deepinv.physics.time import TimeMixin
 
 
 class RadialDCLayer(nn.Module):
@@ -117,7 +118,7 @@ class RadialDCLayer(nn.Module):
     
 
 
-class RadialPhysics(dinv.physics.Physics):
+class DynamicRadialPhysics(dinv.physics.Physics, TimeMixin):
     """
     Physics operator that obtains radial trajectory and performs NUFFT and Adjoint NUFFT on radial data for unrolled network.
     """
@@ -133,7 +134,7 @@ class RadialPhysics(dinv.physics.Physics):
         Args:
             lambda_init (float): Init value of data consistency block (DCB)
         """
-        super(RadialPhysics, self).__init__()
+        super(DynamicRadialPhysics, self).__init__()
 
         self.norm = "ortho"
         self.dtype = torch.float
@@ -201,7 +202,6 @@ class RadialPhysics(dinv.physics.Physics):
         if y.shape[-2] != self.dcf.shape[-2]:
             y = rearrange(y, 'b c s i t -> b c i s t')
 
-
         y = self.dcf * y
         y = y.permute(0, 1, 3, 2, 4) # shape: (1, 12, 11520, 2, 20)
 
@@ -227,6 +227,8 @@ class RadialPhysics(dinv.physics.Physics):
                         self.traj[...,kt].to(self.device).contiguous(), norm=self.norm) for kt in range(self.im_size[2])]
 
         y = torch.stack(y, dim=-1).to(self.dtype)
+
+        print("output shape: ", y.shape)
 		
         return y
 

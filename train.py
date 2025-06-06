@@ -22,10 +22,11 @@ device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 start_epoch = 1
 epochs = 25
 save_interval = 1
-exp_name = 'mc_ei_loss_norm'
+exp_name = 'mc1e11_ei_loss_norm'
 output_dir = os.path.join('output', exp_name)
 os.makedirs(output_dir, exist_ok=True)
 use_ei_loss = True
+mc_loss_weight = 1e11
 
 # load data
 split_file = 'patient_splits.json'
@@ -133,6 +134,7 @@ for epoch in range(start_epoch, epochs+1):
 
 
         # expected k-space shape: (B C Ch TotSam T)
+        print("model input shape: ", kspace_batch.shape)
         x_recon, scale = model(kspace_batch.to(device), physics, return_scale=True)
 
         # expected k-space shape: (B C TotSam Ch T)
@@ -142,15 +144,18 @@ for epoch in range(start_epoch, epochs+1):
         # unnormalize output
         unnorm_x_recon = x_recon * scale.unsqueeze(1).unsqueeze(1).unsqueeze(1)
 
+        print("mc loss kspace input shape: ", y_meas.shape)
+        print("mc loss image input shape: ", unnorm_x_recon.shape)
         mc_loss = mc_loss_fn(y_meas.to(device), unnorm_x_recon, physics)
         running_mc_loss += mc_loss.item()
 
         if use_ei_loss == True:
 
+            print("ei loss image input shape: ", unnorm_x_recon.shape)
             ei_loss = ei_loss_fn(unnorm_x_recon, physics, model)
             running_ei_loss += ei_loss.item()
 
-            total_loss = mc_loss + ei_loss
+            total_loss = mc_loss * mc_loss_weight + ei_loss
         else:
             total_loss = mc_loss
 

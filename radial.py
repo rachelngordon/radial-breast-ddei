@@ -108,6 +108,7 @@ class RadialDCLayer(nn.Module):
         k_dc = self.lambda_.to(x.device) * A_x + (1 - self.lambda_.to(x.device)) * y
 
         x_dc = self.apply_Adag(k_dc, ktraj, dcf)
+        x_dc = rearrange(x_dc, "b c h w i t -> b h w t i c").squeeze(-1)
 
         return x_dc
 
@@ -215,6 +216,8 @@ class RadialPhysics(dinv.physics.Physics):
         #     kdat_list = [self.NUFFT(x_tensor[...,kt].contiguous(),
         #                     self.ktraj_tensor[...,kt].contiguous(), smaps=self.csmap, norm=self.norm) for kt in range(self.im_size[2])]
         # else:
+        print("input shape: ", x.shape)
+        x = rearrange(x, 'b i t h w -> b h w i t')
         
         # remove coil dimension if necessary for now
         if len(x.shape) == 5:
@@ -256,7 +259,7 @@ class RadialPhysics(dinv.physics.Physics):
 
         x = torch.stack(x,dim=-1)
 
-        x = rearrange(x, 'b c h w i t -> b w h t i c').squeeze(-1) # note: squeezing coil dimension for current single coil implementation
+        x = rearrange(x, 'b c h w i t -> b i t h w c').squeeze(-1) # note: squeezing coil dimension for current single coil implementation
 
         if mag:
             return torch.abs(x[..., 0] + 1j * x[..., 1])

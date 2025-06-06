@@ -81,8 +81,8 @@ datalayer = RadialDCLayer(
 )
 
 backbone = CRNN(
-    num_cascades=5,    # or whatever number of cascades you prefer
-    chans=64,          # hidden‐channel size (tune as needed)
+    num_cascades=2,
+    chans=64,
     datalayer=datalayer
 ).to(device)
 
@@ -101,12 +101,12 @@ if use_ei_loss == True:
     tempad = dinv.transform.ShiftTime(n_trans=1)
     diffeo = dinv.transform.CPABDiffeomorphism(n_trans=1, device=device)
 
-    spatial_per_frame = OverTime(rotate | diffeo)   # (B,C,T,H,W) in, same out
-    T = tempad | spatial_per_frame                  # final 5-D transform
+    # spatial_per_frame = OverTime(rotate | diffeo)   # (B,C,T,H,W) in, same out
+    # T = tempad | spatial_per_frame                  # final 5-D transform
 
-    ei_loss_fn = dinv.loss.EILoss(T, apply_noise=False)
+    # ei_loss_fn = dinv.loss.EILoss(T, apply_noise=False)
 
-    # ei_loss_fn = EILoss(tempad | (diffeo | rotate))
+    ei_loss_fn = EILoss(tempad | (diffeo | rotate))
 
 
 
@@ -132,26 +132,26 @@ for epoch in range(start_epoch, epochs+1):
 
         optimizer.zero_grad()
 
-
         # expected k-space shape: (B C Ch TotSam T)
-        print("model input shape: ", kspace_batch.shape)
         x_recon, scale = model(kspace_batch.to(device), physics, return_scale=True)
 
         # expected k-space shape: (B C TotSam Ch T)
         y_meas = rearrange(kspace_batch, 'b c i s t -> b c s i t')
-        x_recon = rearrange(x_recon, 'b t i h w -> b h w i t')
 
         # unnormalize output
-        unnorm_x_recon = x_recon * scale.unsqueeze(1).unsqueeze(1).unsqueeze(1)
+        unnorm_x_recon = x_recon * scale.unsqueeze(1).unsqueeze(-1).unsqueeze(-1)
 
-        print("mc loss kspace input shape: ", y_meas.shape)
-        print("mc loss image input shape: ", unnorm_x_recon.shape)
         mc_loss = mc_loss_fn(y_meas.to(device), unnorm_x_recon, physics)
         running_mc_loss += mc_loss.item()
 
         if use_ei_loss == True:
 
+            # flatten batch dimension before transforms
+            # B, C, T, H, W = unnorm_x_recon.shape
+            # unnorm_x_recon = unnorm_x_recon.reshape(B * T, C, H, W)
+
             print("ei loss image input shape: ", unnorm_x_recon.shape)
+            
             ei_loss = ei_loss_fn(unnorm_x_recon, physics, model)
             running_ei_loss += ei_loss.item()
 
@@ -212,7 +212,7 @@ for epoch in range(start_epoch, epochs+1):
 
             # expected k-space shape: (B C TotSam Ch T)
             val_y_meas = rearrange(val_kspace_batch, 'b c i s t -> b c s i t')
-            val_x_recon = rearrange(val_x_recon, 'b t i h w -> b h w i t')
+            # val_x_recon = rearrange(val_x_recon, 'b t i h w -> b h w i t')
 
             # unnormalize output
             unnorm_val_x_recon = val_x_recon * scale.unsqueeze(1).unsqueeze(1).unsqueeze(1)

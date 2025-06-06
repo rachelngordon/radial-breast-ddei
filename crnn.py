@@ -92,9 +92,7 @@ class CRNN(nn.Module):
             net['t%d_out' % i].contiguous()
             # print(net['t%d_out' % i].shape)
 
-            ## NOTE: squeeze removes coil dimension for now (single coil implementation)
-            net['t%d_out' % i] = self.dcs[i - 1](net['t%d_out' % i], y.permute(0, 2, 3, 4, 1), traj, dcf).squeeze(1).permute(0, 4, 1, 2, 3)
-
+            net['t%d_out' % i] = self.dcs[i - 1](net['t%d_out' % i], y.permute(0, 2, 3, 4, 1), traj, dcf).permute(0, 4, 1, 2, 3)
             #x: b w h t ch; y: b w h t ch; mask: b w h ch t -> x: b w h t ch -> x: b ch w h t
             #NOTE here mask has ch and t swapped which looks like a mistake.
             net['t%d_out' % i] = net['t%d_out' % i]
@@ -102,7 +100,6 @@ class CRNN(nn.Module):
             x = net['t%d_out' % i]
 
         out = net['t%d_out' % i]
-
         return out.permute(0, 2, 3, 4, 1) # b w h t ch
         #according to docstring, meant to be [b t w h ch], in which case before permute should've been [b ch t w h]
 
@@ -241,14 +238,12 @@ class ArtifactRemovalCRNN(nn.Module):
     def compute_image_rms(self, x: torch.Tensor) -> torch.Tensor:
         """
         Args:
-            x: Zero-filled images, shape [B, H, W, T, C]
+            x: Zero-filled images, shape [B, C, T, H, W]
         Returns:
             scale: Per-frame RMS scale, shape [B, T]
         """
         # Compute magnitude (for complex-valued images)
-        x_mag = torch.sqrt((x ** 2).sum(dim=-1))  # [B, H, W, T]
-        x_mag = rearrange(x_mag, 'b h w t -> b t h w')
-
+        x_mag = torch.sqrt((x ** 2).sum(dim=1))  # [B, T, H, W]
         rms = x_mag.flatten(2).pow(2).mean(dim=-1).sqrt()  # [B, T]
 
         return rms
@@ -268,10 +263,10 @@ class ArtifactRemovalCRNN(nn.Module):
     def normalize_image(self, x: torch.Tensor, scale: torch.Tensor) -> torch.Tensor:
         """
         Args:
-            x: [B, H, W, T, C]
+            x: [B, C, T, H, W]
             scale: [B, T]
         """
-        return x / (scale.unsqueeze(1).unsqueeze(1).unsqueeze(-1) + 1e-8)
+        return x / (scale.unsqueeze(1).unsqueeze(-1).unsqueeze(-1) + 1e-8)
 
 
     def forward(self, y: torch.Tensor, physics, return_scale: bool = False, **kwargs):
@@ -294,15 +289,16 @@ class ArtifactRemovalCRNN(nn.Module):
         traj = physics.traj
         dcf = physics.dcf
 
-        x_init = rearrange(x_init, 'b h w t c -> b w h t c')
+        x_init = x_init.permute(0, 4, 3, 2, 1) # -> B,W,H,T,C
         y = y.permute(0, 4, 3, 2, 1)
         
         x_hat = self.backbone_net(x_init, y, traj, dcf) # B,W,H,T,C
+
         x_hat = x_hat.permute(0, 4, 3, 2, 1) #B,C,T,H,W
 
         # return normalized output
         if return_scale == True:
             return x_hat, scale
         else:
-            x_hat = rearrange(x_hat, 'b t i h w -> b h w i t')
+            #x_hat = rearrange(x_hat, 'b t i h w -> b h w i t')
             return x_hat

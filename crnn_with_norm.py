@@ -1,7 +1,6 @@
 import torch
 import torch.nn as nn
-
-
+from einops import rearrange
 from radial import RadialDCLayer
 
 
@@ -10,7 +9,7 @@ class CRNN(nn.Module):
             self,
             num_cascades: int = 10,
             chans: int = 64,
-            datalayer=RadialDCLayer(im_size=(320, 320, 8)),
+            datalayer=RadialDCLayer(im_size=(320,320,1)),
     ):
         super().__init__()
 
@@ -34,7 +33,7 @@ class CRNN(nn.Module):
             dcs.append(self.datalayer)
         self.dcs = dcs
 
-    def forward(self, x, y, mask):
+    def forward(self, x, y, traj, dcf):
         """
         Args:
             x: Input image, shape (b, w, h, t, ch)
@@ -92,7 +91,8 @@ class CRNN(nn.Module):
             net['t%d_out' % i] = net['t%d_out' % i].permute(1, 3, 4, 0, 2) #b w h t ch
             net['t%d_out' % i].contiguous()
             # print(net['t%d_out' % i].shape)
-            net['t%d_out' % i] = self.dcs[i - 1](net['t%d_out' % i], y.permute(0, 2, 3, 4, 1), mask).permute(0, 4, 1, 2, 3)
+
+            net['t%d_out' % i] = self.dcs[i - 1](net['t%d_out' % i], y.permute(0, 2, 3, 4, 1), traj, dcf).permute(0, 4, 1, 2, 3)
             #x: b w h t ch; y: b w h t ch; mask: b w h ch t -> x: b w h t ch -> x: b ch w h t
             #NOTE here mask has ch and t swapped which looks like a mistake.
             net['t%d_out' % i] = net['t%d_out' % i]
@@ -100,7 +100,6 @@ class CRNN(nn.Module):
             x = net['t%d_out' % i]
 
         out = net['t%d_out' % i]
-
         return out.permute(0, 2, 3, 4, 1) # b w h t ch
         #according to docstring, meant to be [b t w h ch], in which case before permute should've been [b ch t w h]
 
@@ -187,6 +186,10 @@ class BCRNNlayer(nn.Module):
         Returns:
             Output tensor of shape `(t, b, hidden_size, h, w)`.
         """
+        
+        if input.shape[0] == 2 and 2 not in input.shape[1:]:
+            input = rearrange(input, 'i b t h w -> t b i h w')
+
         t, b, ch, h, w = input.shape
         size_h = [b, self.hidden_size, h, w]
 
@@ -232,7 +235,41 @@ class ArtifactRemovalCRNN(nn.Module):
         super().__init__()
         self.backbone_net = backbone_net
 
-    def forward(self, y: torch.Tensor, physics, **kwargs):
+    def compute_image_rms(self, x: torch.Tensor) -> torch.Tensor:
+        """
+        Args:
+            x: Zero-filled images, shape [B, C, T, H, W]
+        Returns:
+            scale: Per-frame RMS scale, shape [B, T]
+        """
+        # Compute magnitude (for complex-valued images)
+        x_mag = torch.sqrt((x ** 2).sum(dim=1))  # [B, T, H, W]
+        rms = x_mag.flatten(2).pow(2).mean(dim=-1).sqrt()  # [B, T]
+
+        return rms
+    
+    def normalize_kspace(self, y: torch.Tensor, scale: torch.Tensor) -> torch.Tensor:
+        """
+        Args:
+            y: [B, C=1, 2, Nrad, T – complex k-space
+            scale: [B, T] – RMS scale per frame from zero-filled image
+        """
+        B, T = y.shape[0], y.shape[-1]
+        scale = scale.view(B, 1, 1, 1, T)
+
+        return y / (scale + 1e-8)
+    
+
+    def normalize_image(self, x: torch.Tensor, scale: torch.Tensor) -> torch.Tensor:
+        """
+        Args:
+            x: [B, C, T, H, W]
+            scale: [B, T]
+        """
+        return x / (scale.unsqueeze(1).unsqueeze(-1).unsqueeze(-1) + 1e-8)
+
+
+    def forward(self, y: torch.Tensor, physics, return_scale: bool = False, **kwargs):
         r"""
         Reconstructs a signal estimate from measurements y
 
@@ -243,12 +280,27 @@ class ArtifactRemovalCRNN(nn.Module):
             physics = physics.module
 
         x_init = physics.A_adjoint(y) # B,C,T,H,W
-        mask = physics.mask.float() # B,C,T,H,W
+
+        # normalize k-space and image
+        scale = self.compute_image_rms(x_init)
+        y = self.normalize_kspace(y, scale)
+        x_init = self.normalize_image(x_init, scale)
+
+        traj = physics.traj
+        dcf = physics.dcf
 
         x_init = x_init.permute(0, 4, 3, 2, 1) # -> B,W,H,T,C
         y = y.permute(0, 4, 3, 2, 1)
-        mask = mask.permute(0, 4, 3, 2, 1)
         
-        x_hat = self.backbone_net(x_init, y, mask) # B,W,H,T,C
+        x_hat = self.backbone_net(x_init, y, traj, dcf) # B,W,H,T,C
 
-        return x_hat.permute(0, 4, 3, 2, 1) #B,C,T,H,W
+        x_hat = x_hat.permute(0, 4, 3, 2, 1) #B,C,T,H,W
+
+        print("model output shape: ", x_hat.shape)
+
+        # return normalized output
+        if return_scale == True:
+            return x_hat, scale
+        else:
+            #x_hat = rearrange(x_hat, 'b t i h w -> b h w i t')
+            return x_hat

@@ -4,14 +4,15 @@ from radial import DynamicRadialPhysics, RadialDCLayer
 from crnn import CRNN, ArtifactRemovalCRNN
 import torch
 from tqdm import tqdm
-from deepinv.loss import MCLoss, EILoss
+from deepinv.loss import MCLoss#, EILoss
 from einops import rearrange
 import json
 import matplotlib.pyplot as plt
 import os
 from torchvision.transforms import InterpolationMode
 import deepinv as dinv
-from utils import OverTime
+from ei import EILoss
+
 
 
 # parameters: need to pass as command line arguments later
@@ -22,11 +23,11 @@ device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 start_epoch = 1
 epochs = 25
 save_interval = 1
-exp_name = 'mc1e11_ei_loss_norm'
+exp_name = 'mc_ei_loss_norm'
 output_dir = os.path.join('output', exp_name)
 os.makedirs(output_dir, exist_ok=True)
 use_ei_loss = True
-mc_loss_weight = 1e11
+mc_loss_weight = 1
 
 # load data
 split_file = 'patient_splits.json'
@@ -57,7 +58,7 @@ train_loader = DataLoader(
         train_dataset,
         batch_size=1,
         shuffle=True,
-        num_workers=4
+        num_workers=1
     )
 
 
@@ -65,7 +66,7 @@ val_loader = DataLoader(
         val_dataset,
         batch_size=1,
         shuffle=True,
-        num_workers=4
+        num_workers=1
     )
 
 
@@ -134,27 +135,20 @@ for epoch in range(start_epoch, epochs+1):
         optimizer.zero_grad()
 
         # expected k-space shape: (B C Ch TotSam T)
-        x_recon, scale = model(kspace_batch.to(device), physics, return_scale=True)
+        x_recon = model(kspace_batch.to(device), physics)
 
         # expected k-space shape: (B C TotSam Ch T)
         y_meas = rearrange(kspace_batch, 'b c i s t -> b c s i t')
 
         # unnormalize output
-        unnorm_x_recon = x_recon * scale.unsqueeze(1).unsqueeze(-1).unsqueeze(-1)
+        # unnorm_x_recon = x_recon * scale.unsqueeze(1).unsqueeze(-1).unsqueeze(-1)
 
-        mc_loss = mc_loss_fn(y_meas.to(device), unnorm_x_recon, physics)
+        mc_loss = mc_loss_fn(y_meas.to(device), x_recon, physics)
         running_mc_loss += mc_loss.item()
 
         if use_ei_loss == True:
 
-            # flatten batch dimension before transforms
-            # B, C, T, H, W = unnorm_x_recon.shape
-            # unnorm_x_recon = unnorm_x_recon.reshape(B * T, C, H, W)
-            unnorm_x_recon = rearrange(unnorm_x_recon, 'b c t h w -> b t c h w')
-
-            print("ei loss image input shape: ", unnorm_x_recon.shape)
-            
-            ei_loss = ei_loss_fn(unnorm_x_recon, physics, model)
+            ei_loss = ei_loss_fn(x_recon, physics, model)
             running_ei_loss += ei_loss.item()
 
             total_loss = mc_loss * mc_loss_weight + ei_loss
@@ -167,10 +161,10 @@ for epoch in range(start_epoch, epochs+1):
 
         if epoch % save_interval == 0:
 
-                x_recon_mag = torch.abs(x_recon[..., 0, :] + 1j * x_recon[..., 1, :])
+                x_recon_mag = torch.abs(x_recon[:, 0, ...] + 1j * x_recon[:, 1, ...])
 
                 batch_idx = 0
-                n_timeframes = x_recon_mag.shape[-1]
+                n_timeframes = x_recon_mag.shape[1]
 
                 # Create a row of subplots, one for each time‐frame
                 fig, axes = plt.subplots(
@@ -181,7 +175,7 @@ for epoch in range(start_epoch, epochs+1):
                 )
 
                 for t in range(n_timeframes):
-                    img = x_recon_mag[batch_idx, :, :, t].detach().cpu().numpy()
+                    img = x_recon_mag[batch_idx, t, :, :].detach().cpu().numpy()
                     ax = axes[0, t]
                     ax.imshow(img, cmap='gray')
                     ax.set_title(f"T = {t}")
@@ -210,28 +204,28 @@ for epoch in range(start_epoch, epochs+1):
         for val_kspace_batch in val_loader_tqdm:
 
             # expected k-space shape: (B C Ch TotSam T)
-            val_x_recon, scale = model(val_kspace_batch.to(device), physics, return_scale=True)
+            val_x_recon = model(val_kspace_batch.to(device), physics, return_scale=True)
 
             # expected k-space shape: (B C TotSam Ch T)
             val_y_meas = rearrange(val_kspace_batch, 'b c i s t -> b c s i t')
             # val_x_recon = rearrange(val_x_recon, 'b t i h w -> b h w i t')
 
             # unnormalize output
-            unnorm_val_x_recon = val_x_recon * scale.unsqueeze(1).unsqueeze(1).unsqueeze(1)
+            # unnorm_val_x_recon = val_x_recon * scale.unsqueeze(1).unsqueeze(1).unsqueeze(1)
 
-            val_mc_loss = mc_loss_fn(val_y_meas.to(device), unnorm_val_x_recon, physics)
+            val_mc_loss = mc_loss_fn(val_y_meas.to(device), val_x_recon, physics)
             val_running_mc_loss += val_mc_loss.item()
 
             if use_ei_loss == True:
-                val_ei_loss = ei_loss_fn(unnorm_val_x_recon, physics, model)
+                val_ei_loss = ei_loss_fn(val_x_recon, physics, model)
                 val_running_ei_loss += val_ei_loss.item()
 
             if epoch % save_interval == 0:
 
-                val_x_recon_mag = torch.abs(val_x_recon[..., 0, :] + 1j * val_x_recon[..., 1, :])
+                val_x_recon_mag = torch.abs(val_x_recon[:, 0, ...] + 1j * val_x_recon[:, 1, ...])
 
                 batch_idx = 0
-                n_timeframes = val_x_recon_mag.shape[-1]
+                n_timeframes = val_x_recon_mag.shape[1]
 
                 # Create a row of subplots, one for each time‐frame
                 fig, axes = plt.subplots(
@@ -242,7 +236,7 @@ for epoch in range(start_epoch, epochs+1):
                 )
 
                 for t in range(n_timeframes):
-                    img = val_x_recon_mag[batch_idx, :, :, t].cpu().numpy()
+                    img = val_x_recon_mag[batch_idx, t, :, :].cpu().numpy()
                     ax = axes[0, t]
                     ax.imshow(img, cmap='gray')
                     ax.set_title(f"T = {t}")

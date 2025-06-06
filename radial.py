@@ -35,7 +35,11 @@ class RadialDCLayer(nn.Module):
 
         self.norm = "ortho"
         self.dtype = torch.float
+        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         self.im_size = im_size
+        self.N_spokes = 36
+        self.N_time = 8
+        self.N_samples = 640
 
         spokelength=im_size[1]*2
         grid_size = (int(spokelength),int(spokelength))
@@ -43,6 +47,50 @@ class RadialDCLayer(nn.Module):
         self.NUFFT =  KbNufft(im_size=im_size[:2], grid_size=grid_size).to(self.dtype)
         self.AdjNUFFT = KbNufftAdjoint(im_size=im_size[:2], grid_size=grid_size).to(self.dtype)
 
+        self.base_res = self.N_samples // 2
+        self.traj, self.dcf = self.get_traj_and_dcf()
+
+        self.traj = self.traj.to(self.device)
+        self.dcf = self.dcf.to(self.device)
+
+
+    def get_traj_and_dcf(self, gind=1):
+
+        N_tot_spokes = self.N_spokes * self.N_time
+
+        N_samples = self.base_res * 2
+
+        base_lin = np.arange(N_samples).reshape(1, -1) - self.base_res
+
+        tau = 0.5 * (1 + 5**0.5)
+        base_rad = np.pi / (gind + tau - 1)
+
+        base_rot = np.arange(N_tot_spokes).reshape(-1, 1) * base_rad
+
+        traj = np.zeros((N_tot_spokes, N_samples, 2))
+
+        traj[..., 0] = np.cos(base_rot) @ base_lin
+        traj[..., 1] = np.sin(base_rot) @ base_lin
+
+        traj = traj / 2
+
+        traj = traj.reshape(self.N_time, self.N_spokes, N_samples, 2)
+
+        traj = rearrange(traj, 't sp sam i -> (sp sam) t i')
+
+        traj = traj / np.mean(np.abs(traj))
+        traj = torch.tensor(traj)*torch.tensor([1, -1])
+
+        # compute the density compensation function from trajectory
+        dcf = np.sqrt(traj[..., 0] ** 2 + traj[..., 1] ** 2)
+        dcf = dcf.clone().detach().unsqueeze(0).unsqueeze(0).unsqueeze(0)
+
+        # combine real and imaginary components in k-space trajectory
+        traj = rearrange(traj, "s t i -> i s t").unsqueeze(0)
+
+
+        return traj, dcf
+    
     # forward/adjoint operator functions adapted from: https://github.com/koflera/DynamicRadCineMRI
     def apply_A(self, x_tensor, ktraj):
 		
@@ -94,10 +142,10 @@ class RadialDCLayer(nn.Module):
 		
         return xrec_tensor
 
-    def forward(self, x, y, ktraj, dcf):
+    def forward(self, x, y, mask):
 
         # need to implement for all timeframes still (either loop over them or pass all to NUFFT)
-        A_x = self.apply_A(x, ktraj)
+        A_x = self.apply_A(x, self.traj)
 
         # NOTE: temporary fix, only works when Nrad is shifted forward one in shape
         if y.shape[2] != 2:
@@ -106,9 +154,10 @@ class RadialDCLayer(nn.Module):
             y = rearrange(y, 'b t i s c -> b c s i t')
 
 
-        k_dc = self.lambda_.to(x.device) * A_x + (1 - self.lambda_.to(x.device)) * y
+        # k_dc = self.lambda_.to(x.device) * A_x + (1 - self.lambda_.to(x.device)) * y
+        k_dc = (1 - mask.to(x.device)) * A_x + mask.to(x.device) * (self.lambda_.to(x.device) * A_x + (1 - self.lambda_.to(x.device)) * y)
 
-        x_dc = self.apply_Adag(k_dc, ktraj, dcf)
+        x_dc = self.apply_Adag(k_dc, self.traj, self.dcf)
         x_dc = rearrange(x_dc, "b c h w i t -> b h w t i c").squeeze(-1)
 
         return x_dc
@@ -144,6 +193,8 @@ class DynamicRadialPhysics(dinv.physics.Physics, TimeMixin):
         self.N_samples = N_samples
         self.N_time = N_time
         self.N_coils = N_coils
+        # FIXME hack assumes B=1, need to specify batch size
+        self.mask = torch.ones(1, N_time, 2, N_samples*N_spokes, 1)  # B,C,T,H,W
 
         spokelength=im_size[1]*2
         grid_size = (int(spokelength),int(spokelength))
@@ -216,8 +267,13 @@ class DynamicRadialPhysics(dinv.physics.Physics, TimeMixin):
         #     kdat_list = [self.NUFFT(x_tensor[...,kt].contiguous(),
         #                     self.ktraj_tensor[...,kt].contiguous(), smaps=self.csmap, norm=self.norm) for kt in range(self.im_size[2])]
         # else:
-        print("input shape: ", x.shape)
-        x = rearrange(x, 'b i t h w -> b h w i t')
+
+        if len(x.shape) == 5:
+            x = rearrange(x, 'b i t h w -> b h w i t')
+        elif len(x.shape) == 4:
+            # NOTE: only works for batch size 1
+            x = x.unsqueeze(0)
+            x = rearrange(x, 'b t i h w -> b h w i t')
         
         # remove coil dimension if necessary for now
         if len(x.shape) == 5:
@@ -227,8 +283,6 @@ class DynamicRadialPhysics(dinv.physics.Physics, TimeMixin):
                         self.traj[...,kt].to(self.device).contiguous(), norm=self.norm) for kt in range(self.im_size[2])]
 
         y = torch.stack(y, dim=-1).to(self.dtype)
-
-        print("output shape: ", y.shape)
 		
         return y
 

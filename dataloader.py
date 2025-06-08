@@ -1,10 +1,11 @@
-import os
 import glob
+import os
+
+import h5py
 import numpy as np
 import torch
-from torch.utils.data import Dataset, DataLoader
-import h5py
-from einops import rearrange
+from torch.utils.data import DataLoader, Dataset
+
 
 class KSpaceSliceDataset(Dataset):
     """
@@ -15,7 +16,15 @@ class KSpaceSliceDataset(Dataset):
       - Splits each volume into Z separate examples (one per slice).
       - Returns each slice as a torch.Tensor.
     """
-    def __init__(self, root_dir, patient_ids, slice_idx=41, dataset_key="kspace", file_pattern="*.h5"):
+
+    def __init__(
+        self,
+        root_dir,
+        patient_ids,
+        slice_idx=41,
+        dataset_key="kspace",
+        file_pattern="*.h5",
+    ):
         """
         Args:
             root_dir (str): Path to the folder containing all HDF5 k-space files.
@@ -30,7 +39,9 @@ class KSpaceSliceDataset(Dataset):
         # Find all matching HDF5 files under root_dir
         all_files = sorted(glob.glob(os.path.join(root_dir, file_pattern)))
         if len(all_files) == 0:
-            raise RuntimeError(f"No files found in {root_dir} matching pattern {file_pattern}")
+            raise RuntimeError(
+                f"No files found in {root_dir} matching pattern {file_pattern}"
+            )
 
         # filter file list by patient ID substring
         filtered = []
@@ -40,7 +51,6 @@ class KSpaceSliceDataset(Dataset):
             if any(pid in fname for pid in patient_ids):
                 filtered.append(fp)
         self.file_list = filtered
-
 
         if len(self.file_list) == 0:
             raise RuntimeError("No files matched the provided patient_ids filter.")
@@ -63,29 +73,29 @@ class KSpaceSliceDataset(Dataset):
     def __getitem__(self, idx):
         """
         Returns a single slice of k-space as a torch.Tensor.
+        The output shape will be the standard (C=2, T, S, I) where C is [real, imag].
         """
         file_path = self.file_list[idx]
 
-        # Open HDF5 and read only the requested slice
         with h5py.File(file_path, "r") as f:
             ds = torch.tensor(f[self.dataset_key][:])
+            kspace_spatial_z = torch.fft.ifft(ds, dim=0, norm="ortho")
+            kspace_slice = kspace_spatial_z[self.slice_idx]
 
-            # perform fft before extracting slice
-            kspace_spatial_z = torch.fft.ifft(ds, dim=0, norm='ortho')
-            kspace_slice = kspace_spatial_z[self.slice_idx] 
+        # Select the first coil
+        kspace_single_coil = kspace_slice[:, 0, :, :]  # Shape: (T, S, I)
 
-        # stack real and imaginary components
-        real_part = kspace_slice.real
-        imag_part = kspace_slice.imag
+        # Separate real and imaginary components
+        real_part = kspace_single_coil.real
+        imag_part = kspace_single_coil.imag
 
-        kspace_stack = torch.stack((real_part, imag_part), axis=-1).float()
+        # Stack them along a new 'channel' dimension (dim=0).
+        # This creates the final, standard (C=2, T, S, I) format.
+        kspace_final = torch.stack([real_part, imag_part], dim=0).float()
 
-        # select single coil (FOR NOW) but keep coil dimension
-        kspace_stack = kspace_stack[:, 0, ...].unsqueeze(1)
-
-        kspace_stack = rearrange(kspace_stack, 't c sp sam i -> c i (sp sam) t')
-
-        return kspace_stack
+        # The final shape is (2, num_timeframes, num_spokes, num_samples)
+        # e.g., (2, 8, 36, 640)
+        return kspace_final
 
 
 # ----------------------------
@@ -110,9 +120,7 @@ if __name__ == "__main__":
         return (real + 1j * imag).astype("complex64")
 
     dataset = KSpaceSliceDataset(
-        root_dir=root_dir,
-        dataset_key=dataset_key,
-        file_pattern="*.h5"
+        root_dir=root_dir, dataset_key=dataset_key, file_pattern="*.h5"
     )
 
     # 4) Wrap in DataLoader
@@ -127,6 +135,8 @@ if __name__ == "__main__":
     # 5) Iterate and inspect
     for batch_idx, kspace_batch in enumerate(loader):
         # kspace_batch.dtype could be torch.float32 or torch.complex64, depending on transform
-        print(f"Batch {batch_idx}: k-space batch shape = {kspace_batch.shape}, dtype = {kspace_batch.dtype}")
+        print(
+            f"Batch {batch_idx}: k-space batch shape = {kspace_batch.shape}, dtype = {kspace_batch.dtype}"
+        )
         # Now feed `kspace_batch` into your DDEI model or DC layer, etc.
         break

@@ -1,327 +1,176 @@
+import deepinv as dinv
+import numpy as np
 import torch
 import torch.nn as nn
-from torch import Tensor
-import numpy as np
-from torchkbnufft import KbNufft, KbNufftAdjoint
-from einops import rearrange
-import deepinv as dinv
 from deepinv.physics.time import TimeMixin
+from einops import rearrange
+from torchkbnufft import KbNufft, KbNufftAdjoint
 
 
-class RadialDCLayer(nn.Module):
-    """
-        Radial Data Consistency layer from DC-CNN, apply for single coil mainly
-
-        Expected Input Shapes: 
-            im_size: (H, W, Ntime)
-            x: (1, 1, H, W, 2, Ntime)
-            y: (1, 1, Nrad, 2, Ntime)
-            traj: (1, 2, Nrad (spokes * samples), Ntime)
-            dcf: (1, 1, 1, Nrad, Ntime)
-    """
-    def __init__(
-        self, 
-        im_size,
-        lambda_init=np.log(np.exp(1)-1.)/1., 
-        learnable=True
-        ):
-        """
-        Args:
-            lambda_init (float): Init value of data consistency block (DCB)
-        """
-        super(RadialDCLayer, self).__init__()
-        self.learnable = learnable
-        self.lambda_ = nn.Parameter(torch.ones(1) * lambda_init, requires_grad=self.learnable)
-
-        self.norm = "ortho"
-        self.dtype = torch.float
-        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-        self.im_size = im_size
-        self.N_spokes = 36
-        self.N_time = 8
-        self.N_samples = 640
-
-        spokelength=im_size[1]*2
-        grid_size = (int(spokelength),int(spokelength))
-
-        self.NUFFT =  KbNufft(im_size=im_size[:2], grid_size=grid_size).to(self.dtype)
-        self.AdjNUFFT = KbNufftAdjoint(im_size=im_size[:2], grid_size=grid_size).to(self.dtype)
-
-        self.base_res = self.N_samples // 2
-        self.traj, self.dcf = self.get_traj_and_dcf()
-
-        self.traj = self.traj.to(self.device)
-        self.dcf = self.dcf.to(self.device)
+def to_torch_complex(x: torch.Tensor):
+    """(B, 2, ...) real -> (B, ...) complex"""
+    assert x.shape[1] == 2, (
+        f"Input tensor must have 2 channels (real, imag), but got shape {x.shape}"
+    )
+    return torch.view_as_complex(rearrange(x, "b c ... -> b ... c").contiguous())
 
 
-    def get_traj_and_dcf(self, gind=1):
-
-        N_tot_spokes = self.N_spokes * self.N_time
-
-        N_samples = self.base_res * 2
-
-        base_lin = np.arange(N_samples).reshape(1, -1) - self.base_res
-
-        tau = 0.5 * (1 + 5**0.5)
-        base_rad = np.pi / (gind + tau - 1)
-
-        base_rot = np.arange(N_tot_spokes).reshape(-1, 1) * base_rad
-
-        traj = np.zeros((N_tot_spokes, N_samples, 2))
-
-        traj[..., 0] = np.cos(base_rot) @ base_lin
-        traj[..., 1] = np.sin(base_rot) @ base_lin
-
-        traj = traj / 2
-
-        traj = traj.reshape(self.N_time, self.N_spokes, N_samples, 2)
-
-        traj = rearrange(traj, 't sp sam i -> (sp sam) t i')
-
-        traj = traj / np.mean(np.abs(traj))
-        traj = torch.tensor(traj)*torch.tensor([1, -1])
-
-        # compute the density compensation function from trajectory
-        dcf = np.sqrt(traj[..., 0] ** 2 + traj[..., 1] ** 2)
-        dcf = dcf.clone().detach().unsqueeze(0).unsqueeze(0).unsqueeze(0)
-
-        # combine real and imaginary components in k-space trajectory
-        traj = rearrange(traj, "s t i -> i s t").unsqueeze(0)
+def from_torch_complex(x: torch.Tensor):
+    """(B, ...) complex -> (B, 2, ...) real"""
+    return rearrange(torch.view_as_real(x), "b ... c -> b c ...").contiguous()
 
 
-        return traj, dcf
-    
-    # forward/adjoint operator functions adapted from: https://github.com/koflera/DynamicRadCineMRI
-    def apply_A(self, x_tensor, ktraj):
-		
-		#for each time point apply the forward model;
-        # if self.csmap is not None:
-        #     kdat_list = [self.NUFFT(x_tensor[...,kt].contiguous(),
-        #                     self.ktraj_tensor[...,kt].contiguous(), smaps=self.csmap, norm=self.norm) for kt in range(self.im_size[2])]
-        # else:
-
-        if x_tensor.shape[-1] == 2:
-            x_tensor = rearrange(x_tensor, 'b h w t i -> b h w i t')
-
-        if len(x_tensor.shape) == 5:
-            x_tensor = x_tensor.unsqueeze(1)
-
-        kdat_list = [self.NUFFT(x_tensor[...,kt].contiguous(),
-                        ktraj[...,kt].contiguous(), norm=self.norm) for kt in range(self.im_size[2])]
-			
-        kdat_tensor = torch.stack(kdat_list,dim=-1)
-		
-        return kdat_tensor
-    
-    def apply_AH(self, k_tensor, ktraj):
-
-        k_tensor = k_tensor.to(self.dtype)
-
-        #for each time point apply the adjoint NUFFT-operator;
-        # if self.csmap is not None:
-        #     xrec_list = [self.AdjNUFFT(k_tensor[...,kt].contiguous(),
-        #                         ktraj[...,kt].to(self.dtype).contiguous(), smaps=self.csmap, norm=self.norm) for kt in range(self.im_size[2])] 
-        # else:
- 
-        xrec_list = [self.AdjNUFFT(k_tensor[...,kt].contiguous(),
-                            ktraj[...,kt].to(self.dtype).contiguous(), norm=self.norm) for kt in range(self.im_size[2])] 
-
-        xrec_tensor = torch.stack(xrec_list,dim=-1)
-
-        return xrec_tensor
-
-    def apply_Adag(self, k_tensor, ktraj, dcf):
-		
-		# multiply k-space data with dcomp
-        k_tensor = rearrange(k_tensor, 'b c Nrad i t -> b c i Nrad t')
-        dcomp_k_tensor = dcf * k_tensor
-        dcomp_k_tensor = dcomp_k_tensor.permute(0, 1, 3, 2, 4) # shape: (1, 12, 11520, 2, 20)
-
-		# apply adjoint
-        xrec_tensor = self.apply_AH(dcomp_k_tensor.to(torch.complex128), ktraj)
-		
-        return xrec_tensor
-
-    def forward(self, x, y, mask):
-
-        # need to implement for all timeframes still (either loop over them or pass all to NUFFT)
-        A_x = self.apply_A(x, self.traj)
-
-        # NOTE: temporary fix, only works when Nrad is shifted forward one in shape
-        if y.shape[2] != 2:
-            y = rearrange(y, 'b t s i c -> b c s i t')
-        else:
-            y = rearrange(y, 'b t i s c -> b c s i t')
-
-
-        # k_dc = self.lambda_.to(x.device) * A_x + (1 - self.lambda_.to(x.device)) * y
-        k_dc = (1 - mask.to(x.device)) * A_x + mask.to(x.device) * (self.lambda_.to(x.device) * A_x + (1 - self.lambda_.to(x.device)) * y)
-
-        x_dc = self.apply_Adag(k_dc, self.traj, self.dcf)
-        x_dc = rearrange(x_dc, "b c h w i t -> b h w t i c").squeeze(-1)
-
-        return x_dc
-
-    def extra_repr(self):
-        return f"lambda={self.lambda_.item():.4g}, learnable={self.learnable}"
-    
-
-
-class DynamicRadialPhysics(dinv.physics.Physics, TimeMixin):
-    """
-    Physics operator that obtains radial trajectory and performs NUFFT and Adjoint NUFFT on radial data for unrolled network.
-    """
-    def __init__(
-        self, 
-        im_size,
-        N_spokes, 
-        N_samples,
-        N_time,
-        N_coils=1
-        ):
-        """
-        Args:
-            lambda_init (float): Init value of data consistency block (DCB)
-        """
-        super(DynamicRadialPhysics, self).__init__()
-
-        self.norm = "ortho"
-        self.dtype = torch.float
-        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+# This class only knows how to handle a batch of 2D images (4D Tensors)
+class RadialPhysics(dinv.physics.Physics):
+    def __init__(self, im_size, N_spokes, N_samples, **kwargs):
+        super().__init__(**kwargs)
         self.im_size = im_size
         self.N_spokes = N_spokes
         self.N_samples = N_samples
-        self.N_time = N_time
-        self.N_coils = N_coils
-        # FIXME hack assumes B=1, need to specify batch size
-        self.mask = torch.ones(1, N_time, 2, N_samples*N_spokes, 1)  # B,C,T,H,W
+        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-        spokelength=im_size[1]*2
-        grid_size = (int(spokelength),int(spokelength))
+        spokelength = im_size[1] * 2
+        grid_size = (int(spokelength), int(spokelength))
+        self.NUFFT = KbNufft(im_size=im_size, grid_size=grid_size).to(self.device)
+        self.AdjNUFFT = KbNufftAdjoint(im_size=im_size, grid_size=grid_size).to(
+            self.device
+        )
 
-        self.NUFFT =  KbNufft(im_size=im_size[:2], grid_size=grid_size).to(self.dtype).to(self.device)
-        self.AdjNUFFT = KbNufftAdjoint(im_size=im_size[:2], grid_size=grid_size).to(self.dtype).to(self.device)
-
-        self.base_res = N_samples // 2
         self.traj, self.dcf = self.get_traj_and_dcf()
-
         self.traj = self.traj.to(self.device)
         self.dcf = self.dcf.to(self.device)
 
+    def get_traj_and_dcf(self):
+        # Generates a SINGLE frame trajectory (B, D, N) and DCF
+        base_res = self.N_samples // 2
+        base_lin = np.arange(self.N_samples).reshape(1, -1) - base_res
+        ga = np.pi * (3.0 - np.sqrt(5.0))
+        base_rot = np.arange(self.N_spokes).reshape(-1, 1) * ga
 
-    def get_traj_and_dcf(self, gind=1):
+        traj_flat = np.zeros((self.N_spokes, self.N_samples, 2))
+        traj_flat[..., 0] = np.cos(base_rot) @ base_lin
+        traj_flat[..., 1] = np.sin(base_rot) @ base_lin
+        traj_flat = traj_flat / base_res
 
-        N_tot_spokes = self.N_spokes * self.N_time
+        traj = torch.from_numpy(traj_flat).float()
+        # Shape: (1, Dims=2, Spokes*Samples)
+        traj_nufft_ready = rearrange(traj, "s i xy -> 1 xy (s i)")
 
-        N_samples = self.base_res * 2
+        # DCF shape: (1, 1, Spokes, Samples)
+        dcf = torch.sqrt(
+            traj_nufft_ready[0, 0, :] ** 2 + traj_nufft_ready[0, 1, :] ** 2
+        )
+        dcf = rearrange(dcf, "(s i) -> 1 1 s i", s=self.N_spokes)
 
-        base_lin = np.arange(N_samples).reshape(1, -1) - self.base_res
+        return traj_nufft_ready, dcf
 
-        tau = 0.5 * (1 + 5**0.5)
-        base_rad = np.pi / (gind + tau - 1)
+    def A(self, x: torch.Tensor, **kwargs) -> torch.Tensor:
+        # Input x: (B, C=2, H, W) real-valued
+        x_complex = to_torch_complex(x)  # -> (B, H, W) complex
+        # Add coil dimension for NUFFT
+        k_complex_nufft = self.NUFFT(x_complex.unsqueeze(1), self.traj)
+        # Remove coil dim and convert back to real
+        y = from_torch_complex(k_complex_nufft.squeeze(1))  # -> (B, C=2, N_points)
+        # Reshape to (B, C, S, I)
+        return rearrange(y, "b c (s i) -> b c s i", s=self.N_spokes)
 
-        base_rot = np.arange(N_tot_spokes).reshape(-1, 1) * base_rad
-
-        traj = np.zeros((N_tot_spokes, N_samples, 2))
-
-        traj[..., 0] = np.cos(base_rot) @ base_lin
-        traj[..., 1] = np.sin(base_rot) @ base_lin
-
-        traj = traj / 2
-
-        traj = traj.reshape(self.N_time, self.N_spokes, N_samples, 2)
-
-        traj = rearrange(traj, 't sp sam i -> (sp sam) t i')
-
-        traj = traj / np.mean(np.abs(traj))
-        traj = torch.tensor(traj)*torch.tensor([1, -1])
-
-        # compute the density compensation function from trajectory
-        dcf = np.sqrt(traj[..., 0] ** 2 + traj[..., 1] ** 2)
-        dcf = dcf.clone().detach().unsqueeze(0).unsqueeze(0).unsqueeze(0)
-
-        # combine real and imaginary components in k-space trajectory
-        traj = rearrange(traj, "s t i -> i s t").unsqueeze(0)
-
-
-        return traj, dcf
-    
-    
-    def apply_dcf(self, y):
-
-        # NOTE: temporary fix, only works when Nrad is shifted forward one in shape
-        if y.shape[-2] != self.dcf.shape[-2]:
-            y = rearrange(y, 'b c s i t -> b c i s t')
-
-        y = self.dcf * y
-        y = y.permute(0, 1, 3, 2, 4) # shape: (1, 12, 11520, 2, 20)
-
-        return y
+    def A_adjoint(self, y: torch.Tensor, **kwargs) -> torch.Tensor:
+        # Input y: (B, C=2, S, I) real-valued
+        # Reshape to (B, C, S*I)
+        y_flat = rearrange(y, "b c s i -> b c (s i)")
+        y_complex_nufft = to_torch_complex(y_flat).unsqueeze(1)
+        # Apply DCF (flattened)
+        dcf_flat = rearrange(self.dcf, "b c s i -> b c (s i)")
+        y_dcf_complex = y_complex_nufft * dcf_flat
+        # Apply Adjoint NUFFT
+        x_complex = self.AdjNUFFT(y_dcf_complex, self.traj).squeeze(1)
+        # Convert back to real
+        return from_torch_complex(x_complex)
 
 
-    
-    def A(self, x: Tensor, **kwargs) -> torch.Tensor:
+# This class now handles 5D video tensors by inheriting from our 2D class and TimeMixin
+class DynamicRadialPhysics(RadialPhysics, TimeMixin):
+    def __init__(self, im_size, N_spokes, N_samples, N_time, N_coils=1, **kwargs):
+        super().__init__(
+            im_size=im_size[:2], N_spokes=N_spokes, N_samples=N_samples, **kwargs
+        )
 
-        #for each time point apply the forward model;
-        # if self.csmap is not None:
-        #     kdat_list = [self.NUFFT(x_tensor[...,kt].contiguous(),
-        #                     self.ktraj_tensor[...,kt].contiguous(), smaps=self.csmap, norm=self.norm) for kt in range(self.im_size[2])]
-        # else:
+        # This class uses N_time and N_coils.
+        self.N_time = N_time
+        self.N_coils = N_coils
 
-        if len(x.shape) == 5:
-            x = rearrange(x, 'b i t h w -> b h w i t')
-        elif len(x.shape) == 4:
-            # NOTE: only works for batch size 1
-            x = x.unsqueeze(0)
-            x = rearrange(x, 'b t i h w -> b h w i t')
-        
-        # remove coil dimension if necessary for now
-        if len(x.shape) == 5:
-            x = x.unsqueeze(1)
+        # The mask for dynamic physics has a time dimension
+        self.mask = torch.ones(1, 2, self.N_time, self.N_spokes, self.N_samples).to(
+            self.device
+        )
 
-        y = [self.NUFFT(x[...,kt].to(self.device).contiguous(),
-                        self.traj[...,kt].to(self.device).contiguous(), norm=self.norm) for kt in range(self.im_size[2])]
+    def A(self, x: torch.Tensor, **kwargs) -> torch.Tensor:
+        # Input x: (B, C, T, H, W)
+        # Use TimeMixin to flatten time into the batch dimension
+        x_flat = self.flatten(x)  # -> (B*T, C, H, W)
 
-        y = torch.stack(y, dim=-1).to(self.dtype)
-		
-        return y
+        # Call the base class (RadialPhysics) A method on the batch of 2D images
+        y_flat = super().A(x_flat, **kwargs)  # -> (B*T, C, S, I)
 
-    
-    def A_adjoint(
-        self, y: Tensor, mag: bool = False, **kwargs
-    ) -> Tensor:
-        """Adjoint operator.
+        # Unflatten to restore the time dimension
+        y = self.unflatten(y_flat, batch_size=x.shape[0])  # -> (B, C, T, S, I)
 
-        Optionally perform magnitude to reduce channel dimension.
+        # Apply the time-varying mask
+        return y * self.mask
 
-        :param torch.Tensor y: input kspace of shape `(B,2,T,H,W)`
-        :param torch.Tensor mask: optionally set mask on-the-fly, see class docs for shapes allowed.
-        :param bool mag: perform complex magnitude.
-        """
+    def A_adjoint(self, y: torch.Tensor, **kwargs) -> torch.Tensor:
+        # Input y: (B, C, T, S, I)
+        # Apply the time-varying mask
+        y_masked = y * self.mask
 
-        # apply dcf
-        y = self.apply_dcf(y).to(self.dtype)
+        # Use TimeMixin to flatten time into the batch dimension
+        y_flat = self.flatten(y_masked)  # -> (B*T, C, S, I)
 
-        # apply adjoint
+        # Call the base class (RadialPhysics) A_adjoint on the batch of 2D k-spaces
+        x_flat = super().A_adjoint(y_flat, **kwargs)  # -> (B*T, C, H, W)
 
-        #for each time point apply the adjoint NUFFT-operator;
-        # if self.csmap is not None:
-        #     xrec_list = [self.AdjNUFFT(k_tensor[...,kt].contiguous(),
-        #                         ktraj[...,kt].to(self.dtype).contiguous(), smaps=self.csmap, norm=self.norm) for kt in range(self.im_size[2])] 
-        # else:
+        # Unflatten to restore the time dimension
+        x = self.unflatten(x_flat, batch_size=y.shape[0])  # -> (B, C, T, H, W)
 
-        x = [self.AdjNUFFT(y[...,kt].to(self.device).contiguous(),
-                            self.traj[...,kt].to(self.dtype).to(self.device).contiguous(), norm=self.norm) for kt in range(self.im_size[2])] 
+        return x
 
-        x = torch.stack(x,dim=-1)
 
-        x = rearrange(x, 'b c h w i t -> b i t h w c').squeeze(-1) # note: squeezing coil dimension for current single coil implementation
+class RadialDCLayer(nn.Module):
+    def __init__(
+        self,
+        im_size,
+        lambda_init=np.log(np.exp(1) - 1.0) / 1.0,
+        learnable=True,
+    ):
+        super(RadialDCLayer, self).__init__()
+        self.learnable = learnable
+        self.lambda_ = nn.Parameter(
+            torch.ones(1) * lambda_init, requires_grad=self.learnable
+        )
+        self.physics = DynamicRadialPhysics(
+            im_size=im_size, N_spokes=36, N_samples=640
+        )  # Example numbers
 
-        if mag:
-            return torch.abs(x[..., 0] + 1j * x[..., 1])
-        else: 
-            return x
+    def forward(self, x_img_permuted, y_kspace_meas, mask_kspace):
+        # x_img_permuted from CRNN: (b, h, w, t, c)
+        x_img = rearrange(x_img_permuted, "b h w t c -> b c t h w")
 
-		
-    def A_dagger(self, y: Tensor, **kwargs) -> torch.Tensor:
-        return self.A_adjoint(y, **kwargs)
+        # The physics operator `A` handles all NUFFT logic
+        A_x = self.physics.A(x_img)
+
+        # The dataloader should now return standard (B, C, T, S, I)
+        y = y_kspace_meas
+
+        # The mask for DC should be on the k-space data
+        mask = mask_kspace[:, 0:1, ...]  # Use only one channel of the mask
+
+        lambda_ = torch.sigmoid(self.lambda_)
+        k_dc = (1 - mask) * A_x + mask * (lambda_ * A_x + (1 - lambda_) * y)
+
+        # The physics operator `A_adjoint` handles all Adjoint NUFFT logic
+        x_dc_img = self.physics.A_adjoint(k_dc)
+
+        # Convert back to CRNN's expected format
+        x_dc_permuted = rearrange(x_dc_img, "b c t h w -> b h w t c")
+
+        return x_dc_permuted

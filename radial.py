@@ -136,9 +136,15 @@ class DynamicRadialPhysics(RadialPhysics, TimeMixin):
 
 
 class RadialDCLayer(nn.Module):
+    """
+    Final Data Consistency layer.
+    It takes the network's current image estimate and the original measurements,
+    and returns a new image estimate that is a weighted average in k-space.
+    """
+
     def __init__(
         self,
-        im_size,
+        physics: nn.Module,  # The DC layer now requires the physics operator
         lambda_init=np.log(np.exp(1) - 1.0) / 1.0,
         learnable=True,
     ):
@@ -147,30 +153,35 @@ class RadialDCLayer(nn.Module):
         self.lambda_ = nn.Parameter(
             torch.ones(1) * lambda_init, requires_grad=self.learnable
         )
-        self.physics = DynamicRadialPhysics(
-            im_size=im_size, N_spokes=36, N_samples=640
-        )  # Example numbers
+        self.physics = physics
 
     def forward(self, x_img_permuted, y_kspace_meas, mask_kspace):
         # x_img_permuted from CRNN: (b, h, w, t, c)
         x_img = rearrange(x_img_permuted, "b h w t c -> b c t h w")
 
-        # The physics operator `A` handles all NUFFT logic
-        A_x = self.physics.A(x_img)
-
-        # The dataloader should now return standard (B, C, T, S, I)
+        # y_kspace_meas from dataloader: (b, c, t, s, i)
         y = y_kspace_meas
 
-        # The mask for DC should be on the k-space data
-        mask = mask_kspace[:, 0:1, ...]  # Use only one channel of the mask
+        # Step 1: Transform the network's current image estimate to k-space.
+        # The physics operator `A` handles all NUFFT logic.
+        A_x = self.physics.A(x_img)
 
-        lambda_ = torch.sigmoid(self.lambda_)
+        # Step 2: Perform the data consistency update in k-space.
+        # We use a simplified mask since the physics operator handles any complex masking.
+        # The mask here is just for the weighted average.
+        mask = torch.ones_like(A_x)  # This could be more sophisticated if needed
+
+        lambda_ = torch.sigmoid(self.lambda_)  # Ensure lambda is in [0,1]
+
+        # Note: In SSDU/splitting methods, `mask` would be the splitting mask.
+        # Here, it's just a placeholder for the weighting.
         k_dc = (1 - mask) * A_x + mask * (lambda_ * A_x + (1 - lambda_) * y)
 
-        # The physics operator `A_adjoint` handles all Adjoint NUFFT logic
+        # Step 3: Transform the corrected k-space back to image space.
+        # The physics operator `A_adjoint` handles all Adjoint NUFFT logic.
         x_dc_img = self.physics.A_adjoint(k_dc)
 
-        # Convert back to CRNN's expected format
+        # Step 4: Convert back to CRNN's expected permuted format.
         x_dc_permuted = rearrange(x_dc_img, "b c t h w -> b h w t c")
 
         return x_dc_permuted

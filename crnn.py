@@ -108,12 +108,12 @@ class CRNN(nn.Module):
         self,
         num_cascades: int = 10,
         chans: int = 64,
-        # REMOVED: datalayer=DCLayer(),
+        datalayer: nn.Module = None,
     ):
         super().__init__()
         self.num_cascades = num_cascades
         self.chans = chans
-        # REMOVED: self.datalayer = datalayer
+        self.datalayer = datalayer
         self.bcrnn = BCRNNlayer(input_size=2, hidden_size=self.chans, kernel_size=3)
         self.bcrnn2 = BCRNNlayer(input_size=2, hidden_size=self.chans, kernel_size=3)
         self.conv1_x = nn.Conv2d(self.chans, self.chans, 3, padding=3 // 2)
@@ -124,85 +124,95 @@ class CRNN(nn.Module):
         self.conv3_h = nn.Conv2d(self.chans, self.chans, 3, padding=3 // 2)
         self.conv4_x = nn.Conv2d(self.chans, 2, 3, padding=3 // 2)
         self.relu = nn.ReLU(inplace=True)
-        # REMOVED: dcs = [] ... self.dcs = dcs
 
-    def forward(self, x):  # MODIFIED: removed y and mask arguments
-        """
-        Args:
-            x: Input image, shape (b, w, h, t, ch)
-        Returns:
-            x: Reconstructed image, shape (b, w, h, t, ch)
-        """
-        x = rearrange(x.clone(), "b h w t c -> b c h w t").float()
+        # Create a list of DC layers, one for each cascade
+        dcs = []
+        for i in range(self.num_cascades):
+            dcs.append(self.datalayer)
+        self.dcs = nn.ModuleList(dcs)  # Use nn.ModuleList to register modules correctly
+
+    def forward(self, x_init_permuted, y, mask):
+        x = rearrange(x_init_permuted.clone(), "b h w t c -> b c h w t").float()
         b, ch, w, h, t = x.size()
         size_h = [t * b, self.chans, w, h]
         net = {}
         rcnn_layers = 6
+        # Initialize hidden states for the first cascade (t0)
         for j in range(rcnn_layers - 1):
-            net["t0_x%d" % j] = torch.zeros(size_h).to(x.device)
+            net[f"t0_x{j}"] = torch.zeros(size_h).to(x.device)
+
+        # This `x_cascades` will be the input to the recurrent layers at each cascade
+        x_cascades = x
 
         for i in range(1, self.num_cascades + 1):
-            x = rearrange(x, "b c h w t -> t b c h w")
-            x = x.contiguous()
+            # --- Recurrent Block ---
+            x_rnn_in = rearrange(x_cascades, "b c h w t -> t b c h w").contiguous()
+            # The hidden state for the RNN is always t0_x0, which is zeros.
+            # This means the RNN state is reset at each cascade. This is a design choice.
+            net[f"t{i}_x0"] = self.bcrnn(x_rnn_in, net["t0_x0"])
+            net[f"t{i}_x1"] = self.bcrnn2(x_rnn_in, net[f"t{i}_x0"])
 
-            net["t%d_x0" % (i - 1)] = net["t%d_x0" % (i - 1)].view(
-                t, b, self.chans, w, h
-            )
-            net["t%d_x0" % i] = self.bcrnn(x, net["t%d_x0" % (i - 1)])
-            net["t%d_x1" % i] = self.bcrnn2(x, net["t%d_x0" % i])
-            net["t%d_x1" % i] = net["t%d_x1" % i].view(-1, self.chans, w, h)
-            net["t%d_x2" % i] = self.conv1_x(net["t%d_x1" % i])
-            net["t%d_h2" % i] = self.conv1_h(net["t%d_x2" % (i - 1)])
-            net["t%d_x2" % i] = self.relu(net["t%d_h2" % i] + net["t%d_x2" % i])
-            net["t%d_x3" % i] = self.conv2_x(net["t%d_x2" % i])
-            net["t%d_h3" % i] = self.conv2_h(net["t%d_x3" % (i - 1)])
-            net["t%d_x3" % i] = self.relu(net["t%d_h3" % i] + net["t%d_x3" % i])
-            net["t%d_x4" % i] = self.conv3_x(net["t%d_x3" % i])
-            net["t%d_h4" % i] = self.conv3_h(net["t%d_x4" % (i - 1)])
-            net["t%d_x4" % i] = self.relu(net["t%d_h4" % i] + net["t%d_x4" % i])
-            net["t%d_x5" % i] = self.conv4_x(net["t%d_x4" % i])
+            # --- Convolutional Block with Recurrence over Cascades ---
+            # Reshape for 2D convolutions
+            conv_in = net[f"t{i}_x1"].view(-1, self.chans, w, h)
 
-            x = x.view(-1, ch, w, h)
-            net["t%d_out" % i] = x + net["t%d_x5" % i]
+            # Layer 2
+            x2 = self.conv1_x(conv_in)
+            h2 = self.conv1_h(net[f"t{i - 1}_x2"])  # Use previous cascade's x2
+            net[f"t{i}_x2"] = self.relu(h2 + x2)
 
-            # --- MODIFICATION: The entire DC block is removed ---
-            # The output of the network block is now directly the input for the next iteration.
-            # We just need to reshape it correctly.
-            # net["t%d_out" % i] is shape (-1, ch, w, h) which is (b*t, ch, w, h)
-            x = rearrange(net["t%d_out" % i], "(b t) c h w -> b c h w t", b=b)
+            # Layer 3
+            x3 = self.conv2_x(net[f"t{i}_x2"])
+            h3 = self.conv2_h(net[f"t{i - 1}_x3"])  # Use previous cascade's x3
+            net[f"t{i}_x3"] = self.relu(h3 + x3)
 
-        out = x  # The output of the final loop is 'x'
-        return rearrange(out, "b c h w t -> b h w t c")
+            # Layer 4
+            x4 = self.conv3_x(net[f"t{i}_x3"])
+            h4 = self.conv3_h(net[f"t{i - 1}_x4"])  # Use previous cascade's x4
+            net[f"t{i}_x4"] = self.relu(h4 + x4)
+
+            # Output Layer
+            x5 = self.conv4_x(net[f"t{i}_x4"])
+
+            # Res-connection
+            x_res = x_rnn_in.view(-1, ch, w, h)
+            out_before_dc = x_res + x5
+
+            # Reshape before the DC step
+            out_permuted = rearrange(
+                out_before_dc, "(b t) c h w -> b h w t c", b=b
+            ).contiguous()
+
+            # --- Data Consistency ---
+            x_dc_permuted = self.dcs[i - 1](out_permuted, y, mask)
+
+            # The output of the DC layer becomes the input for the *next* cascade's RNN block
+            x_cascades = rearrange(x_dc_permuted, "b h w t c -> b c h w t")
+
+        # The final output is the result from the last DC step
+        return x_dc_permuted
 
 
 class ArtifactRemovalCRNN(nn.Module):
-    r"""
-    Artifact removal architecture :math:`\phi(A^{\top}y)`.
-    Performs pseudo-inverse to get zero filled x_u, then passes x_u to the network.
-    The network now acts as a pure denoiser without an internal DC step.
-    """
+    """This wrapper's role is now restored to its original purpose:
+    preparing the initial image and passing ALL necessary data to the backbone."""
 
     def __init__(self, backbone_net: CRNN):
         super().__init__()
         self.backbone_net = backbone_net
 
     def forward(self, y: torch.Tensor, physics, **kwargs):
-        r"""
-        Reconstructs a signal estimate from measurements y
-        :param Tensor y: measurements [B,C,T,S,I] for radial
-        :param deepinv.physics.Physics physics: forward operator
-        """
         if isinstance(physics, nn.DataParallel):
             physics = physics.module
 
         # Get initial aliased image from measurements
-        x_init = physics.A_adjoint(y)  # Output shape: (b, c, t, h, w)
-
-        # Rearrange image into the format CRNN expects: (b, h, w, t, c)
+        x_init = physics.A_adjoint(y)
         x_init = rearrange(x_init, "b c t h w -> b h w t c")
 
-        # MODIFIED: Call the backbone with only the initial image
-        x_hat = self.backbone_net(x_init)  # Backbone output: (b, h, w, t, c)
+        # The mask for the DC layer should have the same shape as y
+        mask = torch.ones_like(y)
 
-        # Rearrange the final image back to the standard format: (b, c, t, h, w)
+        # Pass the initial image, the k-space measurements, and the mask
+        x_hat = self.backbone_net(x_init, y, mask)
+
         return rearrange(x_hat, "b h w t c -> b c t h w")

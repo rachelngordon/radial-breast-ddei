@@ -7,7 +7,7 @@ import torch
 from crnn import CRNN, ArtifactRemovalCRNN
 from dataloader import KSpaceSliceDataset
 from deepinv.loss import EILoss, MCLoss
-from radial import DynamicRadialPhysics
+from radial import DynamicRadialPhysics, RadialDCLayer
 from torch.utils.data import DataLoader
 from torchvision.transforms import InterpolationMode
 from tqdm import tqdm
@@ -107,8 +107,9 @@ physics = DynamicRadialPhysics(
     N_coils=N_coils,
 )
 
+datalayer = RadialDCLayer(physics=physics)
 
-backbone = CRNN(num_cascades=2, chans=64).to(device)
+backbone = CRNN(num_cascades=2, chans=64, datalayer=datalayer).to(device)
 
 model = ArtifactRemovalCRNN(backbone_net=backbone).to(device)
 

@@ -79,8 +79,7 @@ class KSpaceSliceDataset(Dataset):
 
         with h5py.File(file_path, "r") as f:
             ds = torch.tensor(f[self.dataset_key][:])
-            kspace_spatial_z = torch.fft.ifft(ds, dim=0, norm="ortho")
-            kspace_slice = kspace_spatial_z[self.slice_idx]
+            kspace_slice = ds[self.slice_idx]
 
         # Select the first coil
         kspace_single_coil = kspace_slice[:, 0, :, :]  # Shape: (T, S, I)

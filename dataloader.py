@@ -21,9 +21,9 @@ class KSpaceSliceDataset(Dataset):
         self,
         root_dir,
         patient_ids,
-        slice_idx=41,
         dataset_key="kspace",
         file_pattern="*.h5",
+        slice_idx=41,
     ):
         """
         Args:

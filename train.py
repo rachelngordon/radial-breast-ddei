@@ -13,6 +13,9 @@ from radial import DynamicRadialPhysics, RadialDCLayer
 from torch.utils.data import DataLoader
 from torchvision.transforms import InterpolationMode
 from tqdm import tqdm
+import argparse
+import subprocess
+import yaml
 
 
 def plot_reconstruction_sample(x_recon, title, filename, output_dir, batch_idx=0):
@@ -48,29 +51,14 @@ def plot_reconstruction_sample(x_recon, title, filename, output_dir, batch_idx=0
     plt.close(fig)
 
 
-# parameters: need to pass as command line arguments later
 
-root_dir = "/ess/scratch/scratch1/rachelgordon/dce-8tf/binned_kspace"
-dataset_key = "ktspace"
-device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-start_epoch = 1
-epochs = 25
-save_interval = 1
-exp_name = "mc_ei_loss_norm"
-output_dir = os.path.join("output", exp_name)
-os.makedirs(output_dir, exist_ok=True)
-use_ei_loss = True
-mc_loss_weight = 1
-plot_interval = 20
-
-# load data
-split_file = "patient_splits.json"
-with open(split_file, "r") as fp:
-    splits = json.load(fp)
-
-# NOTE: need to look into why I am only loading 88 training samples and not 192
-train_patient_ids = splits["train"]
-val_patient_ids = splits["val"]
+def get_git_commit():
+    try:
+        commit_hash = subprocess.check_output(['git', 'rev-parse', 'HEAD']).strip().decode('utf-8')
+        return commit_hash
+    except Exception as e:
+        print(f"Error retrieving Git commit: {e}")
+        return "unknown"
 
 
 class VideoRotate(dinv.transform.Rotate):
@@ -216,31 +204,96 @@ class TimeReversal(Transform):
         return torch.flip(x, dims=[2])
 
 
+
+# Parse command-line arguments
+parser = argparse.ArgumentParser(description='Train ReconResNet model.')
+parser.add_argument('--config', type=str, required=False, default='config.yaml', help='Path to the configuration file')
+parser.add_argument('--exp_name', type=str, required=True, help='Name of the experiment')
+args = parser.parse_args()
+
+# print experiment name and git commit
+commit_hash = get_git_commit()
+print(f"Running experiment on Git commit: {commit_hash}")
+
+exp_name = args.exp_name
+print(f"Experiment: {exp_name}")
+
+# Load the configuration file
+if args.from_checkpoint == True:
+    with open(f'output/{exp_name}/config.yaml', 'r') as file:
+        config = yaml.safe_load(file)
+else:
+    with open(args.config, 'r') as file:
+        config = yaml.safe_load(file)
+
+
+# load params
+split_file = config['data']['split_file']
+
+output_dir = os.path.join(config['experiment']['output_dir'], exp_name)
+os.makedirs(output_dir, exist_ok=True)
+
+batch_size = config['dataloader']['batch_size']
+max_subjects = config['dataloader']['max_subjects']
+
+mc_loss_weight = config['model']['losses']['mc_loss']['weight']
+ei_loss_weight = config['model']['losses']['ei_loss']['weight']
+use_ei_loss = config['model']['losses']['use_ei_loss']
+
+epochs = config['training']['epochs']
+save_interval = config['training']['save_interval']
+plot_interval = config['training']['plot_interval']
+device = torch.device(config['training']['device'])
+start_epoch = 1
+
+
+
+# load data
+with open(split_file, "r") as fp:
+    splits = json.load(fp)
+
+
+# NOTE: need to look into why I am only loading 88 training samples and not 192
+if max_subjects < 300:
+    max_train = max_subjects * (1 - config['data']['val_split_ratio'])
+    max_val = max_subjects * config['data']['val_split_ratio']
+
+    train_patient_ids = splits["train"][:max_train]
+    val_patient_ids = splits["val"][:max_val]
+else:
+    train_patient_ids = splits["train"]
+    val_patient_ids = splits["val"]
+
+
+
 train_dataset = KSpaceSliceDataset(
-    root_dir=root_dir,
+    root_dir=config['dataloader']['root_dir'],
     patient_ids=train_patient_ids,
-    dataset_key=dataset_key,
+    dataset_key=config['dataloader']['dataset_key'],
     file_pattern="*.h5",
+    slice_idx=config['dataloader']['slice_idx']
 )
 
 val_dataset = KSpaceSliceDataset(
-    root_dir=root_dir,
+    root_dir=config['dataloader']['root_dir'],
     patient_ids=val_patient_ids,
-    dataset_key=dataset_key,
+    dataset_key=config['dataloader']['dataset_key'],
     file_pattern="*.h5",
+    slice_idx=config['dataloader']['slice_idx']
 )
 
 
-train_loader = DataLoader(train_dataset, batch_size=1, shuffle=True, num_workers=1)
+train_loader = DataLoader(train_dataset, batch_size=config['dataloader']['batch_size'], shuffle=config['dataloader']['shuffle'], num_workers=config['dataloader']['num_workers'])
 
 
-val_loader = DataLoader(val_dataset, batch_size=1, shuffle=True, num_workers=1)
+val_loader = DataLoader(val_dataset, batch_size=config['dataloader']['batch_size'], shuffle=config['dataloader']['shuffle'], num_workers=config['dataloader']['num_workers'])
 
 
 # define physics operators
-H, W = 320, 320
-N_time, N_samples, N_coils = 8, 640, 1
-N_spokes = int(288 / N_time)
+H, W = config['data']['height'], config['data']['width']
+N_time, N_samples, N_coils = config['data']['timeframes'], config['data']['spokes_per_frame'], config['data']['coils']
+N_spokes = int(config['data']['total_spokes'] / N_time)
+
 physics = DynamicRadialPhysics(
     im_size=(H, W, N_time),
     N_spokes=N_spokes,
@@ -251,7 +304,7 @@ physics = DynamicRadialPhysics(
 
 datalayer = RadialDCLayer(physics=physics)
 
-backbone = CRNN(num_cascades=2, chans=64, datalayer=datalayer).to(device)
+backbone = CRNN(num_cascades=config['model']['cascades'], chans=config['model']['channels'], datalayer=datalayer).to(device)
 
 model = ArtifactRemovalCRNN(backbone_net=backbone).to(device)
 
@@ -259,13 +312,15 @@ model = ArtifactRemovalCRNN(backbone_net=backbone).to(device)
 # define loss functions and optimizer
 optimizer = torch.optim.Adam(
     model.parameters(),
-    lr=0.00005,
-    betas=(0.9, 0.999),
-    eps=0.000000001,
-    weight_decay=0.0,
+    lr=config['model']['optimizer']['lr'],
+    betas=(config['model']['optimizer']['b1'], config['model']['optimizer']['b2']),
+    eps=config['model']['optimizer']['eps'],
+    weight_decay=config['model']['optimizer']['weight_decay'],
 )
-mc_loss_fn = MCLoss()
 
+
+# define transformations and loss functions
+mc_loss_fn = MCLoss()
 
 if use_ei_loss:
     rotate = VideoRotate(n_trans=1, interpolation_mode=InterpolationMode.BILINEAR)
@@ -273,7 +328,9 @@ if use_ei_loss:
     subsample = SubsampleTime(n_trans=1, subsample_ratio=0.75)
     reverse = TimeReversal()
 
-    ei_loss_fn = EILoss((subsample | reverse) | (diffeo | rotate))
+    # NOTE: Not using temporal transforms for now
+    ei_loss_fn = EILoss((diffeo | rotate))
+
 
 # Training Loop
 train_mc_losses = []
@@ -310,7 +367,7 @@ for epoch in range(start_epoch, epochs + 1):
                 # x_recon: reconstructed image
                 ei_loss = ei_loss_fn(x_recon, physics, model)
                 running_ei_loss += ei_loss.item()
-                total_loss = mc_loss * mc_loss_weight + ei_loss
+                total_loss = mc_loss * mc_loss_weight + ei_loss * ei_loss_weight
                 train_loader_tqdm.set_postfix(
                     mc_loss=mc_loss.item(), ei_loss=ei_loss.item()
                 )

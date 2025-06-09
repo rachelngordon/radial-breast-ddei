@@ -2,8 +2,11 @@ import os
 
 import h5py
 import matplotlib.pyplot as plt
+import numpy as np
 import torch
 from einops import rearrange
+
+# --- Assumes your refactored radial.py is in the same directory or accessible ---
 from radial import DynamicRadialPhysics
 
 
@@ -18,7 +21,10 @@ def plot_reconstruction_sample(x_recon, title, filename, output_dir, batch_idx=0
         output_dir: Directory to save the plot
         batch_idx: Which batch element to plot (default: 0)
     """
-    # compute magnitude from complex reconstruction
+    if not isinstance(x_recon, torch.Tensor):
+        raise TypeError("x_recon must be a torch.Tensor")
+
+    # compute magnitude from complex-like real tensor
     x_recon_mag = torch.sqrt(x_recon[:, 0, ...] ** 2 + x_recon[:, 1, ...] ** 2)
 
     n_timeframes = x_recon_mag.shape[1]
@@ -31,121 +37,123 @@ def plot_reconstruction_sample(x_recon, title, filename, output_dir, batch_idx=0
     for t in range(n_timeframes):
         img = x_recon_mag[batch_idx, t, :, :].cpu().numpy()
         ax = axes[0, t]
-        ax.imshow(img, cmap="gray")
+        ax.imshow(
+            img, cmap="gray", vmin=0, vmax=np.percentile(img, 99.5)
+        )  # Use percentile for better contrast
         ax.set_title(f"t = {t}")
         ax.axis("off")
     fig.suptitle(title, fontsize=16)
     plt.tight_layout(rect=[0, 0.03, 1, 0.95])
     plt.savefig(os.path.join(output_dir, f"{filename}.png"))
     plt.close(fig)
+    print(f"--- Saved plot to {os.path.join(output_dir, f'{filename}.png')} ---")
 
+
+# --- Configuration ---
 DATA_FILE_PATH = (
     "/ess/scratch/scratch1/rachelgordon/dce-8tf/binned_kspace/fastMRI_breast_168_2.h5"
 )
 DATASET_KEY = "ktspace"
 
+# Image and acquisition parameters from the raw data file
 H, W = 320, 320
-N_time = 8
-N_samples = 640
-N_partitions = 83
-N_coils = 16
-N_spokes_per_frame = 36
+N_partitions_raw = 83
+N_coils_raw = 16
+N_time_raw = 8  # Original number of time frames from the pre-processing
+N_spokes_raw = 36  # Original spokes per frame
+N_samples_raw = 640
 
-PARTITION_TO_RECON = N_partitions // 2
+# Choose which slice of the 3D volume and which coil to reconstruct
+PARTITION_TO_RECON = N_partitions_raw // 2
 COIL_TO_RECON = 0
 
+# --- Experiment Parameters: How to bin the time points ---
+# We want to create a video with this many final frames
+N_FRAMES_OUT = 8  # Options: 8, 4, 2, 1
+
+# --- Setup ---
 output_dir = "debug_output"
 os.makedirs(output_dir, exist_ok=True)
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+print(f"--- Running Dynamic Reconstruction Debug Script on device: {device} ---")
+print(f"--- Target Output: {N_FRAMES_OUT} frames ---")
+print(f"--- Analyzing Partition={PARTITION_TO_RECON}, Coil={COIL_TO_RECON} ---")
 
-print(f"--- Running Best Static Reconstruction Script on device: {device} ---")
-print(f"--- Reconstructing Partition={PARTITION_TO_RECON}, Coil={COIL_TO_RECON} ---")
 
 # --- 1. Load and Prepare Data ---
-print(f"Loading data from: {DATA_FILE_PATH}")
+print(f"\nLoading data from: {DATA_FILE_PATH}")
 with h5py.File(DATA_FILE_PATH, "r") as f:
-    # Load the entire 5D dataset
-    kspace_5d = torch.from_numpy(f[DATASET_KEY][()]).to(device)
+    kspace_full_data = torch.from_numpy(f[DATASET_KEY][()]).to(device)
 
-# --- Select the specific partition and coil we want to reconstruct ---
-# kspace_5d has shape (partitions, time, coils, spokes, samples)
-kspace_to_process = kspace_5d[PARTITION_TO_RECON, :, COIL_TO_RECON, :, :]
-print(
-    f"Selected k-space data for processing. Shape: {kspace_to_process.shape}"
-)  # Should be (T, S, I)
+# Select the specific partition and coil we want to reconstruct
+# Original shape: (partitions, time, coils, spokes, samples)
+kspace_single_coil_dyn = kspace_full_data[PARTITION_TO_RECON, :, COIL_TO_RECON, :, :]
+# Shape is now (T_raw, S_raw, I_raw) -> (8, 36, 640)
+print(f"Selected k-space data for processing. Shape: {kspace_single_coil_dyn.shape}")
 
-# The selected data should already be complex. Let's verify.
-if not torch.is_complex(kspace_to_process):
+if not torch.is_complex(kspace_single_coil_dyn):
     raise TypeError("The selected k-space slice is not complex. Check data loading.")
 
-# Add a batch dimension of 1 for the physics operator
-kspace_complex = kspace_to_process.unsqueeze(0)  # -> (B=1, T, S, I)
 
-# --- 2. Combine spokes into fewer k-space frames ---
-# Pattern: b t s i -> b (t s) i
-# total_spokes = N_time * N_spokes_per_frame
-# combined_kspace_complex = rearrange(kspace_complex, "b t s i -> b (t s) i")
+# --- 2. Re-bin the data into the desired number of output frames ---
+if N_time_raw % N_FRAMES_OUT != 0:
+    raise ValueError(
+        "N_FRAMES_OUT must be a divisor of the original number of time frames (8)"
+    )
 
-n_out = 8                                          # we want 2 output frames
-frames_per_out = kspace_complex.shape[1] // n_out  # 4 frames per output
+# This calculates how many of the original frames get binned into one new frame
+frames_to_bin = N_time_raw // N_FRAMES_OUT
+# This calculates how many spokes will be in each new, combined frame
+spokes_per_binned_frame = N_spokes_raw * frames_to_bin
 
-# ---- Combine every 4 successive frames into one ----
-# Pattern:   (B, 8, S, I)  →  (B, 2, 4·S, I)
-combined_kspace_complex = rearrange(
-    kspace_complex,
+print(
+    f"Binning {frames_to_bin} original frames into each of the {N_FRAMES_OUT} output frames."
+)
+print(f"Each new frame will have {spokes_per_binned_frame} spokes.")
+
+# Add a batch dimension, then perform the re-binning
+kspace_binned_complex = rearrange(
+    kspace_single_coil_dyn.unsqueeze(0),
     "b (t_out t_inner) s i -> b t_out (t_inner s) i",
-    t_out=n_out,
-    t_inner=frames_per_out,
+    t_out=N_FRAMES_OUT,
 )
+print(f"Re-binned k-space shape: {kspace_binned_complex.shape}")
 
-total_spokes = combined_kspace_complex.shape[2]
-
-
-
-print(f"\nCombined k-space shape: {combined_kspace_complex.shape}")
-print(f"Total spokes in combined frame: {combined_kspace_complex.shape[1]}")
-
-# Convert to real tensor format (B, C=2, S_total, I) for the physics operator
-combined_kspace_real = rearrange(
-    torch.view_as_real(combined_kspace_complex), "b t s_total i c -> b c t s_total i"
+# Convert to real tensor format (B, C=2, T_out, S_binned, I) for the physics operator
+kspace_binned_real = rearrange(
+    torch.view_as_real(kspace_binned_complex), "b t s i c -> b c t s i"
 )
 
 
-# --- 3. Create a new STATIC Physics Operator for the combined data ---
-print("\nCreating a high-density static physics operator...")
-# This part is now correct as it operates on a single coil's data
-static_high_density_physics = DynamicRadialPhysics(
-    im_size=(H, W, n_out),
-    N_spokes=total_spokes,
-    N_samples=N_samples,
-    N_time = n_out
+# --- 3. Create a new DYNAMIC Physics Operator for the binned data ---
+print("\nCreating a dynamic physics operator...")
+# This now uses the refactored DynamicRadialPhysics that handles per-frame trajectories
+dynamic_physics = DynamicRadialPhysics(
+    im_size=(H, W),  # The 2D image size
+    N_spokes=spokes_per_binned_frame,  # Spokes PER binned frame
+    N_samples=N_samples_raw,
+    N_time=N_FRAMES_OUT,  # Number of output time frames
 ).to(device)
+
 
 # --- 4. Perform the High-Quality Reconstruction ---
 print("Performing A_adjoint reconstruction...")
 with torch.no_grad():
-    best_static_image = static_high_density_physics.A_adjoint(combined_kspace_real)
+    # Pass the re-binned k-space data to the corrected dynamic operator
+    reconstructed_image_sequence = dynamic_physics.A_adjoint(kspace_binned_real)
 
 
 # --- 5. Visualize and Save the Result ---
 print("Saving the output image...")
-filename = f"best_static_recon_{n_out}frames_p{PARTITION_TO_RECON}_c{COIL_TO_RECON}.png"
-plot_reconstruction_sample(best_static_image, f"Best Dynamic Image {n_out} Timeframes", filename, output_dir, batch_idx=0)
-# best_static_mag = (
-#     torch.sqrt(best_static_image[0, 0, ...] ** 2 + best_static_image[0, 1, ...] ** 2)
-#     .cpu()
-#     .numpy()
-# )
+filename = f"dynamic_recon_{N_FRAMES_OUT}frames_p{PARTITION_TO_RECON}_c{COIL_TO_RECON}"
+title = f"Dynamic Recon ({N_FRAMES_OUT} Binned Frames)"
 
-# plt.figure(figsize=(10, 10))
-# plt.imshow(best_static_mag, cmap="gray")
-# plt.title(
-#     f"Best Static Recon (Partition {PARTITION_TO_RECON}, Coil {COIL_TO_RECON})",
-#     fontsize=16,
-# )
-# plt.axis("off")
-# filename = f"best_static_recon_{total_spokes}spokes_p{PARTITION_TO_RECON}_c{COIL_TO_RECON}.png"
-# plt.savefig(os.path.join(output_dir, filename))
-# plt.close()
+plot_reconstruction_sample(
+    reconstructed_image_sequence, title, filename, output_dir, batch_idx=0
+)
 
-print(f"\n--- DONE. Check the file '{output_dir}/{filename}' ---")
+print("\n--- DONE. ---")
+print("Check the output image for rotation. If gone, the dynamic physics is correct.")
+print(
+    "You can now change N_FRAMES_OUT to 4, 2, or 1 to see the effect of having more spokes per frame."
+)

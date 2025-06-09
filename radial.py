@@ -42,7 +42,7 @@ class RadialPhysics(dinv.physics.Physics):
         self.traj = self.traj.to(self.device)
         self.sqrt_dcf = self.sqrt_dcf.to(self.device)
 
-    def get_traj_and_dcf(self):
+    def get_traj_and_dcf(self, angle_offset_rad=0.0):
         base_res = self.im_size[0]
         gind = 1
 
@@ -60,9 +60,10 @@ class RadialPhysics(dinv.physics.Physics):
         tau = 0.5 * (1 + 5**0.5)
 
         base_rad = np.pi / (gind + tau - 1)
+        base_rad = np.pi / (gind + tau - 1)
 
-        # Total spokes = N_spokes per frame (self.N_spokes) * number of frames (implicitly 1 for static physics)
-        base_rot = np.arange(self.N_spokes).reshape(-1, 1) * base_rad
+        spoke_indices = np.arange(self.N_spokes)
+        base_rot = (spoke_indices * base_rad + angle_offset_rad).reshape(-1, 1)
 
         traj_flat = np.zeros((self.N_spokes, N_samples, 2))
         traj_flat[..., 0] = np.cos(base_rot) @ base_lin
@@ -114,47 +115,105 @@ class RadialPhysics(dinv.physics.Physics):
 # This class now handles 5D video tensors by inheriting from our 2D class and TimeMixin
 class DynamicRadialPhysics(RadialPhysics, TimeMixin):
     def __init__(self, im_size, N_spokes, N_samples, N_time, N_coils=1, **kwargs):
-        super().__init__(
-            im_size=im_size[:2], N_spokes=N_spokes, N_samples=N_samples, **kwargs
-        )
+        # We call the TimeMixin's init first
+        TimeMixin.__init__(self)
 
-        # This class uses N_time and N_coils.
+        # We call the base Physics init, not RadialPhysics's init directly
+        dinv.physics.Physics.__init__(self, **kwargs)
+
+        # Store all dynamic parameters
+        self.im_size = im_size[:2]  # Static image size
+        self.N_spokes = N_spokes  # Spokes PER FRAME
+        self.N_samples = N_samples
         self.N_time = N_time
         self.N_coils = N_coils
+        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-        # The mask for dynamic physics has a time dimension
+        # --- Instantiate NUFFT operators ---
+        grid_size = [int(s * 2.0) for s in self.im_size]
+        self.NUFFT = KbNufft(im_size=self.im_size, grid_size=grid_size).to(self.device)
+        self.AdjNUFFT = KbNufftAdjoint(im_size=self.im_size, grid_size=grid_size).to(
+            self.device
+        )
+
+        # --- GENERATE THE FULL DYNAMIC TRAJECTORY ---
+        # We generate the trajectory for ALL spokes across ALL time frames at once.
+        total_spokes_in_scan = self.N_spokes * self.N_time
+
+        # Create a temporary static physics object just to call its get_traj_and_dcf
+        temp_physics = RadialPhysics(
+            self.im_size, N_spokes=total_spokes_in_scan, N_samples=self.N_samples
+        )
+
+        # This full_traj has shape (1, 2, N_spokes*N_time*N_samples)
+        full_traj, full_sqrt_dcf = temp_physics.get_traj_and_dcf()
+
+        # --- Reshape the trajectory and DCF to be time-aware ---
+        # New shape: (T, 1, 2, S*I) for easy selection later
+        self.traj_per_frame = rearrange(
+            full_traj, "b c (t s i) -> t b c (s i)", t=self.N_time, s=self.N_spokes
+        )
+        self.sqrt_dcf_per_frame = rearrange(
+            full_sqrt_dcf, "b c (t s i) -> t b c (s i)", t=self.N_time, s=self.N_spokes
+        )
+
+        self.traj_per_frame = self.traj_per_frame.to(self.device)
+        self.sqrt_dcf_per_frame = self.sqrt_dcf_per_frame.to(self.device)
+
         self.mask = torch.ones(1, 2, self.N_time, self.N_spokes, self.N_samples).to(
             self.device
         )
 
+    # --- We need to override A and A_adjoint to use the per-frame trajectory ---
     def A(self, x: torch.Tensor, **kwargs) -> torch.Tensor:
-        # Input x: (B, C, T, H, W)
-        # Use TimeMixin to flatten time into the batch dimension
-        x_flat = self.flatten(x)  # -> (B*T, C, H, W)
+        # x has shape (B, C, T, H, W)
+        B, C, T, H, W = x.shape
+        output_kspace_frames = []
 
-        # Call the base class (RadialPhysics) A method on the batch of 2D images
-        y_flat = super().A(x_flat, **kwargs)  # -> (B*T, C, S, I)
+        for t in range(T):
+            x_frame = x[:, :, t, :, :].unsqueeze(2)  # -> (B, C, 1, H, W)
+            x_flat = self.flatten(x_frame)  # -> (B, C, H, W)
 
-        # Unflatten to restore the time dimension
-        y = self.unflatten(y_flat, batch_size=x.shape[0])  # -> (B, C, T, S, I)
+            # Use the trajectory for this specific time frame 't'
+            traj_t = self.traj_per_frame[t]
+            sqrt_dcf_t = self.sqrt_dcf_per_frame[t]
 
-        # Apply the time-varying mask
+            x_complex = to_torch_complex(x_flat).unsqueeze(1)
+            k_complex_nufft = self.NUFFT(x_complex, traj_t)
+            y_complex_weighted = k_complex_nufft * sqrt_dcf_t
+
+            y_frame = from_torch_complex(y_complex_weighted.squeeze(1))
+            y_frame_reshaped = rearrange(
+                y_frame, "b c (s i) -> b c s i", s=self.N_spokes
+            )
+            output_kspace_frames.append(y_frame_reshaped)
+
+        y = torch.stack(output_kspace_frames, dim=2)  # Stack along the time dimension
         return y * self.mask
 
     def A_adjoint(self, y: torch.Tensor, **kwargs) -> torch.Tensor:
-        # Input y: (B, C, T, S, I)
-        # Apply the time-varying mask
+        # y has shape (B, C, T, S, I)
+        B, C, T, S, I = y.shape
+        output_image_frames = []
+
         y_masked = y * self.mask
 
-        # Use TimeMixin to flatten time into the batch dimension
-        y_flat = self.flatten(y_masked)  # -> (B*T, C, S, I)
+        for t in range(T):
+            y_frame = y_masked[:, :, t, :, :]  # -> (B, C, S, I)
 
-        # Call the base class (RadialPhysics) A_adjoint on the batch of 2D k-spaces
-        x_flat = super().A_adjoint(y_flat, **kwargs)  # -> (B*T, C, H, W)
+            # Use the trajectory for this specific time frame 't'
+            traj_t = self.traj_per_frame[t]
+            sqrt_dcf_t = self.sqrt_dcf_per_frame[t]
 
-        # Unflatten to restore the time dimension
-        x = self.unflatten(x_flat, batch_size=y.shape[0])  # -> (B, C, T, H, W)
+            y_flat = rearrange(y_frame, "b c s i -> b c (s i)")
+            y_complex = to_torch_complex(y_flat).unsqueeze(1)
+            y_dcf_complex = y_complex * sqrt_dcf_t
 
+            x_complex_frame = self.AdjNUFFT(y_dcf_complex, traj_t).squeeze(1)
+            x_frame = from_torch_complex(x_complex_frame)  # -> (B, C, H, W)
+            output_image_frames.append(x_frame)
+
+        x = torch.stack(output_image_frames, dim=2)  # -> (B, C, T, H, W)
         return x
 
 

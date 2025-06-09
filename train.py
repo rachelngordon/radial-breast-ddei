@@ -322,6 +322,27 @@ if use_ei_loss:
     # NOTE: Not using temporal transforms for now
     ei_loss_fn = EILoss((diffeo | rotate))
 
+print(
+    "--- Generating and saving a Zero-Filled (ZF) reconstruction sample before training ---"
+)
+# Use the validation loader to get a sample without affecting the training loader's state
+with torch.no_grad():
+    # Get a single batch of validation k-space data
+    val_kspace_sample = next(iter(val_loader))
+    val_kspace_sample = val_kspace_sample.to(device)
+
+    # Perform the simplest reconstruction: A_adjoint(y)
+    # This is the "zero-filled" image (or more accurately, the gridded image)
+    x_zf = physics.A_adjoint(val_kspace_sample)
+
+    # Plot and save the image using your existing function
+    plot_reconstruction_sample(
+        x_zf,
+        "Zero-Filled (ZF) Reconstruction (Before Training)",
+        "zf_reconstruction_baseline",
+        output_dir,
+    )
+print("--- ZF baseline image saved to output directory. Starting training. ---")
 
 # Training Loop
 train_mc_losses = []

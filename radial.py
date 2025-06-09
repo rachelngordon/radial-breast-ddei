@@ -171,10 +171,11 @@ class RadialDCLayer(nn.Module):
 
         A_x = self.physics.A(x_img)
 
-        mask = torch.ones_like(A_x)
         lambda_ = torch.sigmoid(self.lambda_)
 
-        k_dc = (1 - mask) * A_x + mask * (lambda_ * A_x + (1 - lambda_) * y)
+        k_dc = (1 - mask_kspace) * A_x + mask_kspace * (
+            lambda_ * A_x + (1 - lambda_) * y
+        )
 
         # Step 3: Transform the corrected k-space back to image space.
         # The physics operator `A_adjoint` handles all Adjoint NUFFT logic.

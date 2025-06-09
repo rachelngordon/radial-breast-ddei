@@ -189,8 +189,7 @@ class ArtifactRemovalCRNN(nn.Module):
         x_init_permuted = rearrange(x_init, "b c t h w -> b h w t c")
         x_init_norm_permuted = _normalize_batch(x_init_permuted)
 
-        # The mask is not used in our current CRNN but is kept for API consistency
-        mask = torch.ones_like(y)
+        mask = self.backbone_net.datalayer.physics.mask
 
         x_hat_permuted = self.backbone_net(x_init_norm_permuted, y, mask)
 

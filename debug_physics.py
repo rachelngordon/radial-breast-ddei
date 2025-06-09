@@ -49,7 +49,6 @@ if not torch.is_complex(kspace_to_process):
 kspace_complex = kspace_to_process.unsqueeze(0)  # -> (B=1, T, S, I)
 
 # --- 2. Combine all spokes into a single k-space frame ---
-# The pattern is now correct for the 4D tensor kspace_complex
 # Pattern: b t s i -> b (t s) i
 total_spokes = N_time * N_spokes_per_frame
 combined_kspace_complex = rearrange(kspace_complex, "b t s i -> b (t s) i")

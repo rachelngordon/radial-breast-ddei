@@ -43,20 +43,42 @@ class RadialPhysics(dinv.physics.Physics):
         self.sqrt_dcf = self.sqrt_dcf.to(self.device)
 
     def get_traj_and_dcf(self):
-        # This method is correct and needs no changes.
-        base_res = self.N_samples // 2
-        base_lin = np.arange(self.N_samples).reshape(1, -1) - base_res
-        ga = np.pi * (3.0 - np.sqrt(5.0))
-        base_rot = np.arange(self.N_spokes).reshape(-1, 1) * ga
-        traj_flat = np.zeros((self.N_spokes, self.N_samples, 2))
+        base_res = self.im_size[0]
+        gind = 1
+
+        N_samples = base_res * 2
+
+        # Check if this matches your class's N_samples
+        if N_samples != self.N_samples:
+            print(
+                f"Warning: Vendor logic implies N_samples should be {N_samples}, but class has {self.N_samples}. Using class value."
+            )
+            N_samples = self.N_samples  # Trust the class value passed during init
+
+        base_lin = np.arange(N_samples).reshape(1, -1) - (N_samples // 2)
+
+        tau = 0.5 * (1 + 5**0.5)
+
+        base_rad = np.pi / (gind + tau - 1)
+
+        # Total spokes = N_spokes per frame (self.N_spokes) * number of frames (implicitly 1 for static physics)
+        base_rot = np.arange(self.N_spokes).reshape(-1, 1) * base_rad
+
+        traj_flat = np.zeros((self.N_spokes, N_samples, 2))
         traj_flat[..., 0] = np.cos(base_rot) @ base_lin
         traj_flat[..., 1] = np.sin(base_rot) @ base_lin
 
-        traj_flat = (traj_flat / base_res) * np.pi
+        # --- Now, scale for torchkbnufft which expects [-pi, pi] ---
+        # The vendor code scales by dividing by 2. It's unclear what that means.
+        # The robust way is to find the max radius and scale to pi.
+        # The max radius in traj_flat will be N_samples / 2.
+        max_radius = N_samples / 2.0
+        traj_flat = (traj_flat / max_radius) * np.pi
 
         traj = torch.from_numpy(traj_flat).float()
         traj_nufft_ready = rearrange(traj, "s i xy -> 1 xy (s i)")
 
+        # The DCF calculation can remain the same, it's based on the final trajectory
         dcf_vals = torch.sqrt(
             traj_nufft_ready[0, 0, :] ** 2 + traj_nufft_ready[0, 1, :] ** 2
         )

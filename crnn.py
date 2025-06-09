@@ -168,30 +168,37 @@ class CRNN(nn.Module):
         return x_cascade_in
 
 
-# This wrapper class remains the same as in your original file.
 class ArtifactRemovalCRNN(nn.Module):
     def __init__(self, backbone_net, **kwargs):
         super(ArtifactRemovalCRNN, self).__init__()
         self.backbone_net = backbone_net
 
     def forward(self, y, physics, **kwargs):
-        # Initial reconstruction x0 = A_H(y)
+        # 1. Get the initial ZF recon. This defines our target energy/scale.
         x_init = physics.A_adjoint(y)
 
-        # --- Input Normalization ---
-        # Normalize the initial estimate before feeding it to the network.
-        # This is a good practice for stability.
+        # We need its norm before any permutations.
+        norm_of_zf_recon = torch.linalg.vector_norm(x_init)
 
-        # NOTE: I simplified the logic here. We rearrange once, normalize, then rearrange back.
-        # This avoids the double rearrange which was a bit confusing and prone to error.
+        # 2. Permute and normalize the input for the network
         x_init_permuted = rearrange(x_init, "b c t h w -> b h w t c")
         x_init_norm_permuted = _normalize_batch(x_init_permuted)
 
-        mask = self.backbone_net.datalayer.physics.mask
+        mask = torch.ones_like(y)
 
-        x_hat_permuted = self.backbone_net(x_init_norm_permuted, y, mask)
+        # 3. Get the raw, high-magnitude output from the backbone
+        x_hat_permuted_raw = self.backbone_net(x_init_norm_permuted, y, mask)
 
-        # Permute back to standard (B, C, T, H, W) for loss calculation
-        x_hat = rearrange(x_hat_permuted, "b h w t c -> b c t h w")
+        # 4. Convert it back to standard image tensor format
+        x_hat_raw = rearrange(x_hat_permuted_raw, "b h w t c -> b c t h w")
 
-        return x_hat
+        # --- 5. Rescale the final output ---
+        # Rescale the network's huge output to match the norm of the initial ZF recon.
+        # This gives the loss function two tensors of a similar magnitude to compare.
+        norm_of_raw_output = torch.linalg.vector_norm(x_hat_raw)
+
+        scaling_factor = norm_of_zf_recon / (norm_of_raw_output + 1e-8)
+
+        x_hat_final = x_hat_raw * scaling_factor
+
+        return x_hat_final

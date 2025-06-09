@@ -185,6 +185,13 @@ parser.add_argument(
 parser.add_argument(
     "--exp_name", type=str, required=True, help="Name of the experiment"
 )
+parser.add_argument(
+    "--from_checkpoint",
+    type=bool,
+    required=False,
+    default=False,
+    help="Whether to load from a checkpoint",
+)
 args = parser.parse_args()
 
 # print experiment name and git commit
@@ -241,17 +248,17 @@ else:
 
 
 train_dataset = KSpaceSliceDataset(
-    root_dir=config["dataloader"]["root_dir"],
+    root_dir=config["data"]["root_dir"],
     patient_ids=train_patient_ids,
-    dataset_key=config["dataloader"]["dataset_key"],
+    dataset_key=config["data"]["dataset_key"],
     file_pattern="*.h5",
     slice_idx=config["dataloader"]["slice_idx"],
 )
 
 val_dataset = KSpaceSliceDataset(
-    root_dir=config["dataloader"]["root_dir"],
+    root_dir=config["data"]["root_dir"],
     patient_ids=val_patient_ids,
-    dataset_key=config["dataloader"]["dataset_key"],
+    dataset_key=config["data"]["dataset_key"],
     file_pattern="*.h5",
     slice_idx=config["dataloader"]["slice_idx"],
 )

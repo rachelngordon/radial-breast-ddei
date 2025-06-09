@@ -79,9 +79,16 @@ class VideoDiffeo(dinv.transform.CPABDiffeomorphism):
 class SubsampleTime(Transform):
     r"""
     Augments a video by taking a random contiguous temporal sub-sequence.
-
     This is suitable for non-cyclical data like contrast enhancement curves,
     as it preserves the local arrow of time.
+
+    ### BUG FIX:
+    - The original implementation used `torch.view` which lost the relationship between
+      the H and W spatial dimensions, causing the final `rearrange` to fail.
+    - This version uses `einops` for both flattening and un-flattening, ensuring
+      that the spatial dimensions can be correctly reconstructed.
+    - The interpolation logic has been simplified to use `mode='linear'`, which is
+      more direct for a 1D temporal resizing task.
 
     :param int n_trans: Number of transformed versions to generate per input image.
     :param float subsample_ratio: The ratio of the total time frames to keep (e.g., 0.8 for 80%).
@@ -90,7 +97,7 @@ class SubsampleTime(Transform):
 
     def __init__(self, *args, subsample_ratio: float = 0.8, **kwargs):
         super().__init__(*args, **kwargs)
-        self.flatten_video_input = False  # We will operate directly on the 5D tensor
+        self.flatten_video_input = False  # We operate directly on the 5D tensor
         assert 0.0 < subsample_ratio <= 1.0, "subsample_ratio must be between 0 and 1."
         self.subsample_ratio = subsample_ratio
 
@@ -98,12 +105,10 @@ class SubsampleTime(Transform):
         """Generates a random start index for the temporal crop."""
         total_time_frames = x.shape[2]  # Shape is (B, C, T, H, W)
         subsample_length = int(total_time_frames * self.subsample_ratio)
-
-        # If subsample length is the same as total length, there's no augmentation to do
         if subsample_length >= total_time_frames:
+            # Handle edge case where ratio is 1.0 or rounds up
             return {"start_indices": torch.zeros(self.n_trans, dtype=torch.long)}
 
-        # Generate n_trans random start indices
         max_start_index = total_time_frames - subsample_length
         start_indices = torch.randint(
             low=0, high=max_start_index + 1, size=(self.n_trans,), generator=self.rng
@@ -114,49 +119,35 @@ class SubsampleTime(Transform):
         self, x: torch.Tensor, start_indices: torch.Tensor, **kwargs
     ) -> torch.Tensor:
         """Performs the temporal subsampling and resizes back to the original length."""
-        total_time_frames = x.shape[2]
+        B, C, total_time_frames, H, W = x.shape
         subsample_length = int(total_time_frames * self.subsample_ratio)
 
-        # If no subsampling, just return the original tensor replicated n_trans times
         if subsample_length >= total_time_frames:
             return x.repeat(self.n_trans, 1, 1, 1, 1)
 
         output_list = []
         for start_idx in start_indices:
-            # 1. Take a temporal slice (the crop)
-            # Shape: (B, C, subsample_length, H, W)
+            # 1. Take the temporal subsequence
             sub_sequence = x[:, :, start_idx : start_idx + subsample_length, :, :]
 
-            # 2. Resize the temporal dimension back to the original length.
-            # We treat the (C, T) dimensions as an "image" to be resized.
-            B, C, T_sub, H, W = sub_sequence.shape
+            # 2. Flatten all non-time dimensions into one giant "channel" dimension for interpolation.
+            # Pattern: (Batch, Channels, Time, Height, Width) -> (Batch, (Channels*Height*Width), Time)
+            flat_for_interp = rearrange(sub_sequence, "b c t h w -> b (c h w) t")
 
-            # Reshape for interpolation: (B, C, T_sub, H*W) -> (B, C*T_sub, H*W)
-            sub_sequence_flat_spatial = sub_sequence.view(B, C, T_sub, H * W)
-            sub_sequence_for_interp = rearrange(
-                sub_sequence_flat_spatial, "b c t hw -> b (c hw) t"
-            )
-            sub_sequence_for_interp = sub_sequence_for_interp.unsqueeze(
-                1
-            )  # -> (B, 1, C*HW, T_sub)
-
-            # Use linear interpolation along the time axis
-            resized_sequence_interp = torch.nn.functional.interpolate(
-                sub_sequence_for_interp,
-                size=(C * H * W, total_time_frames),
-                mode="bilinear",  # 'linear' for 1D, but bilinear works on this "image"
+            # 3. Interpolate along the time dimension (the last dimension).
+            # This is a 1D interpolation.
+            resized_flat = torch.nn.functional.interpolate(
+                flat_for_interp,
+                size=total_time_frames,
+                mode="linear",
                 align_corners=False,
             )
 
-            # Reshape back to the original 5D format
-            resized_sequence_interp = resized_sequence_interp.squeeze(
-                1
-            )  # -> (B, C*HW, T)
-            resized_sequence_flat_spatial = rearrange(
-                resized_sequence_interp, "b (c hw) t -> b c t hw", c=C, h=H, w=W
-            )
-            resized_sequence = resized_sequence_flat_spatial.view(
-                B, C, total_time_frames, H, W
+            # 4. Un-flatten the dimensions back to the original video format.
+            # Einops can do this because it knows how (c h w) was constructed.
+            # Pattern: (Batch, (Channels*Height*Width), Time) -> (Batch, Channels, Time, Height, Width)
+            resized_sequence = rearrange(
+                resized_flat, "b (c h w) t -> b c t h w", c=C, h=H, w=W
             )
 
             output_list.append(resized_sequence)

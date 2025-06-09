@@ -82,14 +82,6 @@ class SubsampleTime(Transform):
     This is suitable for non-cyclical data like contrast enhancement curves,
     as it preserves the local arrow of time.
 
-    ### BUG FIX:
-    - The original implementation used `torch.view` which lost the relationship between
-      the H and W spatial dimensions, causing the final `rearrange` to fail.
-    - This version uses `einops` for both flattening and un-flattening, ensuring
-      that the spatial dimensions can be correctly reconstructed.
-    - The interpolation logic has been simplified to use `mode='linear'`, which is
-      more direct for a 1D temporal resizing task.
-
     :param int n_trans: Number of transformed versions to generate per input image.
     :param float subsample_ratio: The ratio of the total time frames to keep (e.g., 0.8 for 80%).
     :param torch.Generator rng: Random number generator.

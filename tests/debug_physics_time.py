@@ -135,9 +135,9 @@ dynamic_physics = DynamicRadialPhysics(
     N_time=N_FRAMES_OUT,  # Number of output time frames
 ).to(device)
 
-
 # --- 4. Perform the High-Quality Reconstruction ---
 print("Performing A_adjoint reconstruction...")
+print(f"k-space shape: {kspace_binned_real.shape}")
 with torch.no_grad():
     # Pass the re-binned k-space data to the corrected dynamic operator
     reconstructed_image_sequence = dynamic_physics.A_adjoint(kspace_binned_real)

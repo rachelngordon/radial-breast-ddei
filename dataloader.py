@@ -5,9 +5,10 @@ import h5py
 import numpy as np
 import torch
 from torch.utils.data import DataLoader, Dataset
+import nibabel as nib
 
 
-class KSpaceSliceDataset(Dataset):
+class SliceDataset(Dataset):
     """
     A Dataset that:
       - Looks for all .h5/.hdf5 files under `root_dir`.
@@ -24,6 +25,7 @@ class KSpaceSliceDataset(Dataset):
         dataset_key="kspace",
         file_pattern="*.h5",
         slice_idx=41,
+        N_time = 8
     ):
         """
         Args:
@@ -35,6 +37,7 @@ class KSpaceSliceDataset(Dataset):
         self.root_dir = root_dir
         self.dataset_key = dataset_key
         self.slice_idx = slice_idx
+        self.N_time = N_time
 
         # Find all matching HDF5 files under root_dir
         all_files = sorted(glob.glob(os.path.join(root_dir, file_pattern)))
@@ -67,6 +70,33 @@ class KSpaceSliceDataset(Dataset):
         #     for z in range(num_slices):
         #         self.slice_index_map.append((fp, z))
 
+    def load_dynamic_img(self, patient_id):
+
+        H = W = 320
+        data = np.empty((2, self.N_time, H, W), dtype=np.float32)
+
+        for t in range(self.N_time):
+            # load image 
+            img_path = f'/ess/scratch/scratch1/rachelgordon/dce-{self.N_time}tf/{patient_id}/slice_{self.slice_idx:03d}_frame_{t:03d}.nii'
+
+            # if os.path.exists(img_path):
+
+            img = nib.load(img_path)
+            img_data = img.get_fdata()
+
+            if img_data.shape != (2, H, W):
+                raise ValueError(f"{img_path} has shape {img_data.shape}; "
+                                f"expected (2, {H}, {W})")
+
+            data[:, t] = img_data.astype(np.float32)
+            
+            # else:
+            #     return None
+
+        return torch.from_numpy(data) 
+
+
+
     def __len__(self):
         return len(self.file_list)
 
@@ -75,7 +105,12 @@ class KSpaceSliceDataset(Dataset):
         Returns a single slice of k-space as a torch.Tensor.
         The output shape will be the standard (C=2, T, S, I) where C is [real, imag].
         """
+
+        # load GRASP recon image
         file_path = self.file_list[idx]
+        patient_id = file_path.split('/')[-1].strip('.h5')
+
+        # grasp_img = self.load_dynamic_img(patient_id)
 
         with h5py.File(file_path, "r") as f:
             ds = torch.tensor(f[self.dataset_key][:])
@@ -118,7 +153,7 @@ if __name__ == "__main__":
         imag = x_np[..., 1].astype("float32")
         return (real + 1j * imag).astype("complex64")
 
-    dataset = KSpaceSliceDataset(
+    dataset = SliceDataset(
         root_dir=root_dir, dataset_key=dataset_key, file_pattern="*.h5"
     )
 

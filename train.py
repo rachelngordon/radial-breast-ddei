@@ -8,7 +8,7 @@ import matplotlib.pyplot as plt
 import torch
 import yaml
 from crnn import CRNN, ArtifactRemovalCRNN
-from dataloader import KSpaceSliceDataset
+from dataloader import SliceDataset
 from deepinv.loss import EILoss, MCLoss
 from deepinv.transform import Transform
 from einops import rearrange
@@ -16,9 +16,10 @@ from radial import DynamicRadialPhysics, RadialDCLayer
 from torch.utils.data import DataLoader
 from torchvision.transforms import InterpolationMode
 from tqdm import tqdm
+import numpy as np
 
 
-def plot_reconstruction_sample(x_recon, title, filename, output_dir, batch_idx=0):
+def plot_reconstruction_sample(x_recon, title, filename, output_dir, grasp_img=None, batch_idx=0):
     """
     Plot reconstruction sample showing magnitude images across timeframes.
 
@@ -31,6 +32,7 @@ def plot_reconstruction_sample(x_recon, title, filename, output_dir, batch_idx=0
     """
     # compute magnitude from complex reconstruction
     x_recon_mag = torch.sqrt(x_recon[:, 0, ...] ** 2 + x_recon[:, 1, ...] ** 2)
+    # grasp_img_mag = torch.sqrt(grasp_img[:, 0, ...] ** 2 + grasp_img[:, 1, ...] ** 2)
 
     n_timeframes = x_recon_mag.shape[1]
     fig, axes = plt.subplots(
@@ -40,11 +42,16 @@ def plot_reconstruction_sample(x_recon, title, filename, output_dir, batch_idx=0
         squeeze=False,
     )
     for t in range(n_timeframes):
-        img = x_recon_mag[batch_idx, t, :, :].cpu().numpy()
-        ax = axes[0, t]
-        ax.imshow(img, cmap="gray")
-        ax.set_title(f"t = {t}")
-        ax.axis("off")
+        img = x_recon_mag[batch_idx, t, :, :].cpu().detach().numpy()
+        # grasp_img = grasp_img_mag[batch_idx, t, :, :].cpu().detach().numpy()
+        ax1 = axes[0, t]
+        ax1.imshow(np.rot90(img, 2), cmap="gray")
+        ax1.set_title(f"t = {t}")
+        ax1.axis("off")
+        # ax2 = axes[1, t]
+        # ax2.imshow(grasp_img, cmap="gray")
+        # ax2.set_title(f"t = {t}")
+        # ax2.axis("off")
     fig.suptitle(title, fontsize=16)
     plt.tight_layout(rect=[0, 0.03, 1, 0.95])
     plt.savefig(os.path.join(output_dir, f"{filename}.png"))
@@ -173,6 +180,9 @@ class SubsampleTime(Transform):
         return torch.cat(output_list, dim=0)
 
 
+
+    
+
 # Parse command-line arguments
 parser = argparse.ArgumentParser(description="Train ReconResNet model.")
 parser.add_argument(
@@ -210,11 +220,18 @@ else:
         config = yaml.safe_load(file)
 
 
-# load params
-split_file = config["data"]["split_file"]
-
 output_dir = os.path.join(config["experiment"]["output_dir"], exp_name)
 os.makedirs(output_dir, exist_ok=True)
+
+
+# Save the configuration file
+if args.from_checkpoint == False:
+    with open(os.path.join(output_dir, 'config.yaml'), 'w') as file:
+        yaml.dump(config, file)
+
+
+# load params
+split_file = config["data"]["split_file"]
 
 batch_size = config["dataloader"]["batch_size"]
 max_subjects = config["dataloader"]["max_subjects"]
@@ -247,7 +264,7 @@ else:
     val_patient_ids = splits["val"]
 
 
-train_dataset = KSpaceSliceDataset(
+train_dataset = SliceDataset(
     root_dir=config["data"]["root_dir"],
     patient_ids=train_patient_ids,
     dataset_key=config["data"]["dataset_key"],
@@ -255,7 +272,7 @@ train_dataset = KSpaceSliceDataset(
     slice_idx=config["dataloader"]["slice_idx"],
 )
 
-val_dataset = KSpaceSliceDataset(
+val_dataset = SliceDataset(
     root_dir=config["data"]["root_dir"],
     patient_ids=val_patient_ids,
     dataset_key=config["data"]["dataset_key"],
@@ -324,10 +341,10 @@ mc_loss_fn = MCLoss()
 if use_ei_loss:
     rotate = VideoRotate(n_trans=1, interpolation_mode=InterpolationMode.BILINEAR)
     diffeo = VideoDiffeo(n_trans=1, device=device)
-    subsample = SubsampleTime(n_trans=1, subsample_ratio=0.75)
+    subsample = SubsampleTime(n_trans=1, subsample_ratio=config['model']['losses']['ei_loss']['subsample_ratio'])
 
     # NOTE: Not using temporal transforms for now
-    ei_loss_fn = EILoss((diffeo | rotate))
+    ei_loss_fn = EILoss(subsample | (diffeo | rotate))
 
 print(
     "--- Generating and saving a Zero-Filled (ZF) reconstruction sample before training ---"
@@ -347,7 +364,7 @@ with torch.no_grad():
         x_zf,
         "Zero-Filled (ZF) Reconstruction (Before Training)",
         "zf_reconstruction_baseline",
-        output_dir,
+        output_dir
     )
 print("--- ZF baseline image saved to output directory. Starting training. ---")
 
@@ -356,6 +373,8 @@ train_mc_losses = []
 val_mc_losses = []
 train_ei_losses = []
 val_ei_losses = []
+weighted_train_mc_losses = []
+weighted_train_ei_losses = []
 
 iteration_count = 0
 
@@ -369,9 +388,7 @@ for epoch in range(start_epoch, epochs + 1):
             train_loader, desc=f"Epoch {epoch}/{epochs}  Training", unit="batch"
         )
         # measured_kspace shape: (B, C, I, S, T) = 1, 1, 2, 23040, 8
-        for (
-            measured_kspace
-        ) in train_loader_tqdm:  # measured_kspace shape: (B, C, I, S, T)
+        for measured_kspace in train_loader_tqdm:  # measured_kspace shape: (B, C, I, S, T)
             iteration_count += 1
             optimizer.zero_grad()
 
@@ -385,7 +402,7 @@ for epoch in range(start_epoch, epochs + 1):
             if use_ei_loss:
                 # x_recon: reconstructed image
                 ei_loss = ei_loss_fn(
-                    x_recon, measured_kspace.to(device), physics, model
+                    x_recon, physics, model
                 )
                 running_ei_loss += ei_loss.item()
                 total_loss = mc_loss * mc_loss_weight + ei_loss * ei_loss_weight
@@ -406,24 +423,26 @@ for epoch in range(start_epoch, epochs + 1):
             torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
             optimizer.step()
 
-            if iteration_count % plot_interval == 0:
-                with torch.no_grad():
-                    plot_reconstruction_sample(
-                        x_recon,
-                        f"Training Sample - Epoch {epoch}, Iteration {iteration_count}",
-                        f"train_sample_epoch_{epoch}_iter_{iteration_count}",
-                        output_dir,
-                    )
+            if epoch % save_interval == 0:
+                plot_reconstruction_sample(
+                    x_recon,
+                    f"Training Sample - Epoch {epoch}",
+                    f"train_sample_epoch_{epoch}",
+                    output_dir
+                )
 
         # Calculate and store average epoch losses
         epoch_train_mc_loss = running_mc_loss / len(train_loader)
         train_mc_losses.append(epoch_train_mc_loss)
+        weighted_train_mc_losses.append(epoch_train_mc_loss*mc_loss_weight)
         if use_ei_loss:
             epoch_train_ei_loss = running_ei_loss / len(train_loader)
             train_ei_losses.append(epoch_train_ei_loss)
+            weighted_train_ei_losses.append(epoch_train_ei_loss*ei_loss_weight)
         else:
             # Append 0 if EI loss is not used to keep lists aligned
             train_ei_losses.append(0.0)
+            weighted_train_ei_losses.append(0.0)
 
         # --- Validation Loop ---
         model.eval()
@@ -447,7 +466,7 @@ for epoch in range(start_epoch, epochs + 1):
 
                 if use_ei_loss:
                     val_ei_loss = ei_loss_fn(
-                        val_x_recon, val_kspace_batch.to(device), physics, model
+                        val_x_recon, physics, model
                     )
                     val_running_ei_loss += val_ei_loss.item()
                     val_loader_tqdm.set_postfix(
@@ -462,7 +481,7 @@ for epoch in range(start_epoch, epochs + 1):
                     val_x_recon,
                     f"Validation Sample - Epoch {epoch}",
                     f"val_sample_epoch_{epoch}",
-                    output_dir,
+                    output_dir
                 )
 
         # Calculate and store average validation losses
@@ -500,6 +519,20 @@ for epoch in range(start_epoch, epochs + 1):
                 plt.grid(True)
                 plt.savefig(os.path.join(output_dir, "ei_losses.png"))
                 plt.close()
+
+
+                # Plot Weighted Losses
+                plt.figure()
+                plt.plot(weighted_train_mc_losses, label="MC Loss")
+                plt.plot(weighted_train_ei_losses, label="EI Loss")
+                plt.xlabel("Epoch")
+                plt.ylabel("Loss")
+                plt.title("Weighted Training Losses")
+                plt.legend()
+                plt.grid(True)
+                plt.savefig(os.path.join(output_dir, "weighted_losses.png"))
+                plt.close()
+
 
         # Print epoch summary
         print(

@@ -26,21 +26,21 @@ dataloader:
 # Model settings
 model:
   name: "DDEI"
-  cascades: 2
+  cascades: 4
   channels: 64
   optimizer:
     name: "Adam"
-    lr: 0.00005
+    lr: 0.0001
     weight_decay: 0.0
     b1: 0.9
     b2: 0.999
     eps: 0.000000001
   losses:
-    use_ei_loss: false
+    use_ei_loss: true
     mc_loss:
       weight: 1
     ei_loss:
-      weight: 1e-5
+      weight: 0.00001
 
 
 # Training settings

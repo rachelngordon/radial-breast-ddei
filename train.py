@@ -384,7 +384,9 @@ for epoch in range(start_epoch, epochs + 1):
 
             if use_ei_loss:
                 # x_recon: reconstructed image
-                ei_loss = ei_loss_fn(x_recon, physics, model)
+                ei_loss = ei_loss_fn(
+                    x_recon, measured_kspace.to(device), physics, model
+                )
                 running_ei_loss += ei_loss.item()
                 total_loss = mc_loss * mc_loss_weight + ei_loss * ei_loss_weight
                 train_loader_tqdm.set_postfix(
@@ -444,7 +446,9 @@ for epoch in range(start_epoch, epochs + 1):
                 val_running_mc_loss += val_mc_loss.item()
 
                 if use_ei_loss:
-                    val_ei_loss = ei_loss_fn(val_x_recon, physics, model)
+                    val_ei_loss = ei_loss_fn(
+                        val_x_recon, val_kspace_batch.to(device), physics, model
+                    )
                     val_running_ei_loss += val_ei_loss.item()
                     val_loader_tqdm.set_postfix(
                         val_mc_loss=val_mc_loss.item(), val_ei_loss=val_ei_loss.item()

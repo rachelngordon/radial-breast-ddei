@@ -2,8 +2,8 @@
 
 # Parameters
 #SBATCH --cpus-per-task=4
-#SBATCH --error=mc_ei_red_lr.err
-#SBATCH --output=mc_ei_red_lr.out
+#SBATCH --error=logs/mc_ei_red_lr.err
+#SBATCH --output=logs/mc_ei_red_lr.out
 #SBATCH --exclude=''
 #SBATCH --gpus-per-node=1
 #SBATCH --job-name=mc_ei_red_lr

@@ -2,11 +2,11 @@
 
 # Parameters
 #SBATCH --cpus-per-task=4
-#SBATCH --error=mc_ei_downweight_loss_norm.err
-#SBATCH --output=mc_ei_downweight_loss_norm.out
+#SBATCH --error=logs/mc_ei_loss_fix_traj.err
+#SBATCH --output=logs/mc_ei_loss_fix_traj.out
 #SBATCH --exclude=''
 #SBATCH --gpus-per-node=1
-#SBATCH --job-name=mc_ei_downweight_loss_norm
+#SBATCH --job-name=mc_ei_loss_fix_traj
 #SBATCH --mem-per-gpu=490000
 #SBATCH --nodes=1
 #SBATCH --ntasks-per-node=1
@@ -21,4 +21,4 @@ source /gpfs/data/karczmar-lab/workspaces/rachelgordon/micromamba/etc/profile.d/
 micromamba activate recon_mri
 
 # Run the training script with srun
-python3 train.py --config config.yaml --exp_name mc_ei_downweight_loss_norm
+python3 train.py --config config.yaml --exp_name mc_ei_loss_fix_traj

@@ -29,67 +29,61 @@ class RadialPhysics(dinv.physics.Physics):
         self.N_samples = N_samples
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-        spokelength = im_size[1] * 2
-        grid_size = (int(spokelength), int(spokelength))
+        # --- KEEP THIS CHANGE: Increased grid size for better precision ---
+        grid_size = [int(s * 2.0) for s in im_size]
+
+        # --- Revert to using the functional KbNufft and KbNufftAdjoint ---
         self.NUFFT = KbNufft(im_size=im_size, grid_size=grid_size).to(self.device)
         self.AdjNUFFT = KbNufftAdjoint(im_size=im_size, grid_size=grid_size).to(
             self.device
         )
 
-        self.traj, self.dcf = self.get_traj_and_dcf()
+        self.traj, self.sqrt_dcf = self.get_traj_and_dcf()
         self.traj = self.traj.to(self.device)
-        self.dcf = self.dcf.to(self.device)
+        self.sqrt_dcf = self.sqrt_dcf.to(self.device)
 
     def get_traj_and_dcf(self):
-        # Generates a SINGLE frame trajectory (B, D, N) and DCF
+        # This method is correct and needs no changes.
         base_res = self.N_samples // 2
         base_lin = np.arange(self.N_samples).reshape(1, -1) - base_res
         ga = np.pi * (3.0 - np.sqrt(5.0))
         base_rot = np.arange(self.N_spokes).reshape(-1, 1) * ga
-
         traj_flat = np.zeros((self.N_spokes, self.N_samples, 2))
         traj_flat[..., 0] = np.cos(base_rot) @ base_lin
         traj_flat[..., 1] = np.sin(base_rot) @ base_lin
-        traj_flat = traj_flat / base_res
+
+        traj_flat = (traj_flat / base_res) * np.pi
 
         traj = torch.from_numpy(traj_flat).float()
-        # Shape: (1, Dims=2, Spokes*Samples)
         traj_nufft_ready = rearrange(traj, "s i xy -> 1 xy (s i)")
 
-        # DCF calculation
         dcf_vals = torch.sqrt(
             traj_nufft_ready[0, 0, :] ** 2 + traj_nufft_ready[0, 1, :] ** 2
         )
+        sqrt_dcf_vals = torch.sqrt(dcf_vals)
 
-        # --- LIKELY FIX: Add a small epsilon to prevent division by zero ---
-        epsilon = 1e-8
-        dcf_vals += epsilon
-
-        dcf = rearrange(dcf_vals, "(s i) -> 1 1 s i", s=self.N_spokes)
-
-        return traj_nufft_ready, dcf
+        sqrt_dcf = rearrange(sqrt_dcf_vals, "(s i) -> 1 1 (s i)", s=self.N_spokes)
+        return traj_nufft_ready, sqrt_dcf
 
     def A(self, x: torch.Tensor, **kwargs) -> torch.Tensor:
-        # Input x: (B, C=2, H, W) real-valued
-        x_complex = to_torch_complex(x)  # -> (B, H, W) complex
-        # Add coil dimension for NUFFT
-        k_complex_nufft = self.NUFFT(x_complex.unsqueeze(1), self.traj)
-        # Remove coil dim and convert back to real
-        y = from_torch_complex(k_complex_nufft.squeeze(1))  # -> (B, C=2, N_points)
-        # Reshape to (B, C, S, I)
+        # The call signature is back to the original version
+        x_complex = to_torch_complex(x).unsqueeze(1)
+        k_complex_nufft = self.NUFFT(x_complex, self.traj)
+
+        y_complex_weighted = k_complex_nufft * self.sqrt_dcf
+
+        y = from_torch_complex(y_complex_weighted.squeeze(1))
         return rearrange(y, "b c (s i) -> b c s i", s=self.N_spokes)
 
     def A_adjoint(self, y: torch.Tensor, **kwargs) -> torch.Tensor:
+        # The call signature is back to the original version
         y_flat = rearrange(y, "b c s i -> b c (s i)")
-        y_complex_nufft = to_torch_complex(y_flat).unsqueeze(1)
+        y_complex = to_torch_complex(y_flat).unsqueeze(1)
 
-        dcf_flat = rearrange(self.dcf, "b c s i -> b c (s i)")
-        y_dcf_complex = y_complex_nufft * dcf_flat  # This multiplication is the key
+        y_dcf_complex = y_complex * self.sqrt_dcf
 
-        # --- DEBUG: check if y_dcf_complex has NaNs ---
         if torch.isnan(y_dcf_complex).any():
             print("!!! ERROR: NaN detected in y_dcf_complex in A_adjoint !!!")
-            # This would happen if dcf_flat contained NaNs, which the epsilon should prevent.
 
         x_complex = self.AdjNUFFT(y_dcf_complex, self.traj).squeeze(1)
         return from_torch_complex(x_complex)

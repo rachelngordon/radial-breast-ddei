@@ -5,6 +5,22 @@ from einops import rearrange
 
 # --- Helper function for normalization ---
 def _normalize_batch(x):
+    b, h, w, t, c = x.shape
+    x_flat = x.reshape(b, -1)
+    max_vals, _ = torch.max(torch.abs(x_flat), dim=1, keepdim=True)
+    max_vals = max_vals + 1e-8
+    max_vals_reshaped = max_vals.reshape(b, 1, 1, 1, 1)
+    return x / max_vals_reshaped
+
+
+def _renormalize_by_input(x_after_dc, x_before_dc):
+    norm_before = torch.linalg.vector_norm(x_before_dc.flatten(1), dim=1, keepdim=True)
+    norm_after = torch.linalg.vector_norm(x_after_dc.flatten(1), dim=1, keepdim=True)
+    scaling_factor = norm_before / (norm_after + 1e-8)
+    return x_after_dc * scaling_factor.view(-1, 1, 1, 1, 1)
+
+
+def _normalize_batch(x):
     """
     Normalizes each item in the batch to the range [-1, 1] based on its absolute maximum value.
     This preserves the internal structure and relative enhancement curve shape.
@@ -116,58 +132,40 @@ class CRNN(nn.Module):
         self.bcrnn = BCRNN(in_chans, chans, n_layers=1, **kwargs)
         self.res_conv = nn.Conv2d(chans, in_chans, kernel_size=1, stride=1, padding=0)
 
-    def forward(self, x_init_permuted, y, mask):
+    def forward(self, x_init_permuted, y, mask):  # 'mask' is the unused dummy mask
         B, H, W, T, C = x_init_permuted.shape
-        net = {}
-
-        # Initial image estimate (output of A_adjoint)
-        net["t0_x0"] = x_init_permuted
-
-        # The input to the first cascade is the initial estimate
-        x_cascade_in = net["t0_x0"]
+        x_cascade_in = x_init_permuted
 
         for i in range(self.num_cascades):
-            # --- Recurrent Denoiser ---
-            # The BCRNN denoises the input from the previous step.
-            # `net["t0_x0"]` provides the initial context at each time step.
-            bcrnn_out = self.bcrnn(x_cascade_in, net["t0_x0"])
-
-            # --- BUG FIX & Reshaping for Residual Connection ---
-            # Original code had incorrect permute/flatten operations.
-            # Correct reshaping:
-            # Input: (B, H, W, T, chans) -> (B*T, chans, H, W)
-            bcrnn_out_reshaped = bcrnn_out.permute(
-                0, 3, 4, 1, 2
-            ).contiguous()  # -> (B, T, chans, H, W)
-            bcrnn_out_reshaped = bcrnn_out_reshaped.reshape(B * T, self.chans, H, W)
-
-            # Apply 1x1 conv to project back to input channels
-            res_out_reshaped = self.res_conv(
-                bcrnn_out_reshaped
-            )  # -> (B*T, in_chans, H, W)
-
-            # Reshape back to original tensor layout
-            # -> (B, T, in_chans, H, W) -> (B, H, W, T, in_chans)
-            res_out = res_out_reshaped.reshape(B, T, self.in_chans, H, W)
-            res_out = res_out.permute(0, 3, 4, 1, 2).contiguous()
-
-            # Add residual connection
+            # --- 1. Regularization Block (Network's guess) ---
+            bcrnn_out = self.bcrnn(x_cascade_in, x_init_permuted)
+            bcrnn_out_reshaped = (
+                bcrnn_out.permute(0, 3, 4, 1, 2)
+                .contiguous()
+                .reshape(B * T, self.chans, H, W)
+            )
+            res_out_reshaped = self.res_conv(bcrnn_out_reshaped)
+            res_out = (
+                res_out_reshaped.reshape(B, T, self.in_chans, H, W)
+                .permute(0, 3, 4, 1, 2)
+                .contiguous()
+            )
             x_pre_dc = x_cascade_in + res_out
 
-            # --- Data Consistency ---
-            x_post_dc = self.datalayer(x_pre_dc, y, mask)
+            # --- 2. Data Consistency Block (The Explosion) ---
+            # Use the correct physics mask from the datalayer itself
+            x_post_dc = self.datalayer(x_pre_dc, y, self.datalayer.physics.mask)
 
-            # --- STABILIZATION: Inter-Cascade Normalization ---
-            # Normalize the output of the DC layer before it becomes the
-            # input to the next cascade. This prevents value explosion.
-            # We skip normalization on the very last cascade's output.
+            # --- 3. Normalization Block (The Fix) ---
+            # This is the crucial step to prevent the feedback loop explosion.
             if i < self.num_cascades - 1:
-                x_cascade_in = _normalize_batch(x_post_dc)
+                # Choose your normalization strategy. Renormalizing is often better.
+                x_cascade_in = _renormalize_by_input(x_post_dc, x_pre_dc)
             else:
-                # This is the final output of the entire CRNN
+                # On the last cascade, don't normalize the final output
                 x_cascade_in = x_post_dc
 
-        return x_cascade_in  # This is the final reconstructed image
+        return x_cascade_in
 
 
 # This wrapper class remains the same as in your original file.

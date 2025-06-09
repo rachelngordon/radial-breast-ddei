@@ -169,21 +169,7 @@ class RadialDCLayer(nn.Module):
         x_img = rearrange(x_img_permuted, "b h w t c -> b c t h w")
         y = y_kspace_meas
 
-        # --- DEBUG PRINTS ---
-        print("\n--- [DEBUG RadialDCLayer.forward] ---")
-        print(f"Input image (x_img) has NaNs: {torch.isnan(x_img).any().item()}")
-        print(f"Input image (x_img) has Infs: {torch.isinf(x_img).any().item()}")
-        print(f"Input image (x_img) max value: {x_img.max().item()}")
-
         A_x = self.physics.A(x_img)
-
-        print(f"k-space of net output (A_x) has NaNs: {torch.isnan(A_x).any().item()}")
-        print(f"k-space of net output (A_x) has Infs: {torch.isinf(A_x).any().item()}")
-        print(f"k-space of net output (A_x) max value: {A_x.max().item()}")
-
-        print(f"Measured k-space (y) has NaNs: {torch.isnan(y).any().item()}")
-        print(f"Measured k-space (y) has Infs: {torch.isinf(y).any().item()}")
-        # --- END DEBUG PRINTS ---
 
         mask = torch.ones_like(A_x)
         lambda_ = torch.sigmoid(self.lambda_)

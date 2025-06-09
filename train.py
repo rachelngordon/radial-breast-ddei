@@ -14,6 +14,40 @@ from torch.utils.data import DataLoader
 from torchvision.transforms import InterpolationMode
 from tqdm import tqdm
 
+
+def plot_reconstruction_sample(x_recon, title, filename, output_dir, batch_idx=0):
+    """
+    Plot reconstruction sample showing magnitude images across timeframes.
+
+    Args:
+        x_recon: Reconstructed image tensor of shape (B, C, T, H, W)
+        title: Title for the plot
+        filename: Filename for saving (without extension)
+        output_dir: Directory to save the plot
+        batch_idx: Which batch element to plot (default: 0)
+    """
+    # compute magnitude from complex reconstruction
+    x_recon_mag = torch.sqrt(x_recon[:, 0, ...] ** 2 + x_recon[:, 1, ...] ** 2)
+
+    n_timeframes = x_recon_mag.shape[1]
+    fig, axes = plt.subplots(
+        nrows=1,
+        ncols=n_timeframes,
+        figsize=(n_timeframes * 3, 4),
+        squeeze=False,
+    )
+    for t in range(n_timeframes):
+        img = x_recon_mag[batch_idx, t, :, :].cpu().numpy()
+        ax = axes[0, t]
+        ax.imshow(img, cmap="gray")
+        ax.set_title(f"t = {t}")
+        ax.axis("off")
+    fig.suptitle(title, fontsize=16)
+    plt.tight_layout(rect=[0, 0.03, 1, 0.95])
+    plt.savefig(os.path.join(output_dir, f"{filename}.png"))
+    plt.close(fig)
+
+
 # parameters: need to pass as command line arguments later
 
 root_dir = "/ess/scratch/scratch1/rachelgordon/dce-8tf/binned_kspace"
@@ -27,6 +61,7 @@ output_dir = os.path.join("output", exp_name)
 os.makedirs(output_dir, exist_ok=True)
 use_ei_loss = True
 mc_loss_weight = 1
+plot_interval = 20
 
 # load data
 split_file = "patient_splits.json"
@@ -246,11 +281,14 @@ val_mc_losses = []
 train_ei_losses = []
 val_ei_losses = []
 
+iteration_count = 0
+
 for epoch in range(start_epoch, epochs + 1):
     model.train()
     running_mc_loss = 0.0
     running_ei_loss = 0.0
-    with torch.autograd.set_detect_anomaly(True):
+    # turn on anomaly detection for debugging but slows down training
+    with torch.autograd.set_detect_anomaly(False):
         train_loader_tqdm = tqdm(
             train_loader, desc=f"Epoch {epoch}/{epochs}  Training", unit="batch"
         )
@@ -258,6 +296,7 @@ for epoch in range(start_epoch, epochs + 1):
         for (
             measured_kspace
         ) in train_loader_tqdm:  # measured_kspace shape: (B, C, I, S, T)
+            iteration_count += 1
             optimizer.zero_grad()
 
             x_recon = model(
@@ -272,8 +311,12 @@ for epoch in range(start_epoch, epochs + 1):
                 ei_loss = ei_loss_fn(x_recon, physics, model)
                 running_ei_loss += ei_loss.item()
                 total_loss = mc_loss * mc_loss_weight + ei_loss
+                train_loader_tqdm.set_postfix(
+                    mc_loss=mc_loss.item(), ei_loss=ei_loss.item()
+                )
             else:
                 total_loss = mc_loss
+                train_loader_tqdm.set_postfix(mc_loss=mc_loss.item())
 
             if torch.isnan(total_loss):
                 print(
@@ -284,6 +327,15 @@ for epoch in range(start_epoch, epochs + 1):
             total_loss.backward()
             torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
             optimizer.step()
+
+            if iteration_count % plot_interval == 0:
+                with torch.no_grad():
+                    plot_reconstruction_sample(
+                        x_recon,
+                        f"Training Sample - Epoch {epoch}, Iteration {iteration_count}",
+                        f"train_sample_epoch_{epoch}_iter_{iteration_count}",
+                        output_dir,
+                    )
 
         # Calculate and store average epoch losses
         epoch_train_mc_loss = running_mc_loss / len(train_loader)
@@ -318,30 +370,20 @@ for epoch in range(start_epoch, epochs + 1):
                 if use_ei_loss:
                     val_ei_loss = ei_loss_fn(val_x_recon, physics, model)
                     val_running_ei_loss += val_ei_loss.item()
+                    val_loader_tqdm.set_postfix(
+                        val_mc_loss=val_mc_loss.item(), val_ei_loss=val_ei_loss.item()
+                    )
+                else:
+                    val_loader_tqdm.set_postfix(val_mc_loss=val_mc_loss.item())
 
-            # Save a sample from the last validation batch of the epoch
+            # save a sample from the last validation batch of the epoch
             if epoch % save_interval == 0:
-                val_x_recon_mag = torch.sqrt(
-                    val_x_recon[:, 0, ...] ** 2 + val_x_recon[:, 1, ...] ** 2
+                plot_reconstruction_sample(
+                    val_x_recon,
+                    f"Validation Sample - Epoch {epoch}",
+                    f"val_sample_epoch_{epoch}",
+                    output_dir,
                 )
-                batch_idx = 0
-                n_timeframes = val_x_recon_mag.shape[1]
-                fig, axes = plt.subplots(
-                    nrows=1,
-                    ncols=n_timeframes,
-                    figsize=(n_timeframes * 3, 4),
-                    squeeze=False,
-                )
-                for t in range(n_timeframes):
-                    img = val_x_recon_mag[batch_idx, t, :, :].cpu().numpy()
-                    ax = axes[0, t]
-                    ax.imshow(img, cmap="gray")
-                    ax.set_title(f"T = {t}")
-                    ax.axis("off")
-                fig.suptitle(f"Validation Sample - Epoch {epoch}", fontsize=16)
-                plt.tight_layout(rect=[0, 0.03, 1, 0.95])
-                plt.savefig(os.path.join(output_dir, f"val_sample_epoch_{epoch}.png"))
-                plt.close(fig)
 
         # Calculate and store average validation losses
         epoch_val_mc_loss = val_running_mc_loss / len(val_loader)

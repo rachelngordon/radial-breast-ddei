@@ -292,7 +292,14 @@ for epoch in range(start_epoch, epochs + 1):
             else:
                 total_loss = mc_loss
 
+            if torch.isnan(total_loss):
+                print(
+                    "!!! ERROR: total_loss is NaN before backward pass. Aborting. !!!"
+                )
+                raise RuntimeError("total_loss is NaN")
+
             total_loss.backward()
+            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
             optimizer.step()
 
         # Calculate and store average epoch losses

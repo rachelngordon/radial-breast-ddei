@@ -56,11 +56,16 @@ class RadialPhysics(dinv.physics.Physics):
         # Shape: (1, Dims=2, Spokes*Samples)
         traj_nufft_ready = rearrange(traj, "s i xy -> 1 xy (s i)")
 
-        # DCF shape: (1, 1, Spokes, Samples)
-        dcf = torch.sqrt(
+        # DCF calculation
+        dcf_vals = torch.sqrt(
             traj_nufft_ready[0, 0, :] ** 2 + traj_nufft_ready[0, 1, :] ** 2
         )
-        dcf = rearrange(dcf, "(s i) -> 1 1 s i", s=self.N_spokes)
+
+        # --- LIKELY FIX: Add a small epsilon to prevent division by zero ---
+        epsilon = 1e-8
+        dcf_vals += epsilon
+
+        dcf = rearrange(dcf_vals, "(s i) -> 1 1 s i", s=self.N_spokes)
 
         return traj_nufft_ready, dcf
 
@@ -75,16 +80,18 @@ class RadialPhysics(dinv.physics.Physics):
         return rearrange(y, "b c (s i) -> b c s i", s=self.N_spokes)
 
     def A_adjoint(self, y: torch.Tensor, **kwargs) -> torch.Tensor:
-        # Input y: (B, C=2, S, I) real-valued
-        # Reshape to (B, C, S*I)
         y_flat = rearrange(y, "b c s i -> b c (s i)")
         y_complex_nufft = to_torch_complex(y_flat).unsqueeze(1)
-        # Apply DCF (flattened)
+
         dcf_flat = rearrange(self.dcf, "b c s i -> b c (s i)")
-        y_dcf_complex = y_complex_nufft * dcf_flat
-        # Apply Adjoint NUFFT
+        y_dcf_complex = y_complex_nufft * dcf_flat  # This multiplication is the key
+
+        # --- DEBUG: check if y_dcf_complex has NaNs ---
+        if torch.isnan(y_dcf_complex).any():
+            print("!!! ERROR: NaN detected in y_dcf_complex in A_adjoint !!!")
+            # This would happen if dcf_flat contained NaNs, which the epsilon should prevent.
+
         x_complex = self.AdjNUFFT(y_dcf_complex, self.traj).squeeze(1)
-        # Convert back to real
         return from_torch_complex(x_complex)
 
 
@@ -157,24 +164,30 @@ class RadialDCLayer(nn.Module):
 
     def forward(self, x_img_permuted, y_kspace_meas, mask_kspace):
         # x_img_permuted from CRNN: (b, h, w, t, c)
-        x_img = rearrange(x_img_permuted, "b h w t c -> b c t h w")
-
         # y_kspace_meas from dataloader: (b, c, t, s, i)
+        # mask_kspace: same shape as y_kspace_meas
+        x_img = rearrange(x_img_permuted, "b h w t c -> b c t h w")
         y = y_kspace_meas
 
-        # Step 1: Transform the network's current image estimate to k-space.
-        # The physics operator `A` handles all NUFFT logic.
+        # --- DEBUG PRINTS ---
+        print("\n--- [DEBUG RadialDCLayer.forward] ---")
+        print(f"Input image (x_img) has NaNs: {torch.isnan(x_img).any().item()}")
+        print(f"Input image (x_img) has Infs: {torch.isinf(x_img).any().item()}")
+        print(f"Input image (x_img) max value: {x_img.max().item()}")
+
         A_x = self.physics.A(x_img)
 
-        # Step 2: Perform the data consistency update in k-space.
-        # We use a simplified mask since the physics operator handles any complex masking.
-        # The mask here is just for the weighted average.
-        mask = torch.ones_like(A_x)  # This could be more sophisticated if needed
+        print(f"k-space of net output (A_x) has NaNs: {torch.isnan(A_x).any().item()}")
+        print(f"k-space of net output (A_x) has Infs: {torch.isinf(A_x).any().item()}")
+        print(f"k-space of net output (A_x) max value: {A_x.max().item()}")
 
-        lambda_ = torch.sigmoid(self.lambda_)  # Ensure lambda is in [0,1]
+        print(f"Measured k-space (y) has NaNs: {torch.isnan(y).any().item()}")
+        print(f"Measured k-space (y) has Infs: {torch.isinf(y).any().item()}")
+        # --- END DEBUG PRINTS ---
 
-        # Note: In SSDU/splitting methods, `mask` would be the splitting mask.
-        # Here, it's just a placeholder for the weighting.
+        mask = torch.ones_like(A_x)
+        lambda_ = torch.sigmoid(self.lambda_)
+
         k_dc = (1 - mask) * A_x + mask * (lambda_ * A_x + (1 - lambda_) * y)
 
         # Step 3: Transform the corrected k-space back to image space.

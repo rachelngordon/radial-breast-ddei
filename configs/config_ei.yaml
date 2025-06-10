@@ -40,7 +40,7 @@ model:
     mc_loss:
       weight: 1
     ei_loss:
-      weight: 0.001
+      weight: 0.0003
       subsample_ratio_min: 0.7
       subsample_ratio_max: 0.95
 

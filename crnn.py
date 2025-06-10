@@ -1,6 +1,12 @@
 import torch
 import torch.nn as nn
 from einops import rearrange
+import wandb
+
+
+def log(key, value, step):
+    # In a real scenario, this would be wandb.log({key: value, "step": step})
+    print(f"Step {step} - {key}: {value:.4f}")
 
 
 # --- Helper function for normalization ---
@@ -158,9 +164,22 @@ class CRNN(nn.Module):
 
             # --- 3. Normalization Block (The Fix) ---
             # This is the crucial step to prevent the feedback loop explosion.
+            global_step = 0
             if i < self.num_cascades - 1:
+                # Log metrics BEFORE normalization
+                log(f"cascade_{i}/pre_norm_mean", x_post_dc.mean().item(), global_step)
+                log(f"cascade_{i}/pre_norm_std", x_post_dc.std().item(), global_step)
+                log(f"cascade_{i}/pre_norm_min", x_post_dc.min().item(), global_step)
+                log(f"cascade_{i}/pre_norm_max", x_post_dc.max().item(), global_step)
+
                 # Choose your normalization strategy. Renormalizing is often better.
                 x_cascade_in = _renormalize_by_input(x_post_dc, x_pre_dc)
+
+                # Log metrics AFTER normalization
+                log(f"cascade_{i}/post_norm_mean", x_cascade_in.mean().item(), global_step)
+                log(f"cascade_{i}/post_norm_std", x_cascade_in.std().item(), global_step)
+                log(f"cascade_{i}/post_norm_min", x_cascade_in.min().item(), global_step)
+                log(f"cascade_{i}/post_norm_max", x_cascade_in.max().item(), global_step)
             else:
                 # On the last cascade, don't normalize the final output
                 x_cascade_in = x_post_dc
@@ -182,6 +201,7 @@ class ArtifactRemovalCRNN(nn.Module):
 
         # 2. Permute and normalize the input for the network
         x_init_permuted = rearrange(x_init, "b c t h w -> b h w t c")
+
         x_init_norm_permuted = _normalize_batch(x_init_permuted)
 
         mask = torch.ones_like(y)

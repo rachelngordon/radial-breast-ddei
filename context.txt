@@ -1,0 +1,795 @@
+=== train.py ===
+import argparse
+import json
+import os
+import subprocess
+import deepinv as dinv
+import matplotlib.pyplot as plt
+import torch
+import yaml
+from crnn import CRNN, ArtifactRemovalCRNN
+from dataloader import SliceDataset
+from deepinv.loss import EILoss, MCLoss
+from deepinv.transform import Transform
+from einops import rearrange
+from radial import DynamicRadialPhysics, RadialDCLayer
+from torch.utils.data import DataLoader
+from torchvision.transforms import InterpolationMode
+from tqdm import tqdm
+import numpy as np
+from transform import VideoRotate, VideoDiffeo, SubsampleTime
+def plot_reconstruction_sample(x_recon, title, filename, output_dir, grasp_img=None, batch_idx=0):
+    """
+    Plot reconstruction sample showing magnitude images across timeframes.
+    Args:
+        x_recon: Reconstructed image tensor of shape (B, C, T, H, W)
+        title: Title for the plot
+        filename: Filename for saving (without extension)
+        output_dir: Directory to save the plot
+        batch_idx: Which batch element to plot (default: 0)
+    """
+    x_recon_mag = torch.sqrt(x_recon[:, 0, ...] ** 2 + x_recon[:, 1, ...] ** 2)
+    grasp_img_mag = torch.sqrt(grasp_img[:, 0, ...] ** 2 + grasp_img[:, 1, ...] ** 2)
+    n_timeframes = x_recon_mag.shape[1]
+    fig, axes = plt.subplots(
+        nrows=2,
+        ncols=n_timeframes,
+        figsize=(n_timeframes * 3, 8),
+        squeeze=False,
+    )
+    for t in range(n_timeframes):
+        img = x_recon_mag[batch_idx, t, :, :].cpu().detach().numpy()
+        grasp_img = grasp_img_mag[batch_idx, t, :, :].cpu().detach().numpy()
+        ax1 = axes[0, t]
+        ax1.imshow(np.rot90(img, 2), cmap="gray")
+        ax1.set_title(f"t = {t}")
+        ax1.axis("off")
+        ax2 = axes[1, t]
+        ax2.imshow(grasp_img, cmap="gray")
+        ax2.set_title(f"t = {t}")
+        ax2.axis("off")
+    fig.suptitle(title, fontsize=16)
+    plt.tight_layout(rect=[0, 0.03, 1, 0.95])
+    plt.savefig(os.path.join(output_dir, f"{filename}.png"))
+    plt.close(fig)
+def get_git_commit():
+    try:
+        commit_hash = (
+            subprocess.check_output(["git", "rev-parse", "HEAD"])
+            .strip()
+            .decode("utf-8")
+        )
+        return commit_hash
+    except Exception as e:
+        print(f"Error retrieving Git commit: {e}")
+        return "unknown"
+parser = argparse.ArgumentParser(description="Train ReconResNet model.")
+parser.add_argument(
+    "--config",
+    type=str,
+    required=False,
+    default="config.yaml",
+    help="Path to the configuration file",
+)
+parser.add_argument(
+    "--exp_name", type=str, required=True, help="Name of the experiment"
+)
+parser.add_argument(
+    "--from_checkpoint",
+    type=bool,
+    required=False,
+    default=False,
+    help="Whether to load from a checkpoint",
+)
+args = parser.parse_args()
+commit_hash = get_git_commit()
+print(f"Running experiment on Git commit: {commit_hash}")
+exp_name = args.exp_name
+print(f"Experiment: {exp_name}")
+if args.from_checkpoint == True:
+    with open(f"output/{exp_name}/config.yaml", "r") as file:
+        config = yaml.safe_load(file)
+else:
+    with open(args.config, "r") as file:
+        config = yaml.safe_load(file)
+output_dir = os.path.join(config["experiment"]["output_dir"], exp_name)
+os.makedirs(output_dir, exist_ok=True)
+if args.from_checkpoint == False:
+    with open(os.path.join(output_dir, 'config.yaml'), 'w') as file:
+        yaml.dump(config, file)
+split_file = config["data"]["split_file"]
+batch_size = config["dataloader"]["batch_size"]
+max_subjects = config["dataloader"]["max_subjects"]
+mc_loss_weight = config["model"]["losses"]["mc_loss"]["weight"]
+ei_loss_weight = config["model"]["losses"]["ei_loss"]["weight"]
+use_ei_loss = config["model"]["losses"]["use_ei_loss"]
+epochs = config["training"]["epochs"]
+save_interval = config["training"]["save_interval"]
+plot_interval = config["training"]["plot_interval"]
+device = torch.device(config["training"]["device"])
+start_epoch = 1
+with open(split_file, "r") as fp:
+    splits = json.load(fp)
+if max_subjects < 300:
+    max_train = max_subjects * (1 - config["data"]["val_split_ratio"])
+    max_val = max_subjects * config["data"]["val_split_ratio"]
+    train_patient_ids = splits["train"][:max_train]
+    val_patient_ids = splits["val"][:max_val]
+else:
+    train_patient_ids = splits["train"]
+    val_patient_ids = splits["val"]
+train_dataset = SliceDataset(
+    root_dir=config["data"]["root_dir"],
+    patient_ids=train_patient_ids,
+    dataset_key=config["data"]["dataset_key"],
+    file_pattern="*.h5",
+    slice_idx=config["dataloader"]["slice_idx"],
+)
+val_dataset = SliceDataset(
+    root_dir=config["data"]["root_dir"],
+    patient_ids=val_patient_ids,
+    dataset_key=config["data"]["dataset_key"],
+    file_pattern="*.h5",
+    slice_idx=config["dataloader"]["slice_idx"],
+)
+train_loader = DataLoader(
+    train_dataset,
+    batch_size=config["dataloader"]["batch_size"],
+    shuffle=config["dataloader"]["shuffle"],
+    num_workers=config["dataloader"]["num_workers"],
+)
+val_loader = DataLoader(
+    val_dataset,
+    batch_size=config["dataloader"]["batch_size"],
+    shuffle=config["dataloader"]["shuffle"],
+    num_workers=config["dataloader"]["num_workers"],
+)
+H, W = config["data"]["height"], config["data"]["width"]
+N_time, N_samples, N_coils = (
+    config["data"]["timeframes"],
+    config["data"]["spokes_per_frame"],
+    config["data"]["coils"],
+)
+N_spokes = int(config["data"]["total_spokes"] / N_time)
+physics = DynamicRadialPhysics(
+    im_size=(H, W, N_time),
+    N_spokes=N_spokes,
+    N_samples=N_samples,
+    N_time=N_time,
+    N_coils=N_coils,
+)
+datalayer = RadialDCLayer(physics=physics)
+backbone = CRNN(
+    num_cascades=config["model"]["cascades"],
+    chans=config["model"]["channels"],
+    datalayer=datalayer,
+).to(device)
+model = ArtifactRemovalCRNN(backbone_net=backbone).to(device)
+optimizer = torch.optim.Adam(
+    model.parameters(),
+    lr=config["model"]["optimizer"]["lr"],
+    betas=(config["model"]["optimizer"]["b1"], config["model"]["optimizer"]["b2"]),
+    eps=config["model"]["optimizer"]["eps"],
+    weight_decay=config["model"]["optimizer"]["weight_decay"],
+)
+mc_loss_fn = MCLoss()
+if use_ei_loss:
+    rotate = VideoRotate(n_trans=1, interpolation_mode=InterpolationMode.BILINEAR)
+    diffeo = VideoDiffeo(n_trans=1, device=device)
+    subsample = SubsampleTime(n_trans=1, subsample_ratio_range=(config['model']['losses']['ei_loss']['subsample_ratio_min'], config['model']['losses']['ei_loss']['subsample_ratio_max']))
+    ei_loss_fn = EILoss(subsample | (diffeo | rotate))
+print(
+    "--- Generating and saving a Zero-Filled (ZF) reconstruction sample before training ---"
+)
+with torch.no_grad():
+    val_kspace_sample, grasp_img = next(iter(val_loader))
+    val_kspace_sample = val_kspace_sample.to(device)
+    x_zf = physics.A_adjoint(val_kspace_sample)
+    plot_reconstruction_sample(
+        x_zf,
+        "Zero-Filled (ZF) Reconstruction (Before Training)",
+        "zf_reconstruction_baseline",
+        output_dir,
+        grasp_img
+    )
+print("--- ZF baseline image saved to output directory. Starting training. ---")
+train_mc_losses = []
+val_mc_losses = []
+train_ei_losses = []
+val_ei_losses = []
+weighted_train_mc_losses = []
+weighted_train_ei_losses = []
+iteration_count = 0
+for epoch in range(start_epoch, epochs + 1):
+    model.train()
+    running_mc_loss = 0.0
+    running_ei_loss = 0.0
+    with torch.autograd.set_detect_anomaly(False):
+        train_loader_tqdm = tqdm(
+            train_loader, desc=f"Epoch {epoch}/{epochs}  Training", unit="batch"
+        )
+        for measured_kspace, grasp_img in train_loader_tqdm:  # measured_kspace shape: (B, C, I, S, T)
+            iteration_count += 1
+            optimizer.zero_grad()
+            x_recon = model(
+                measured_kspace.to(device), physics
+            )  # model output shape: (B, C, T, H, W)
+            mc_loss = mc_loss_fn(measured_kspace.to(device), x_recon, physics)
+            running_mc_loss += mc_loss.item()
+            if use_ei_loss:
+                ei_loss = ei_loss_fn(
+                    x_recon, physics, model
+                )
+                running_ei_loss += ei_loss.item()
+                total_loss = mc_loss * mc_loss_weight + ei_loss * ei_loss_weight
+                train_loader_tqdm.set_postfix(
+                    mc_loss=mc_loss.item(), ei_loss=ei_loss.item()
+                )
+            else:
+                total_loss = mc_loss
+                train_loader_tqdm.set_postfix(mc_loss=mc_loss.item())
+            if torch.isnan(total_loss):
+                print(
+                    "!!! ERROR: total_loss is NaN before backward pass. Aborting. !!!"
+                )
+                raise RuntimeError("total_loss is NaN")
+            total_loss.backward()
+            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+            optimizer.step()
+            if epoch % save_interval == 0:
+                plot_reconstruction_sample(
+                    x_recon,
+                    f"Training Sample - Epoch {epoch}",
+                    f"train_sample_epoch_{epoch}",
+                    output_dir,
+                    grasp_img
+                )
+        epoch_train_mc_loss = running_mc_loss / len(train_loader)
+        train_mc_losses.append(epoch_train_mc_loss)
+        weighted_train_mc_losses.append(epoch_train_mc_loss*mc_loss_weight)
+        if use_ei_loss:
+            epoch_train_ei_loss = running_ei_loss / len(train_loader)
+            train_ei_losses.append(epoch_train_ei_loss)
+            weighted_train_ei_losses.append(epoch_train_ei_loss*ei_loss_weight)
+        else:
+            train_ei_losses.append(0.0)
+            weighted_train_ei_losses.append(0.0)
+        model.eval()
+        val_running_mc_loss = 0.0
+        val_running_ei_loss = 0.0
+        val_loader_tqdm = tqdm(
+            val_loader,
+            desc=f"Epoch {epoch}/{epochs}  Validation",
+            unit="batch",
+            leave=False,
+        )
+        with torch.no_grad():
+            for val_kspace_batch, val_grasp_img in val_loader_tqdm:
+                val_x_recon = model(val_kspace_batch.to(device), physics)
+                val_y_meas = val_kspace_batch
+                val_mc_loss = mc_loss_fn(val_y_meas.to(device), val_x_recon, physics)
+                val_running_mc_loss += val_mc_loss.item()
+                if use_ei_loss:
+                    val_ei_loss = ei_loss_fn(
+                        val_x_recon, physics, model
+                    )
+                    val_running_ei_loss += val_ei_loss.item()
+                    val_loader_tqdm.set_postfix(
+                        val_mc_loss=val_mc_loss.item(), val_ei_loss=val_ei_loss.item()
+                    )
+                else:
+                    val_loader_tqdm.set_postfix(val_mc_loss=val_mc_loss.item())
+            if epoch % save_interval == 0:
+                plot_reconstruction_sample(
+                    val_x_recon,
+                    f"Validation Sample - Epoch {epoch}",
+                    f"val_sample_epoch_{epoch}",
+                    output_dir,
+                    val_grasp_img
+                )
+        epoch_val_mc_loss = val_running_mc_loss / len(val_loader)
+        val_mc_losses.append(epoch_val_mc_loss)
+        if use_ei_loss:
+            epoch_val_ei_loss = val_running_ei_loss / len(val_loader)
+            val_ei_losses.append(epoch_val_ei_loss)
+        else:
+            val_ei_losses.append(0.0)
+        if epoch % save_interval == 0:
+            plt.figure()
+            plt.plot(train_mc_losses, label="Training MC Loss")
+            plt.plot(val_mc_losses, label="Validation MC Loss")
+            plt.xlabel("Epoch")
+            plt.ylabel("MC Loss")
+            plt.title("Measurement Consistency Loss")
+            plt.legend()
+            plt.grid(True)
+            plt.savefig(os.path.join(output_dir, "mc_losses.png"))
+            plt.close()
+            if use_ei_loss:
+                plt.figure()
+                plt.plot(train_ei_losses, label="Training EI Loss")
+                plt.plot(val_ei_losses, label="Validation EI Loss")
+                plt.xlabel("Epoch")
+                plt.ylabel("EI Loss")
+                plt.title("Equivariant Imaging Loss")
+                plt.legend()
+                plt.grid(True)
+                plt.savefig(os.path.join(output_dir, "ei_losses.png"))
+                plt.close()
+                plt.figure()
+                plt.plot(weighted_train_mc_losses, label="MC Loss")
+                plt.plot(weighted_train_ei_losses, label="EI Loss")
+                plt.xlabel("Epoch")
+                plt.ylabel("Loss")
+                plt.title("Weighted Training Losses")
+                plt.legend()
+                plt.grid(True)
+                plt.savefig(os.path.join(output_dir, "weighted_losses.png"))
+                plt.close()
+        print(
+            f"Epoch {epoch}: Training MC Loss: {epoch_train_mc_loss:.6f}, Validation MC Loss: {epoch_val_mc_loss:.6f}"
+        )
+        if use_ei_loss:
+            print(
+                f"Epoch {epoch}: Training EI Loss: {epoch_train_ei_loss:.6f}, Validation EI Loss: {epoch_val_ei_loss:.6f}"
+            )
+model_save_path = os.path.join(output_dir, f'{exp_name}_model_checkpoint.pth')
+torch.save(model.state_dict(), model_save_path)
+print(f'Model saved to {model_save_path}')
+
+=== dataloader.py ===
+import glob
+import os
+import h5py
+import numpy as np
+import torch
+from torch.utils.data import DataLoader, Dataset
+import nibabel as nib
+class SliceDataset(Dataset):
+    """
+    A Dataset that:
+      - Looks for all .h5/.hdf5 files under `root_dir`.
+      - Each file is assumed to contain a dataset at `dataset_key`, with shape (... Z),
+        where Z is the number of slices/partitions.
+      - Splits each volume into Z separate examples (one per slice).
+      - Returns each slice as a torch.Tensor.
+    """
+    def __init__(
+        self,
+        root_dir,
+        patient_ids,
+        dataset_key="kspace",
+        file_pattern="*.h5",
+        slice_idx=41,
+        N_time = 8
+    ):
+        """
+        Args:
+            root_dir (str): Path to the folder containing all HDF5 k-space files.
+            dataset_key (str): The key/path inside each .h5 file to the k-space dataset (e.g. "kspace").
+            file_pattern (str): Glob pattern to match your HDF5 files (default "*.h5").
+        """
+        super().__init__()
+        self.root_dir = root_dir
+        self.dataset_key = dataset_key
+        self.slice_idx = slice_idx
+        self.N_time = N_time
+        all_files = sorted(glob.glob(os.path.join(root_dir, file_pattern)))
+        if len(all_files) == 0:
+            raise RuntimeError(
+                f"No files found in {root_dir} matching pattern {file_pattern}"
+            )
+        filtered = []
+        for fp in all_files:
+            fname = os.path.basename(fp)
+            if any(pid in fname for pid in patient_ids):
+                filtered.append(fp)
+        self.file_list = filtered
+        if len(self.file_list) == 0:
+            raise RuntimeError("No files matched the provided patient_ids filter.")
+    def load_dynamic_img(self, patient_id):
+        H = W = 320
+        data = np.empty((2, self.N_time, H, W), dtype=np.float32)
+        for t in range(self.N_time):
+            img_path = f'/ess/scratch/scratch1/rachelgordon/dce-{self.N_time}tf/{patient_id}/slice_{self.slice_idx:03d}_frame_{t:03d}.nii'
+            img = nib.load(img_path)
+            img_data = img.get_fdata()
+            if img_data.shape != (2, H, W):
+                raise ValueError(f"{img_path} has shape {img_data.shape}; "
+                                f"expected (2, {H}, {W})")
+            data[:, t] = img_data.astype(np.float32)
+        return torch.from_numpy(data) 
+    def __len__(self):
+        return len(self.file_list)
+    def __getitem__(self, idx):
+        """
+        Returns a single slice of k-space as a torch.Tensor.
+        The output shape will be the standard (C=2, T, S, I) where C is [real, imag].
+        """
+        file_path = self.file_list[idx]
+        patient_id = file_path.split('/')[-1].strip('.h5')
+        grasp_img = self.load_dynamic_img(patient_id)
+        with h5py.File(file_path, "r") as f:
+            ds = torch.tensor(f[self.dataset_key][:])
+            kspace_slice = ds[self.slice_idx]
+        kspace_single_coil = kspace_slice[:, 0, :, :]  # Shape: (T, S, I)
+        real_part = kspace_single_coil.real
+        imag_part = kspace_single_coil.imag
+        kspace_final = torch.stack([real_part, imag_part], dim=0).float()
+        return kspace_final, grasp_img
+if __name__ == "__main__":
+    root_dir = "/ess/scratch/scratch1/rachelgordon/dce-12tf/binned_kspace"
+    dataset_key = "ktspace"  # change if your HDF5 group/dataset is named differently
+    def to_complex(x_np: "np.ndarray") -> "np.ndarray":
+        """
+        If x_np.shape = (C, H, W, 2) or similar where the last dim is [real, imag],
+        convert to complex64 with shape (C, H, W).
+        Adjust slicing logic if your real/imag channels are elsewhere.
+        """
+        real = x_np[..., 0].astype("float32")
+        imag = x_np[..., 1].astype("float32")
+        return (real + 1j * imag).astype("complex64")
+    dataset = SliceDataset(
+        root_dir=root_dir, dataset_key=dataset_key, file_pattern="*.h5"
+    )
+    loader = DataLoader(
+        dataset,
+        batch_size=1,
+        shuffle=True,
+        num_workers=4,
+        pin_memory=True,
+    )
+    for batch_idx, kspace_batch in enumerate(loader):
+        print(
+            f"Batch {batch_idx}: k-space batch shape = {kspace_batch.shape}, dtype = {kspace_batch.dtype}"
+        )
+        break
+
+=== crnn.py ===
+import torch
+import torch.nn as nn
+from einops import rearrange
+import wandb
+def log(key, value, step):
+    print(f"Step {step} - {key}: {value:.4f}")
+def _normalize_batch(x):
+    b, h, w, t, c = x.shape
+    x_flat = x.reshape(b, -1)
+    max_vals, _ = torch.max(torch.abs(x_flat), dim=1, keepdim=True)
+    max_vals = max_vals + 1e-8
+    max_vals_reshaped = max_vals.reshape(b, 1, 1, 1, 1)
+    return x / max_vals_reshaped
+def _renormalize_by_input(x_after_dc, x_before_dc):
+    norm_before = torch.linalg.vector_norm(x_before_dc.flatten(1), dim=1, keepdim=True)
+    norm_after = torch.linalg.vector_norm(x_after_dc.flatten(1), dim=1, keepdim=True)
+    scaling_factor = norm_before / (norm_after + 1e-8)
+    return x_after_dc * scaling_factor.view(-1, 1, 1, 1, 1)
+def _normalize_batch(x):
+    """
+    Normalizes each item in the batch to the range [-1, 1] based on its absolute maximum value.
+    This preserves the internal structure and relative enhancement curve shape.
+    Shape of x: (B, H, W, T, C)
+    """
+    b, h, w, t, c = x.shape
+    x_flat = x.reshape(b, -1)
+    max_vals, _ = torch.max(torch.abs(x_flat), dim=1, keepdim=True)
+    max_vals = max_vals + 1e-8
+    max_vals_reshaped = max_vals.reshape(b, 1, 1, 1, 1)
+    return x / max_vals_reshaped
+def normalize_batch_percentile(x, percentile=99.5):
+    """
+    Normalizes each item in the batch based on a high percentile of its absolute values.
+    This method is more robust to extreme outliers (e.g., from NUFFT artifacts)
+    than normalizing by the absolute maximum. It ensures that the scaling factor
+    is determined by the bulk of the image signal, not a single rogue pixel.
+    Shape of x: (B, H, W, T, C) or any shape starting with Batch.
+    """
+    if not 0 < percentile <= 100:
+        raise ValueError("Percentile must be between 0 and 100.")
+    b = x.shape[0]
+    x_flat = x.reshape(b, -1)
+    q = percentile / 100.0
+    percentile_vals = torch.quantile(torch.abs(x_flat), q, dim=1, keepdim=True)
+    norm_factors = percentile_vals + 1e-8
+    dims_to_unsqueeze = [1] * (x.dim() - 1)
+    norm_factors_reshaped = norm_factors.view(b, *dims_to_unsqueeze)
+    return x / norm_factors_reshaped
+def normalize_batch_standardize(x, epsilon=1e-8):
+    """
+    Standardizes each item in the batch to have a mean of 0 and a standard deviation of 1.
+    This is a very common and robust normalization technique in deep learning. It centers
+    the data and scales it, which can significantly improve network stability and
+    convergence, especially when dealing with inputs that have varying offsets or scales.
+    Shape of x: (B, H, W, T, C) or any shape starting with the Batch dimension.
+    """
+    b = x.shape[0]
+    x_flat = x.reshape(b, -1)
+    mean = torch.mean(x_flat, dim=1, keepdim=True)
+    std = torch.std(x_flat, dim=1, keepdim=True)
+    safe_std = std + epsilon
+    dims_to_unsqueeze = [1] * (x.dim() - 1)
+    mean_reshaped = mean.view(b, *dims_to_unsqueeze)
+    std_reshaped = safe_std.view(b, *dims_to_unsqueeze)
+    return (x - mean_reshaped) / std_reshaped
+class ConvRNNCell(nn.Module):
+    """
+    Convolutional RNN cell.
+    - Removed spectral_norm wrapper from convolutional layers. This reduces regularization,
+      allowing the network to potentially learn finer details of the contrast enhancement,
+      at the cost of relying more on other stabilization techniques.
+    """
+    def __init__(self, in_chans, out_chans, bias=True):
+        super(ConvRNNCell, self).__init__()
+        self.in_chans = in_chans
+        self.out_chans = out_chans
+        self.i2h = nn.Conv2d(in_chans, out_chans, kernel_size=3, padding=1, bias=bias)
+        self.h2h = nn.Conv2d(out_chans, out_chans, kernel_size=3, padding=1, bias=bias)
+        self.relu = nn.ReLU(inplace=True)
+    def forward(self, input, hidden_iteration, hidden):
+        in_to_hid = self.i2h(input)
+        hid_to_hid = self.h2h(hidden)
+        ih_to_ih = self.i2h(hidden_iteration)
+        hidden = self.relu(in_to_hid + hid_to_hid + ih_to_ih)
+        return hidden
+class BCRNN(nn.Module):
+    """
+    Bidirectional Convolutional RNN.
+    Note: The original DDEI implementation calls this BCRNN but it is a standard
+    unidirectional CRNN operating over the time dimension. We keep the naming for consistency.
+    """
+    def __init__(self, in_chans, chans, n_layers, bias=True, device="cuda"):
+        super(BCRNN, self).__init__()
+        self.in_chans = in_chans
+        self.chans = chans
+        self.n_layers = n_layers
+        self.device = device
+        self.CRNN_model = ConvRNNCell(in_chans, chans, bias=bias)
+    def forward(self, input, hidden_iteration):
+        B, H, W, T, C = input.shape
+        input = input.permute(3, 0, 4, 1, 2).contiguous()
+        hidden_iteration = hidden_iteration.permute(3, 0, 4, 1, 2).contiguous()
+        hidden = torch.zeros(B, self.chans, H, W, device=self.device)
+        hidden_list = []
+        for i in range(T):
+            hidden = self.CRNN_model(input[i], hidden_iteration[i], hidden)
+            hidden_list.append(hidden)
+        out = torch.stack(hidden_list, dim=0).permute(1, 3, 4, 0, 2).contiguous()
+        return out
+class CRNN(nn.Module):
+    """
+    Main Unrolled CRNN architecture.
+    1.  **Inter-Cascade Normalization**: The output of the data consistency (DC) layer from each
+        cascade is normalized before being fed into the next cascade. This is the primary fix
+        for the exploding activation problem. It breaks the amplification feedback loop.
+    2.  **Residual Block Fix**: The code block for processing the BCRNN output and adding the
+        residual connection was reshaped incorrectly, which was the likely cause of the
+        `size mismatch` error. This has been completely rewritten to be correct.
+    3.  **Cleaned up Logic**: The variable naming and flow within the forward pass are clarified
+        to distinguish between different states of the image estimate (e.g., `x_pre_dc`, `x_post_dc`).
+    """
+    def __init__(self, num_cascades, chans, in_chans=2, datalayer=None, **kwargs):
+        super(CRNN, self).__init__()
+        self.num_cascades = num_cascades
+        self.chans = chans
+        self.in_chans = in_chans
+        self.datalayer = datalayer
+        self.bcrnn = BCRNN(in_chans, chans, n_layers=1, **kwargs)
+        self.res_conv = nn.Conv2d(chans, in_chans, kernel_size=1, stride=1, padding=0)
+    def forward(self, x_init_permuted, y, mask):  # 'mask' is the unused dummy mask
+        B, H, W, T, C = x_init_permuted.shape
+        x_cascade_in = x_init_permuted
+        for i in range(self.num_cascades):
+            bcrnn_out = self.bcrnn(x_cascade_in, x_init_permuted)
+            bcrnn_out_reshaped = (
+                bcrnn_out.permute(0, 3, 4, 1, 2)
+                .contiguous()
+                .reshape(B * T, self.chans, H, W)
+            )
+            res_out_reshaped = self.res_conv(bcrnn_out_reshaped)
+            res_out = (
+                res_out_reshaped.reshape(B, T, self.in_chans, H, W)
+                .permute(0, 3, 4, 1, 2)
+                .contiguous()
+            )
+            x_pre_dc = x_cascade_in + res_out
+            x_post_dc = self.datalayer(x_pre_dc, y, self.datalayer.physics.mask)
+            global_step = 0
+            if i < self.num_cascades - 1:
+                log(f"cascade_{i}/pre_norm_mean", x_post_dc.mean().item(), global_step)
+                log(f"cascade_{i}/pre_norm_std", x_post_dc.std().item(), global_step)
+                log(f"cascade_{i}/pre_norm_min", x_post_dc.min().item(), global_step)
+                log(f"cascade_{i}/pre_norm_max", x_post_dc.max().item(), global_step)
+                x_cascade_in = _renormalize_by_input(x_post_dc, x_pre_dc)
+                log(f"cascade_{i}/post_norm_mean", x_cascade_in.mean().item(), global_step)
+                log(f"cascade_{i}/post_norm_std", x_cascade_in.std().item(), global_step)
+                log(f"cascade_{i}/post_norm_min", x_cascade_in.min().item(), global_step)
+                log(f"cascade_{i}/post_norm_max", x_cascade_in.max().item(), global_step)
+            else:
+                x_cascade_in = x_post_dc
+        return x_cascade_in
+class ArtifactRemovalCRNN(nn.Module):
+    def __init__(self, backbone_net, **kwargs):
+        super(ArtifactRemovalCRNN, self).__init__()
+        self.backbone_net = backbone_net
+    def forward(self, y, physics, **kwargs):
+        x_init = physics.A_adjoint(y)
+        norm_of_zf_recon = torch.linalg.vector_norm(x_init)
+        x_init_permuted = rearrange(x_init, "b c t h w -> b h w t c")
+        x_init_norm_permuted = normalize_batch_standardize(x_init_permuted)
+        mask = physics.mask #torch.ones_like(y)
+        x_hat_permuted_raw = self.backbone_net(x_init_norm_permuted, y, mask)
+        x_hat_raw = rearrange(x_hat_permuted_raw, "b h w t c -> b c t h w")
+        norm_of_raw_output = torch.linalg.vector_norm(x_hat_raw)
+        scaling_factor = norm_of_zf_recon / (norm_of_raw_output + 1e-8)
+        x_hat_final = x_hat_raw * scaling_factor
+        return x_hat_final
+
+=== radial.py ===
+import deepinv as dinv
+import numpy as np
+import torch
+import torch.nn as nn
+from deepinv.physics.time import TimeMixin
+from einops import rearrange
+from torchkbnufft import KbNufft, KbNufftAdjoint
+def to_torch_complex(x: torch.Tensor):
+    """(B, 2, ...) real -> (B, ...) complex"""
+    assert x.shape[1] == 2, (
+        f"Input tensor must have 2 channels (real, imag), but got shape {x.shape}"
+    )
+    return torch.view_as_complex(rearrange(x, "b c ... -> b ... c").contiguous())
+def from_torch_complex(x: torch.Tensor):
+    """(B, ...) complex -> (B, 2, ...) real"""
+    return rearrange(torch.view_as_real(x), "b ... c -> b c ...").contiguous()
+class RadialPhysics(dinv.physics.Physics):
+    def __init__(self, im_size, N_spokes, N_samples, **kwargs):
+        super().__init__(**kwargs)
+        self.im_size = im_size
+        self.N_spokes = N_spokes
+        self.N_samples = N_samples
+        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        grid_size = [int(s * 2.0) for s in im_size]
+        self.NUFFT = KbNufft(im_size=im_size, grid_size=grid_size).to(self.device)
+        self.AdjNUFFT = KbNufftAdjoint(im_size=im_size, grid_size=grid_size).to(
+            self.device
+        )
+        self.traj, self.sqrt_dcf = self.get_traj_and_dcf()
+        self.traj = self.traj.to(self.device)
+        self.sqrt_dcf = self.sqrt_dcf.to(self.device)
+    def get_traj_and_dcf(self, angle_offset_rad=0.0):
+        base_res = self.im_size[0]
+        gind = 1
+        N_samples = base_res * 2
+        if N_samples != self.N_samples:
+            print(
+                f"Warning: Vendor logic implies N_samples should be {N_samples}, but class has {self.N_samples}. Using class value."
+            )
+            N_samples = self.N_samples  # Trust the class value passed during init
+        base_lin = np.arange(N_samples).reshape(1, -1) - (N_samples // 2)
+        tau = 0.5 * (1 + 5**0.5)
+        base_rad = np.pi / (gind + tau - 1)
+        base_rad = np.pi / (gind + tau - 1)
+        spoke_indices = np.arange(self.N_spokes)
+        base_rot = (spoke_indices * base_rad + angle_offset_rad).reshape(-1, 1)
+        traj_flat = np.zeros((self.N_spokes, N_samples, 2))
+        traj_flat[..., 0] = np.cos(base_rot) @ base_lin
+        traj_flat[..., 1] = np.sin(base_rot) @ base_lin
+        max_radius = N_samples / 2.0
+        traj_flat = (traj_flat / max_radius) * np.pi
+        traj = torch.from_numpy(traj_flat).float()
+        traj_nufft_ready = rearrange(traj, "s i xy -> 1 xy (s i)")
+        dcf_vals = torch.sqrt(
+            traj_nufft_ready[0, 0, :] ** 2 + traj_nufft_ready[0, 1, :] ** 2
+        )
+        sqrt_dcf_vals = torch.sqrt(dcf_vals)
+        sqrt_dcf = rearrange(sqrt_dcf_vals, "(s i) -> 1 1 (s i)", s=self.N_spokes)
+        return traj_nufft_ready, sqrt_dcf
+    def A(self, x: torch.Tensor, **kwargs) -> torch.Tensor:
+        x_complex = to_torch_complex(x).unsqueeze(1)
+        k_complex_nufft = self.NUFFT(x_complex, self.traj)
+        y_complex_weighted = k_complex_nufft * self.sqrt_dcf
+        y = from_torch_complex(y_complex_weighted.squeeze(1))
+        return rearrange(y, "b c (s i) -> b c s i", s=self.N_spokes)
+    def A_adjoint(self, y: torch.Tensor, **kwargs) -> torch.Tensor:
+        y_flat = rearrange(y, "b c s i -> b c (s i)")
+        y_complex = to_torch_complex(y_flat).unsqueeze(1)
+        y_dcf_complex = y_complex * self.sqrt_dcf
+        if torch.isnan(y_dcf_complex).any():
+            print("!!! ERROR: NaN detected in y_dcf_complex in A_adjoint !!!")
+        x_complex = self.AdjNUFFT(y_dcf_complex, self.traj).squeeze(1)
+        return from_torch_complex(x_complex)
+class DynamicRadialPhysics(RadialPhysics, TimeMixin):
+    def __init__(self, im_size, N_spokes, N_samples, N_time, N_coils=1, **kwargs):
+        TimeMixin.__init__(self)
+        dinv.physics.Physics.__init__(self, **kwargs)
+        self.im_size = im_size[:2]  # Static image size
+        self.N_spokes = N_spokes  # Spokes PER FRAME
+        self.N_samples = N_samples
+        self.N_time = N_time
+        self.N_coils = N_coils
+        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        grid_size = [int(s * 2.0) for s in self.im_size]
+        self.NUFFT = KbNufft(im_size=self.im_size, grid_size=grid_size).to(self.device)
+        self.AdjNUFFT = KbNufftAdjoint(im_size=self.im_size, grid_size=grid_size).to(
+            self.device
+        )
+        total_spokes_in_scan = self.N_spokes * self.N_time
+        temp_physics = RadialPhysics(
+            self.im_size, N_spokes=total_spokes_in_scan, N_samples=self.N_samples
+        )
+        full_traj, full_sqrt_dcf = temp_physics.get_traj_and_dcf()
+        self.traj_per_frame = rearrange(
+            full_traj, "b c (t s i) -> t b c (s i)", t=self.N_time, s=self.N_spokes
+        )
+        self.sqrt_dcf_per_frame = rearrange(
+            full_sqrt_dcf, "b c (t s i) -> t b c (s i)", t=self.N_time, s=self.N_spokes
+        )
+        self.traj_per_frame = self.traj_per_frame.to(self.device)
+        self.sqrt_dcf_per_frame = self.sqrt_dcf_per_frame.to(self.device)
+        self.mask = torch.ones(1, 2, self.N_time, self.N_spokes, self.N_samples).to(
+            self.device
+        )
+    def A(self, x: torch.Tensor, **kwargs) -> torch.Tensor:
+        B, C, T, H, W = x.shape
+        output_kspace_frames = []
+        for t in range(T):
+            x_frame = x[:, :, t, :, :].unsqueeze(2)  # -> (B, C, 1, H, W)
+            x_flat = self.flatten(x_frame)  # -> (B, C, H, W)
+            traj_t = self.traj_per_frame[t]
+            sqrt_dcf_t = self.sqrt_dcf_per_frame[t]
+            x_complex = to_torch_complex(x_flat).unsqueeze(1)
+            k_complex_nufft = self.NUFFT(x_complex, traj_t)
+            y_complex_weighted = k_complex_nufft * sqrt_dcf_t
+            y_frame = from_torch_complex(y_complex_weighted.squeeze(1))
+            y_frame_reshaped = rearrange(
+                y_frame, "b c (s i) -> b c s i", s=self.N_spokes
+            )
+            output_kspace_frames.append(y_frame_reshaped)
+        y = torch.stack(output_kspace_frames, dim=2)  # Stack along the time dimension
+        return y * self.mask
+    def A_adjoint(self, y: torch.Tensor, **kwargs) -> torch.Tensor:
+        B, C, T, S, I = y.shape
+        output_image_frames = []
+        y_masked = y * self.mask
+        for t in range(T):
+            y_frame = y_masked[:, :, t, :, :]  # -> (B, C, S, I)
+            traj_t = self.traj_per_frame[t]
+            sqrt_dcf_t = self.sqrt_dcf_per_frame[t]
+            y_flat = rearrange(y_frame, "b c s i -> b c (s i)")
+            y_complex = to_torch_complex(y_flat).unsqueeze(1)
+            y_dcf_complex = y_complex * sqrt_dcf_t
+            x_complex_frame = self.AdjNUFFT(y_dcf_complex, traj_t).squeeze(1)
+            x_frame = from_torch_complex(x_complex_frame)  # -> (B, C, H, W)
+            output_image_frames.append(x_frame)
+        x = torch.stack(output_image_frames, dim=2)  # -> (B, C, T, H, W)
+        return x
+class RadialDCLayer(nn.Module):
+    """
+    Final Data Consistency layer.
+    It takes the network's current image estimate and the original measurements,
+    and returns a new image estimate that is a weighted average in k-space.
+    """
+    def __init__(
+        self,
+        physics: nn.Module,  # The DC layer now requires the physics operator
+        lambda_init=np.log(np.exp(1) - 1.0) / 1.0,
+        learnable=True,
+    ):
+        super(RadialDCLayer, self).__init__()
+        self.learnable = learnable
+        self.lambda_ = nn.Parameter(
+            torch.ones(1) * lambda_init, requires_grad=self.learnable
+        )
+        self.physics = physics
+    def forward(self, x_img_permuted, y_kspace_meas, mask_kspace):
+        x_img = rearrange(x_img_permuted, "b h w t c -> b c t h w")
+        y = y_kspace_meas
+        A_x = self.physics.A(x_img)
+        lambda_ = torch.sigmoid(self.lambda_)
+        k_dc = (1 - mask_kspace) * A_x + mask_kspace * (
+            lambda_ * A_x + (1 - lambda_) * y
+        )
+        x_dc_img = self.physics.A_adjoint(k_dc)
+        x_dc_permuted = rearrange(x_dc_img, "b c t h w -> b h w t c")
+        return x_dc_permuted
+

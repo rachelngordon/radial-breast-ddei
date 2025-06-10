@@ -48,6 +48,84 @@ def _normalize_batch(x):
     return x / max_vals_reshaped
 
 
+def normalize_batch_percentile(x, percentile=99.5):
+    """
+    Normalizes each item in the batch based on a high percentile of its absolute values.
+
+    This method is more robust to extreme outliers (e.g., from NUFFT artifacts)
+    than normalizing by the absolute maximum. It ensures that the scaling factor
+    is determined by the bulk of the image signal, not a single rogue pixel.
+
+    Shape of x: (B, H, W, T, C) or any shape starting with Batch.
+    """
+    # Ensure a percentile value is valid
+    if not 0 < percentile <= 100:
+        raise ValueError("Percentile must be between 0 and 100.")
+
+    b = x.shape[0]
+
+    # Use .reshape() to handle potentially non-contiguous tensors.
+    # We flatten all dimensions except the batch dimension.
+    x_flat = x.reshape(b, -1)
+
+    # Calculate the specified percentile of the absolute values for each item in the batch.
+    # We work with absolute values to find a suitable scaling factor for the signal magnitude.
+    # Note: torch.quantile expects q to be in the range [0, 1].
+    q = percentile / 100.0
+    # The [0] at the end is to extract the values tensor from the (values, indices) tuple that some versions of PyTorch might return
+    # or to simplify the output dimension.
+    percentile_vals = torch.quantile(torch.abs(x_flat), q, dim=1, keepdim=True)
+
+    # Add a small epsilon to prevent division by zero for blank/zero images.
+    norm_factors = percentile_vals + 1e-8
+
+    # Reshape the normalization factors to be broadcastable with the original tensor x.
+    # The shape will be (B, 1, 1, 1, 1) to match the input dimensions.
+    dims_to_unsqueeze = [1] * (x.dim() - 1)
+    norm_factors_reshaped = norm_factors.view(b, *dims_to_unsqueeze)
+
+    return x / norm_factors_reshaped
+
+
+def normalize_batch_standardize(x, epsilon=1e-8):
+    """
+    Standardizes each item in the batch to have a mean of 0 and a standard deviation of 1.
+
+    This is a very common and robust normalization technique in deep learning. It centers
+    the data and scales it, which can significantly improve network stability and
+    convergence, especially when dealing with inputs that have varying offsets or scales.
+
+    Shape of x: (B, H, W, T, C) or any shape starting with the Batch dimension.
+    """
+    # Get the batch size
+    b = x.shape[0]
+
+    # Use .reshape() to handle potentially non-contiguous tensors from operations like permute.
+    # We flatten all dimensions except the batch dimension to compute stats over each item.
+    x_flat = x.reshape(b, -1)
+
+    # Calculate the mean for each item in the batch.
+    # `keepdim=True` is crucial to maintain a shape of (B, 1) for broadcasting.
+    mean = torch.mean(x_flat, dim=1, keepdim=True)
+
+    # Calculate the standard deviation for each item in the batch.
+    std = torch.std(x_flat, dim=1, keepdim=True)
+
+    # Add the small epsilon to the standard deviation to prevent division by zero
+    # for any blank or constant-valued images in the batch.
+    safe_std = std + epsilon
+
+    # Reshape the mean and std tensors to be broadcastable with the original tensor x.
+    # This dynamically creates the correct number of singleton dimensions.
+    # e.g., (B, 1) -> (B, 1, 1, 1, 1)
+    dims_to_unsqueeze = [1] * (x.dim() - 1)
+    mean_reshaped = mean.view(b, *dims_to_unsqueeze)
+    std_reshaped = safe_std.view(b, *dims_to_unsqueeze)
+
+    # Apply the standardization formula: (x - mean) / std
+    return (x - mean_reshaped) / std_reshaped
+
+
 class ConvRNNCell(nn.Module):
     """
     Convolutional RNN cell.
@@ -173,7 +251,14 @@ class CRNN(nn.Module):
                 log(f"cascade_{i}/pre_norm_max", x_post_dc.max().item(), global_step)
 
                 # Choose your normalization strategy. Renormalizing is often better.
-                x_cascade_in = _renormalize_by_input(x_post_dc, x_pre_dc)
+                # x_cascade_in = _renormalize_by_input(x_post_dc, x_pre_dc)
+
+                # z score normalization
+                mean = torch.mean(x_post_dc, dim=(-3, -2, -1), keepdim=True)
+                std = torch.std(x_post_dc, dim=(-3, -2, -1), keepdim=True)
+                epsilon = 1e-8
+
+                x_cascade_in = (x_post_dc - mean) / (std + epsilon)
 
                 # Log metrics AFTER normalization
                 log(f"cascade_{i}/post_norm_mean", x_cascade_in.mean().item(), global_step)
@@ -202,9 +287,11 @@ class ArtifactRemovalCRNN(nn.Module):
         # 2. Permute and normalize the input for the network
         x_init_permuted = rearrange(x_init, "b c t h w -> b h w t c")
 
-        x_init_norm_permuted = _normalize_batch(x_init_permuted)
+        # x_init_norm_permuted = _normalize_batch(x_init_permuted)
+        # x_init_norm_permuted = normalize_batch_percentile(x_init_permuted)
+        x_init_norm_permuted = normalize_batch_standardize(x_init_permuted)
 
-        mask = torch.ones_like(y)
+        mask = physics.mask #torch.ones_like(y)
 
         # 3. Get the raw, high-magnitude output from the backbone
         x_hat_permuted_raw = self.backbone_net(x_init_norm_permuted, y, mask)

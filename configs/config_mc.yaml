@@ -30,7 +30,7 @@ model:
   channels: 64
   optimizer:
     name: "Adam"
-    lr: 0.00005
+    lr: 0.000005
     weight_decay: 0.0
     b1: 0.9
     b2: 0.999

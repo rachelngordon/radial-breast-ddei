@@ -42,17 +42,24 @@ def plot_reconstruction_sample(x_recon, title, filename, output_dir, grasp_img=N
         figsize=(n_timeframes * 3, 8),
         squeeze=False,
     )
+
+    axes[0, 0].set_ylabel("Model Output", fontsize=14, labelpad=10)
+    axes[1, 0].set_ylabel("GRASP Benchmark", fontsize=14, labelpad=10)
+    
     for t in range(n_timeframes):
         img = x_recon_mag[batch_idx, t, :, :].cpu().detach().numpy()
         grasp_img = grasp_img_mag[batch_idx, t, :, :].cpu().detach().numpy()
+
         ax1 = axes[0, t]
         ax1.imshow(np.rot90(img, 2), cmap="gray")
         ax1.set_title(f"t = {t}")
-        ax1.axis("off")
+        ax1.set_xticks([])
+        ax1.set_yticks([])
         ax2 = axes[1, t]
         ax2.imshow(grasp_img, cmap="gray")
         ax2.set_title(f"t = {t}")
-        ax2.axis("off")
+        ax2.set_xticks([])
+        ax2.set_yticks([])
     fig.suptitle(title, fontsize=16)
     plt.tight_layout(rect=[0, 0.03, 1, 0.95])
     plt.savefig(os.path.join(output_dir, f"{filename}.png"))
@@ -378,10 +385,10 @@ for epoch in range(start_epoch, epochs + 1):
                 )
 
 
-                # # Save the model checkpoint
-                # model_save_path = os.path.join(output_dir, f'{exp_name}_model_checkpoint_epoch{epoch}.pth')
-                # torch.save(model.state_dict(), model_save_path)
-                # print(f'Model saved to {model_save_path}')
+                # Save the model checkpoint
+                model_save_path = os.path.join(output_dir, f'{exp_name}_model_checkpoint_epoch{epoch}.pth')
+                torch.save(model.state_dict(), model_save_path)
+                print(f'Model saved to {model_save_path}')
 
 
         # Calculate and store average validation losses

@@ -110,7 +110,7 @@ class SliceDataset(Dataset):
         file_path = self.file_list[idx]
         patient_id = file_path.split('/')[-1].strip('.h5')
 
-        # grasp_img = self.load_dynamic_img(patient_id)
+        grasp_img = self.load_dynamic_img(patient_id)
 
         with h5py.File(file_path, "r") as f:
             ds = torch.tensor(f[self.dataset_key][:])
@@ -129,7 +129,7 @@ class SliceDataset(Dataset):
 
         # The final shape is (2, num_timeframes, num_spokes, num_samples)
         # e.g., (2, 8, 36, 640)
-        return kspace_final
+        return kspace_final, grasp_img
 
 
 # ----------------------------

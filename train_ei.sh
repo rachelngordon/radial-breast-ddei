@@ -2,11 +2,11 @@
 
 # Parameters
 #SBATCH --cpus-per-task=4
-#SBATCH --error=logs/ei_loss_temporal.err
-#SBATCH --output=logs/ei_loss_temporal.out
+#SBATCH --error=logs/ei_loss_weight1e-3_new_temporal_lr5e-6.err
+#SBATCH --output=logs/ei_loss_weight1e-3_new_temporal_lr5e-6.out
 #SBATCH --exclude=''
 #SBATCH --gpus-per-node=1
-#SBATCH --job-name=ei_loss_temporal
+#SBATCH --job-name=ei_loss_weight1e-3_new_temporal_lr5e-6
 #SBATCH --mem-per-gpu=490000
 #SBATCH --nodes=1
 #SBATCH --ntasks-per-node=1
@@ -21,4 +21,4 @@ source /gpfs/data/karczmar-lab/workspaces/rachelgordon/micromamba/etc/profile.d/
 micromamba activate recon_mri
 
 # Run the training script with srun
-python3 train.py --config configs/config_ei.yaml --exp_name ei_loss_temporal
+python3 train.py --config configs/config_ei.yaml --exp_name ei_loss_weight1e-3_new_temporal_lr5e-6

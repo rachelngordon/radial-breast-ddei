@@ -17,6 +17,7 @@ from torch.utils.data import DataLoader
 from torchvision.transforms import InterpolationMode
 from tqdm import tqdm
 import numpy as np
+from transform import VideoRotate, VideoDiffeo, SubsampleTime
 
 
 def plot_reconstruction_sample(x_recon, title, filename, output_dir, grasp_img=None, batch_idx=0):
@@ -32,26 +33,26 @@ def plot_reconstruction_sample(x_recon, title, filename, output_dir, grasp_img=N
     """
     # compute magnitude from complex reconstruction
     x_recon_mag = torch.sqrt(x_recon[:, 0, ...] ** 2 + x_recon[:, 1, ...] ** 2)
-    # grasp_img_mag = torch.sqrt(grasp_img[:, 0, ...] ** 2 + grasp_img[:, 1, ...] ** 2)
+    grasp_img_mag = torch.sqrt(grasp_img[:, 0, ...] ** 2 + grasp_img[:, 1, ...] ** 2)
 
     n_timeframes = x_recon_mag.shape[1]
     fig, axes = plt.subplots(
-        nrows=1,
+        nrows=2,
         ncols=n_timeframes,
-        figsize=(n_timeframes * 3, 4),
+        figsize=(n_timeframes * 3, 8),
         squeeze=False,
     )
     for t in range(n_timeframes):
         img = x_recon_mag[batch_idx, t, :, :].cpu().detach().numpy()
-        # grasp_img = grasp_img_mag[batch_idx, t, :, :].cpu().detach().numpy()
+        grasp_img = grasp_img_mag[batch_idx, t, :, :].cpu().detach().numpy()
         ax1 = axes[0, t]
         ax1.imshow(np.rot90(img, 2), cmap="gray")
         ax1.set_title(f"t = {t}")
         ax1.axis("off")
-        # ax2 = axes[1, t]
-        # ax2.imshow(grasp_img, cmap="gray")
-        # ax2.set_title(f"t = {t}")
-        # ax2.axis("off")
+        ax2 = axes[1, t]
+        ax2.imshow(grasp_img, cmap="gray")
+        ax2.set_title(f"t = {t}")
+        ax2.axis("off")
     fig.suptitle(title, fontsize=16)
     plt.tight_layout(rect=[0, 0.03, 1, 0.95])
     plt.savefig(os.path.join(output_dir, f"{filename}.png"))
@@ -69,117 +70,6 @@ def get_git_commit():
     except Exception as e:
         print(f"Error retrieving Git commit: {e}")
         return "unknown"
-
-
-class VideoRotate(dinv.transform.Rotate):
-    """A Rotate transform that correctly handles 5D video tensors by flattening time into the batch dimension."""
-
-    def _transform(self, x: torch.Tensor, **params) -> torch.Tensor:
-        # First, check if we even need to flatten. If it's already 4D, just rotate.
-        if not self._check_x_5D(x):
-            return super()._transform(x, **params)
-
-        # It's a 5D video tensor. Flatten time into the batch dimension.
-        B = x.shape[0]
-        x_flat = dinv.physics.TimeMixin.flatten(x)  # (B, C, T, H, W) -> (B*T, C, H, W)
-
-        # The parent's _transform method can now work correctly on the 4D tensor (batch of 2D images).
-        # We need to get the right parameters for this new batch size.
-        # The `get_params` is usually called before `_transform`, so we should be okay.
-        # However, to be safe, let's pass a modified params dictionary.
-        flat_params = self.get_params(x_flat)
-
-        transformed_flat = super()._transform(x_flat, **flat_params)
-
-        # Unflatten to restore the original 5D video shape.
-        return dinv.physics.TimeMixin.unflatten(transformed_flat, batch_size=B)
-
-
-class VideoDiffeo(dinv.transform.CPABDiffeomorphism):
-    """A Diffeomorphism transform that correctly handles 5D video tensors."""
-
-    def _transform(self, x: torch.Tensor, **params) -> torch.Tensor:
-        if not self._check_x_5D(x):
-            return super()._transform(x, **params)
-
-        B = x.shape[0]
-        x_flat = dinv.physics.TimeMixin.flatten(x)
-        flat_params = self.get_params(x_flat)
-        transformed_flat = super()._transform(x_flat, **flat_params)
-        return dinv.physics.TimeMixin.unflatten(transformed_flat, batch_size=B)
-
-
-class SubsampleTime(Transform):
-    r"""
-    Augments a video by taking a random contiguous temporal sub-sequence.
-    This is suitable for non-cyclical data like contrast enhancement curves,
-    as it preserves the local arrow of time.
-
-    :param int n_trans: Number of transformed versions to generate per input image.
-    :param float subsample_ratio: The ratio of the total time frames to keep (e.g., 0.8 for 80%).
-    :param torch.Generator rng: Random number generator.
-    """
-
-    def __init__(self, *args, subsample_ratio: float = 0.8, **kwargs):
-        super().__init__(*args, **kwargs)
-        self.flatten_video_input = False  # We operate directly on the 5D tensor
-        assert 0.0 < subsample_ratio <= 1.0, "subsample_ratio must be between 0 and 1."
-        self.subsample_ratio = subsample_ratio
-
-    def _get_params(self, x: torch.Tensor) -> dict:
-        """Generates a random start index for the temporal crop."""
-        total_time_frames = x.shape[2]  # Shape is (B, C, T, H, W)
-        subsample_length = int(total_time_frames * self.subsample_ratio)
-        if subsample_length >= total_time_frames:
-            # Handle edge case where ratio is 1.0 or rounds up
-            return {"start_indices": torch.zeros(self.n_trans, dtype=torch.long)}
-
-        max_start_index = total_time_frames - subsample_length
-        start_indices = torch.randint(
-            low=0, high=max_start_index + 1, size=(self.n_trans,), generator=self.rng
-        )
-        return {"start_indices": start_indices}
-
-    def _transform(
-        self, x: torch.Tensor, start_indices: torch.Tensor, **kwargs
-    ) -> torch.Tensor:
-        """Performs the temporal subsampling and resizes back to the original length."""
-        B, C, total_time_frames, H, W = x.shape
-        subsample_length = int(total_time_frames * self.subsample_ratio)
-
-        if subsample_length >= total_time_frames:
-            return x.repeat(self.n_trans, 1, 1, 1, 1)
-
-        output_list = []
-        for start_idx in start_indices:
-            # 1. Take the temporal subsequence
-            sub_sequence = x[:, :, start_idx : start_idx + subsample_length, :, :]
-
-            # 2. Flatten all non-time dimensions into one giant "channel" dimension for interpolation.
-            # Pattern: (Batch, Channels, Time, Height, Width) -> (Batch, (Channels*Height*Width), Time)
-            flat_for_interp = rearrange(sub_sequence, "b c t h w -> b (c h w) t")
-
-            # 3. Interpolate along the time dimension (the last dimension).
-            # This is a 1D interpolation.
-            resized_flat = torch.nn.functional.interpolate(
-                flat_for_interp,
-                size=total_time_frames,
-                mode="linear",
-                align_corners=False,
-            )
-
-            # 4. Un-flatten the dimensions back to the original video format.
-            # Einops can do this because it knows how (c h w) was constructed.
-            # Pattern: (Batch, (Channels*Height*Width), Time) -> (Batch, Channels, Time, Height, Width)
-            resized_sequence = rearrange(
-                resized_flat, "b (c h w) t -> b c t h w", c=C, h=H, w=W
-            )
-
-            output_list.append(resized_sequence)
-
-        return torch.cat(output_list, dim=0)
-
-
 
     
 
@@ -341,7 +231,7 @@ mc_loss_fn = MCLoss()
 if use_ei_loss:
     rotate = VideoRotate(n_trans=1, interpolation_mode=InterpolationMode.BILINEAR)
     diffeo = VideoDiffeo(n_trans=1, device=device)
-    subsample = SubsampleTime(n_trans=1, subsample_ratio=config['model']['losses']['ei_loss']['subsample_ratio'])
+    subsample = SubsampleTime(n_trans=1, subsample_ratio_range=(config['model']['losses']['ei_loss']['subsample_ratio_min'], config['model']['losses']['ei_loss']['subsample_ratio_max']))
 
     # NOTE: Not using temporal transforms for now
     ei_loss_fn = EILoss(subsample | (diffeo | rotate))
@@ -352,7 +242,7 @@ print(
 # Use the validation loader to get a sample without affecting the training loader's state
 with torch.no_grad():
     # Get a single batch of validation k-space data
-    val_kspace_sample = next(iter(val_loader))
+    val_kspace_sample, grasp_img = next(iter(val_loader))
     val_kspace_sample = val_kspace_sample.to(device)
 
     # Perform the simplest reconstruction: A_adjoint(y)
@@ -364,7 +254,8 @@ with torch.no_grad():
         x_zf,
         "Zero-Filled (ZF) Reconstruction (Before Training)",
         "zf_reconstruction_baseline",
-        output_dir
+        output_dir,
+        grasp_img
     )
 print("--- ZF baseline image saved to output directory. Starting training. ---")
 
@@ -388,7 +279,7 @@ for epoch in range(start_epoch, epochs + 1):
             train_loader, desc=f"Epoch {epoch}/{epochs}  Training", unit="batch"
         )
         # measured_kspace shape: (B, C, I, S, T) = 1, 1, 2, 23040, 8
-        for measured_kspace in train_loader_tqdm:  # measured_kspace shape: (B, C, I, S, T)
+        for measured_kspace, grasp_img in train_loader_tqdm:  # measured_kspace shape: (B, C, I, S, T)
             iteration_count += 1
             optimizer.zero_grad()
 
@@ -428,7 +319,8 @@ for epoch in range(start_epoch, epochs + 1):
                     x_recon,
                     f"Training Sample - Epoch {epoch}",
                     f"train_sample_epoch_{epoch}",
-                    output_dir
+                    output_dir,
+                    grasp_img
                 )
 
         # Calculate and store average epoch losses
@@ -455,7 +347,7 @@ for epoch in range(start_epoch, epochs + 1):
             leave=False,
         )
         with torch.no_grad():
-            for val_kspace_batch in val_loader_tqdm:
+            for val_kspace_batch, val_grasp_img in val_loader_tqdm:
                 # The model takes the raw k-space and physics operator
                 val_x_recon = model(val_kspace_batch.to(device), physics)
 
@@ -481,8 +373,16 @@ for epoch in range(start_epoch, epochs + 1):
                     val_x_recon,
                     f"Validation Sample - Epoch {epoch}",
                     f"val_sample_epoch_{epoch}",
-                    output_dir
+                    output_dir,
+                    val_grasp_img
                 )
+
+
+                # # Save the model checkpoint
+                # model_save_path = os.path.join(output_dir, f'{exp_name}_model_checkpoint_epoch{epoch}.pth')
+                # torch.save(model.state_dict(), model_save_path)
+                # print(f'Model saved to {model_save_path}')
+
 
         # Calculate and store average validation losses
         epoch_val_mc_loss = val_running_mc_loss / len(val_loader)
@@ -542,3 +442,12 @@ for epoch in range(start_epoch, epochs + 1):
             print(
                 f"Epoch {epoch}: Training EI Loss: {epoch_train_ei_loss:.6f}, Validation EI Loss: {epoch_val_ei_loss:.6f}"
             )
+
+
+# Save the model at the end of training
+model_save_path = os.path.join(output_dir, f'{exp_name}_model_checkpoint.pth')
+torch.save(model.state_dict(), model_save_path)
+print(f'Model saved to {model_save_path}')
+
+
+

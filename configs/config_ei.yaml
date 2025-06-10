@@ -30,7 +30,7 @@ model:
   channels: 64
   optimizer:
     name: "Adam"
-    lr: 0.00005
+    lr: 0.000005
     weight_decay: 0.0
     b1: 0.9
     b2: 0.999
@@ -40,13 +40,14 @@ model:
     mc_loss:
       weight: 1
     ei_loss:
-      weight: 0.00001
-      subsample_ratio: 0.8
+      weight: 0.001
+      subsample_ratio_min: 0.7
+      subsample_ratio_max: 0.95
 
 
 # Training settings
 training:
-  epochs: 25
+  epochs: 6
   save_interval: 1
   plot_interval: 20
   device: "cuda"  # or "cpu"

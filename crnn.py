@@ -245,10 +245,10 @@ class CRNN(nn.Module):
             global_step = 0
             if i < self.num_cascades - 1:
                 # Log metrics BEFORE normalization
-                log(f"cascade_{i}/pre_norm_mean", x_post_dc.mean().item(), global_step)
-                log(f"cascade_{i}/pre_norm_std", x_post_dc.std().item(), global_step)
-                log(f"cascade_{i}/pre_norm_min", x_post_dc.min().item(), global_step)
-                log(f"cascade_{i}/pre_norm_max", x_post_dc.max().item(), global_step)
+                # log(f"cascade_{i}/pre_norm_mean", x_post_dc.mean().item(), global_step)
+                # log(f"cascade_{i}/pre_norm_std", x_post_dc.std().item(), global_step)
+                # log(f"cascade_{i}/pre_norm_min", x_post_dc.min().item(), global_step)
+                # log(f"cascade_{i}/pre_norm_max", x_post_dc.max().item(), global_step)
 
                 # Choose your normalization strategy. Renormalizing is often better.
                 # x_cascade_in = _renormalize_by_input(x_post_dc, x_pre_dc)
@@ -261,10 +261,10 @@ class CRNN(nn.Module):
                 x_cascade_in = (x_post_dc - mean) / (std + epsilon)
 
                 # Log metrics AFTER normalization
-                log(f"cascade_{i}/post_norm_mean", x_cascade_in.mean().item(), global_step)
-                log(f"cascade_{i}/post_norm_std", x_cascade_in.std().item(), global_step)
-                log(f"cascade_{i}/post_norm_min", x_cascade_in.min().item(), global_step)
-                log(f"cascade_{i}/post_norm_max", x_cascade_in.max().item(), global_step)
+                # log(f"cascade_{i}/post_norm_mean", x_cascade_in.mean().item(), global_step)
+                # log(f"cascade_{i}/post_norm_std", x_cascade_in.std().item(), global_step)
+                # log(f"cascade_{i}/post_norm_min", x_cascade_in.min().item(), global_step)
+                # log(f"cascade_{i}/post_norm_max", x_cascade_in.max().item(), global_step)
             else:
                 # On the last cascade, don't normalize the final output
                 x_cascade_in = x_post_dc

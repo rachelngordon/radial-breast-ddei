@@ -20,6 +20,49 @@ import numpy as np
 from transform import VideoRotate, VideoDiffeo, SubsampleTime
 
 
+def get_cosine_ei_weight(
+    current_epoch,
+    warmup_epochs,
+    schedule_duration,
+    target_weight
+):
+    """
+    Calculates the EI loss weight for the current epoch using a cosine schedule.
+
+    This implements a curriculum learning strategy:
+    1. For `warmup_epochs`, the weight is 0 (MC loss only).
+    2. Over the next `schedule_duration` epochs, the weight smoothly ramps
+       up from 0 to `target_weight` following a cosine curve.
+    3. After the schedule is complete, the weight stays at `target_weight`.
+
+    Args:
+        current_epoch (int): The current training epoch (starting from 1).
+        warmup_epochs (int): Number of epochs to train with only MC loss.
+        schedule_duration (int): Number of epochs for the ramp-up.
+        target_weight (float): The final EI loss weight to reach.
+
+    Returns:
+        float: The EI loss weight for the current epoch.
+    """
+    # Phase 1: Warm-up phase (MC loss only)
+    if current_epoch <= warmup_epochs:
+        return 0.0
+
+    # Calculate progress within the scheduling phase
+    schedule_progress_epoch = current_epoch - warmup_epochs
+
+    # Phase 3: Schedule is complete, hold at target weight
+    if schedule_progress_epoch >= schedule_duration:
+        return target_weight
+
+    # Phase 2: Cosine ramp-up phase
+    # This creates a value that goes from 0 to 1 along a cosine curve.
+    cosine_multiplier = 0.5 * (1 - np.cos(np.pi * schedule_progress_epoch / schedule_duration))
+    
+    return target_weight * cosine_multiplier
+
+
+
 def plot_reconstruction_sample(x_recon, title, filename, output_dir, grasp_img=None, batch_idx=0):
     """
     Plot reconstruction sample showing magnitude images across timeframes.
@@ -134,8 +177,10 @@ batch_size = config["dataloader"]["batch_size"]
 max_subjects = config["dataloader"]["max_subjects"]
 
 mc_loss_weight = config["model"]["losses"]["mc_loss"]["weight"]
-ei_loss_weight = config["model"]["losses"]["ei_loss"]["weight"]
 use_ei_loss = config["model"]["losses"]["use_ei_loss"]
+target_weight = config["model"]["losses"]["ei_loss"]["weight"]
+warmup = config["model"]["losses"]["ei_loss"]["warmup"]
+duration = config["model"]["losses"]["ei_loss"]["duration"]
 
 epochs = config["training"]["epochs"]
 save_interval = config["training"]["save_interval"]
@@ -302,6 +347,16 @@ for epoch in range(start_epoch, epochs + 1):
                 ei_loss = ei_loss_fn(
                     x_recon, physics, model
                 )
+
+                ei_loss_weight = get_cosine_ei_weight(
+                    current_epoch=epoch,
+                    warmup_epochs=warmup,
+                    schedule_duration=duration,
+                    target_weight=target_weight
+                )
+
+                print(f"Epoch {epoch:2d}: EI Weight = {ei_loss_weight:.8f}")
+                
                 running_ei_loss += ei_loss.item()
                 total_loss = mc_loss * mc_loss_weight + ei_loss * ei_loss_weight
                 train_loader_tqdm.set_postfix(
@@ -456,5 +511,7 @@ model_save_path = os.path.join(output_dir, f'{exp_name}_model_checkpoint.pth')
 torch.save(model.state_dict(), model_save_path)
 print(f'Model saved to {model_save_path}')
 
+
+# delete all other checkpoints for this run after the model is saved
 
 

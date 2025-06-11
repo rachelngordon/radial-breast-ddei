@@ -41,6 +41,8 @@ model:
       weight: 1
     ei_loss:
       weight: 0.0003
+      warmup: 3
+      duration: 10
       subsample_ratio_min: 0.7
       subsample_ratio_max: 0.95
 

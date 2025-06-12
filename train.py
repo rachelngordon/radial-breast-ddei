@@ -9,7 +9,7 @@ import torch
 import yaml
 from crnn import CRNN, ArtifactRemovalCRNN
 from dataloader import SliceDataset
-from deepinv.loss import EILoss, MCLoss
+from deepinv.loss import MCLoss#, EILoss
 from deepinv.transform import Transform
 from einops import rearrange
 from radial import DynamicRadialPhysics, RadialDCLayer
@@ -17,7 +17,9 @@ from torch.utils.data import DataLoader
 from torchvision.transforms import InterpolationMode
 from tqdm import tqdm
 import numpy as np
-from transform import VideoRotate, VideoDiffeo, SubsampleTime
+from transform import VideoRotate, VideoDiffeo, SubsampleTime, PeakAwareBiPhasicWarp
+from ei import EILoss
+from torch.optim.lr_scheduler import CosineAnnealingLR
 
 
 def get_cosine_ei_weight(
@@ -63,7 +65,7 @@ def get_cosine_ei_weight(
 
 
 
-def plot_reconstruction_sample(x_recon, title, filename, output_dir, grasp_img=None, batch_idx=0):
+def plot_reconstruction_sample(x_recon, title, filename, output_dir, grasp_img=None, batch_idx=0, transform=False):
     """
     Plot reconstruction sample showing magnitude images across timeframes.
 
@@ -85,9 +87,16 @@ def plot_reconstruction_sample(x_recon, title, filename, output_dir, grasp_img=N
         figsize=(n_timeframes * 3, 8),
         squeeze=False,
     )
+    if transform:
+        axes[0, 0].set_ylabel("Transformed Image", fontsize=14, labelpad=10)
+        axes[1, 0].set_ylabel("Model Output", fontsize=14, labelpad=10)
 
-    axes[0, 0].set_ylabel("Model Output", fontsize=14, labelpad=10)
-    axes[1, 0].set_ylabel("GRASP Benchmark", fontsize=14, labelpad=10)
+        os.makedirs(os.path.join(output_dir, "transforms"), exist_ok=True)
+
+    else:
+        axes[0, 0].set_ylabel("Model Output", fontsize=14, labelpad=10)
+        axes[1, 0].set_ylabel("GRASP Benchmark", fontsize=14, labelpad=10)
+        
     
     for t in range(n_timeframes):
         img = x_recon_mag[batch_idx, t, :, :].cpu().detach().numpy()
@@ -276,6 +285,10 @@ optimizer = torch.optim.Adam(
     weight_decay=config["model"]["optimizer"]["weight_decay"],
 )
 
+scheduler = CosineAnnealingLR(
+    optimizer, T_max=epochs, eta_min=1e-7
+)
+
 
 # define transformations and loss functions
 mc_loss_fn = MCLoss()
@@ -284,9 +297,9 @@ if use_ei_loss:
     rotate = VideoRotate(n_trans=1, interpolation_mode=InterpolationMode.BILINEAR)
     diffeo = VideoDiffeo(n_trans=1, device=device)
     subsample = SubsampleTime(n_trans=1, subsample_ratio_range=(config['model']['losses']['ei_loss']['subsample_ratio_min'], config['model']['losses']['ei_loss']['subsample_ratio_max']))
+    biphasic_warp = PeakAwareBiPhasicWarp(n_trans=1, warp_ratio_range=(config['model']['losses']['ei_loss']['warp_ratio_min'], config['model']['losses']['ei_loss']['warp_ratio_max']))
 
-    # NOTE: Not using temporal transforms for now
-    ei_loss_fn = EILoss(subsample | (diffeo | rotate))
+    ei_loss_fn = EILoss(biphasic_warp | rotate)
 
 print(
     "--- Generating and saving a Zero-Filled (ZF) reconstruction sample before training ---"
@@ -321,6 +334,67 @@ weighted_train_ei_losses = []
 
 iteration_count = 0
 
+# Step 0: Evaluate the untrained model
+if args.from_checkpoint == False:
+    model.eval()
+    initial_train_mc_loss = 0.0
+    initial_val_mc_loss = 0.0
+    initial_train_ei_loss = 0.0
+    initial_val_ei_loss = 0.0
+
+
+    with torch.no_grad():
+        # Evaluate on training data
+        for measured_kspace, grasp_img in tqdm(train_loader, desc="Step 0 Training Evaluation"):
+
+            x_recon = model(
+                measured_kspace.to(device), physics
+            )  # model output shape: (B, C, T, H, W)
+
+            mc_loss = mc_loss_fn(measured_kspace.to(device), x_recon, physics)
+            initial_train_mc_loss += mc_loss.item()
+
+            if use_ei_loss:
+                # x_recon: reconstructed image
+                ei_loss, t_img = ei_loss_fn(
+                    x_recon, physics, model
+                )
+
+                initial_train_ei_loss += ei_loss.item()
+
+        step0_train_mc_loss = initial_train_mc_loss / len(train_loader)
+        train_mc_losses.append(step0_train_mc_loss)
+
+        step0_train_ei_loss = initial_train_ei_loss / len(train_loader)
+        train_ei_losses.append(step0_train_ei_loss)
+
+
+        # Evaluate on validation data
+        for measured_kspace, grasp_img in tqdm(val_loader, desc="Step 0 Validation Evaluation"):
+
+            x_recon = model(
+                measured_kspace.to(device), physics
+            )  # model output shape: (B, C, T, H, W)
+
+            mc_loss = mc_loss_fn(measured_kspace.to(device), x_recon, physics)
+            initial_val_mc_loss += mc_loss.item()
+
+            if use_ei_loss:
+                # x_recon: reconstructed image
+                ei_loss, t_img = ei_loss_fn(
+                    x_recon, physics, model
+                )
+
+                initial_val_ei_loss += ei_loss.item()
+
+        step0_val_mc_loss = initial_val_mc_loss / len(val_loader)
+        val_mc_losses.append(step0_val_mc_loss)
+
+        step0_val_ei_loss = initial_val_ei_loss / len(val_loader)
+        val_ei_losses.append(step0_val_ei_loss)
+
+
+# Training Loop
 for epoch in range(start_epoch, epochs + 1):
     model.train()
     running_mc_loss = 0.0
@@ -344,7 +418,7 @@ for epoch in range(start_epoch, epochs + 1):
 
             if use_ei_loss:
                 # x_recon: reconstructed image
-                ei_loss = ei_loss_fn(
+                ei_loss, t_img = ei_loss_fn(
                     x_recon, physics, model
                 )
 
@@ -362,6 +436,7 @@ for epoch in range(start_epoch, epochs + 1):
                 train_loader_tqdm.set_postfix(
                     mc_loss=mc_loss.item(), ei_loss=ei_loss.item()
                 )
+
             else:
                 total_loss = mc_loss
                 train_loader_tqdm.set_postfix(mc_loss=mc_loss.item())
@@ -383,6 +458,16 @@ for epoch in range(start_epoch, epochs + 1):
                     f"train_sample_epoch_{epoch}",
                     output_dir,
                     grasp_img
+                )
+
+
+                plot_reconstruction_sample(
+                    t_img,
+                    f"Transformed Train Sample - Epoch {epoch}",
+                    f"transforms/transform_train_sample_epoch_{epoch}",
+                    output_dir,
+                    x_recon,
+                    transform=True
                 )
 
         # Calculate and store average epoch losses
@@ -419,7 +504,7 @@ for epoch in range(start_epoch, epochs + 1):
                 val_running_mc_loss += val_mc_loss.item()
 
                 if use_ei_loss:
-                    val_ei_loss = ei_loss_fn(
+                    val_ei_loss, val_t_img = ei_loss_fn(
                         val_x_recon, physics, model
                     )
                     val_running_ei_loss += val_ei_loss.item()
@@ -439,6 +524,15 @@ for epoch in range(start_epoch, epochs + 1):
                     val_grasp_img
                 )
 
+                plot_reconstruction_sample(
+                    val_t_img,
+                    f"Transformed Validation Sample - Epoch {epoch}",
+                    f"transforms/transform_val_sample_epoch_{epoch}",
+                    output_dir,
+                    val_x_recon,
+                    transform=True
+                )
+
 
                 # Save the model checkpoint
                 model_save_path = os.path.join(output_dir, f'{exp_name}_model_checkpoint_epoch{epoch}.pth')
@@ -454,6 +548,9 @@ for epoch in range(start_epoch, epochs + 1):
             val_ei_losses.append(epoch_val_ei_loss)
         else:
             val_ei_losses.append(0.0)
+
+        # learning rate scheduler
+        scheduler.step()
 
         # --- Plotting and Logging ---
         if epoch % save_interval == 0:

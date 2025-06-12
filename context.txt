@@ -9,7 +9,7 @@ import torch
 import yaml
 from crnn import CRNN, ArtifactRemovalCRNN
 from dataloader import SliceDataset
-from deepinv.loss import EILoss, MCLoss
+from deepinv.loss import MCLoss#, EILoss
 from deepinv.transform import Transform
 from einops import rearrange
 from radial import DynamicRadialPhysics, RadialDCLayer
@@ -18,7 +18,36 @@ from torchvision.transforms import InterpolationMode
 from tqdm import tqdm
 import numpy as np
 from transform import VideoRotate, VideoDiffeo, SubsampleTime
-def plot_reconstruction_sample(x_recon, title, filename, output_dir, grasp_img=None, batch_idx=0):
+from ei import EILoss
+def get_cosine_ei_weight(
+    current_epoch,
+    warmup_epochs,
+    schedule_duration,
+    target_weight
+):
+    """
+    Calculates the EI loss weight for the current epoch using a cosine schedule.
+    This implements a curriculum learning strategy:
+    1. For `warmup_epochs`, the weight is 0 (MC loss only).
+    2. Over the next `schedule_duration` epochs, the weight smoothly ramps
+       up from 0 to `target_weight` following a cosine curve.
+    3. After the schedule is complete, the weight stays at `target_weight`.
+    Args:
+        current_epoch (int): The current training epoch (starting from 1).
+        warmup_epochs (int): Number of epochs to train with only MC loss.
+        schedule_duration (int): Number of epochs for the ramp-up.
+        target_weight (float): The final EI loss weight to reach.
+    Returns:
+        float: The EI loss weight for the current epoch.
+    """
+    if current_epoch <= warmup_epochs:
+        return 0.0
+    schedule_progress_epoch = current_epoch - warmup_epochs
+    if schedule_progress_epoch >= schedule_duration:
+        return target_weight
+    cosine_multiplier = 0.5 * (1 - np.cos(np.pi * schedule_progress_epoch / schedule_duration))
+    return target_weight * cosine_multiplier
+def plot_reconstruction_sample(x_recon, title, filename, output_dir, grasp_img=None, batch_idx=0, transform=False):
     """
     Plot reconstruction sample showing magnitude images across timeframes.
     Args:
@@ -37,17 +66,26 @@ def plot_reconstruction_sample(x_recon, title, filename, output_dir, grasp_img=N
         figsize=(n_timeframes * 3, 8),
         squeeze=False,
     )
+    if transform:
+        axes[0, 0].set_ylabel("Transformed Image", fontsize=14, labelpad=10)
+        axes[1, 0].set_ylabel("Model Output", fontsize=14, labelpad=10)
+        os.makedirs(os.path.join(output_dir, "transforms"), exist_ok=True)
+    else:
+        axes[0, 0].set_ylabel("Model Output", fontsize=14, labelpad=10)
+        axes[1, 0].set_ylabel("GRASP Benchmark", fontsize=14, labelpad=10)
     for t in range(n_timeframes):
         img = x_recon_mag[batch_idx, t, :, :].cpu().detach().numpy()
         grasp_img = grasp_img_mag[batch_idx, t, :, :].cpu().detach().numpy()
         ax1 = axes[0, t]
         ax1.imshow(np.rot90(img, 2), cmap="gray")
         ax1.set_title(f"t = {t}")
-        ax1.axis("off")
+        ax1.set_xticks([])
+        ax1.set_yticks([])
         ax2 = axes[1, t]
         ax2.imshow(grasp_img, cmap="gray")
         ax2.set_title(f"t = {t}")
-        ax2.axis("off")
+        ax2.set_xticks([])
+        ax2.set_yticks([])
     fig.suptitle(title, fontsize=16)
     plt.tight_layout(rect=[0, 0.03, 1, 0.95])
     plt.savefig(os.path.join(output_dir, f"{filename}.png"))
@@ -101,8 +139,10 @@ split_file = config["data"]["split_file"]
 batch_size = config["dataloader"]["batch_size"]
 max_subjects = config["dataloader"]["max_subjects"]
 mc_loss_weight = config["model"]["losses"]["mc_loss"]["weight"]
-ei_loss_weight = config["model"]["losses"]["ei_loss"]["weight"]
 use_ei_loss = config["model"]["losses"]["use_ei_loss"]
+target_weight = config["model"]["losses"]["ei_loss"]["weight"]
+warmup = config["model"]["losses"]["ei_loss"]["warmup"]
+duration = config["model"]["losses"]["ei_loss"]["duration"]
 epochs = config["training"]["epochs"]
 save_interval = config["training"]["save_interval"]
 plot_interval = config["training"]["plot_interval"]
@@ -217,9 +257,16 @@ for epoch in range(start_epoch, epochs + 1):
             mc_loss = mc_loss_fn(measured_kspace.to(device), x_recon, physics)
             running_mc_loss += mc_loss.item()
             if use_ei_loss:
-                ei_loss = ei_loss_fn(
+                ei_loss, t_img = ei_loss_fn(
                     x_recon, physics, model
                 )
+                ei_loss_weight = get_cosine_ei_weight(
+                    current_epoch=epoch,
+                    warmup_epochs=warmup,
+                    schedule_duration=duration,
+                    target_weight=target_weight
+                )
+                print(f"Epoch {epoch:2d}: EI Weight = {ei_loss_weight:.8f}")
                 running_ei_loss += ei_loss.item()
                 total_loss = mc_loss * mc_loss_weight + ei_loss * ei_loss_weight
                 train_loader_tqdm.set_postfix(
@@ -243,6 +290,14 @@ for epoch in range(start_epoch, epochs + 1):
                     f"train_sample_epoch_{epoch}",
                     output_dir,
                     grasp_img
+                )
+                plot_reconstruction_sample(
+                    t_img,
+                    f"Transformed Train Sample - Epoch {epoch}",
+                    f"transforms/transform_train_sample_epoch_{epoch}",
+                    output_dir,
+                    x_recon,
+                    transform=True
                 )
         epoch_train_mc_loss = running_mc_loss / len(train_loader)
         train_mc_losses.append(epoch_train_mc_loss)
@@ -270,7 +325,7 @@ for epoch in range(start_epoch, epochs + 1):
                 val_mc_loss = mc_loss_fn(val_y_meas.to(device), val_x_recon, physics)
                 val_running_mc_loss += val_mc_loss.item()
                 if use_ei_loss:
-                    val_ei_loss = ei_loss_fn(
+                    val_ei_loss, val_t_img = ei_loss_fn(
                         val_x_recon, physics, model
                     )
                     val_running_ei_loss += val_ei_loss.item()
@@ -287,6 +342,17 @@ for epoch in range(start_epoch, epochs + 1):
                     output_dir,
                     val_grasp_img
                 )
+                plot_reconstruction_sample(
+                    val_t_img,
+                    f"Transformed Validation Sample - Epoch {epoch}",
+                    f"transforms/transform_val_sample_epoch_{epoch}",
+                    output_dir,
+                    val_x_recon,
+                    transform=True
+                )
+                model_save_path = os.path.join(output_dir, f'{exp_name}_model_checkpoint_epoch{epoch}.pth')
+                torch.save(model.state_dict(), model_save_path)
+                print(f'Model saved to {model_save_path}')
         epoch_val_mc_loss = val_running_mc_loss / len(val_loader)
         val_mc_losses.append(epoch_val_mc_loss)
         if use_ei_loss:
@@ -337,113 +403,151 @@ model_save_path = os.path.join(output_dir, f'{exp_name}_model_checkpoint.pth')
 torch.save(model.state_dict(), model_save_path)
 print(f'Model saved to {model_save_path}')
 
-=== dataloader.py ===
-import glob
-import os
-import h5py
-import numpy as np
+=== transform.py ===
+import deepinv as dinv
 import torch
-from torch.utils.data import DataLoader, Dataset
-import nibabel as nib
-class SliceDataset(Dataset):
+from deepinv.transform import Transform
+from einops import rearrange
+from torchvision.transforms import InterpolationMode
+class VideoRotate(dinv.transform.Rotate):
+    """A Rotate transform that correctly handles 5D video tensors by flattening time into the batch dimension."""
+    def _transform(self, x: torch.Tensor, **params) -> torch.Tensor:
+        if not self._check_x_5D(x):
+            return super()._transform(x, **params)
+        B = x.shape[0]
+        x_flat = dinv.physics.TimeMixin.flatten(x)  # (B, C, T, H, W) -> (B*T, C, H, W)
+        flat_params = self.get_params(x_flat)
+        transformed_flat = super()._transform(x_flat, **flat_params)
+        return dinv.physics.TimeMixin.unflatten(transformed_flat, batch_size=B)
+class VideoDiffeo(dinv.transform.CPABDiffeomorphism):
+    """A Diffeomorphism transform that correctly handles 5D video tensors."""
+    def _transform(self, x: torch.Tensor, **params) -> torch.Tensor:
+        if not self._check_x_5D(x):
+            return super()._transform(x, **params)
+        B = x.shape[0]
+        x_flat = dinv.physics.TimeMixin.flatten(x)
+        flat_params = self.get_params(x_flat)
+        transformed_flat = super()._transform(x_flat, **flat_params)
+        return dinv.physics.TimeMixin.unflatten(transformed_flat, batch_size=B)
+class SubsampleTime(Transform):
+    r"""
+    Augments a video by taking a random contiguous temporal sub-sequence of a
+    RANDOM length, and then interpolating it back to the original length.
+    :param int n_trans: Number of transformed versions to generate per input image.
+    :param tuple[float, float] subsample_ratio_range: The min and max ratio of the
+                                                     total time frames to keep (e.g., (0.7, 0.95)).
+    :param torch.Generator rng: Random number generator.
     """
-    A Dataset that:
-      - Looks for all .h5/.hdf5 files under `root_dir`.
-      - Each file is assumed to contain a dataset at `dataset_key`, with shape (... Z),
-        where Z is the number of slices/partitions.
-      - Splits each volume into Z separate examples (one per slice).
-      - Returns each slice as a torch.Tensor.
-    """
-    def __init__(
-        self,
-        root_dir,
-        patient_ids,
-        dataset_key="kspace",
-        file_pattern="*.h5",
-        slice_idx=41,
-        N_time = 8
-    ):
+    def __init__(self, *args, subsample_ratio_range: tuple[float, float] = (0.7, 0.95), **kwargs):
+        super().__init__(*args, **kwargs)
+        self.flatten_video_input = False  # Operate on 5D tensor
+        min_r, max_r = subsample_ratio_range
+        assert 0.0 < min_r <= max_r <= 1.0, "subsample_ratio_range must be a valid range (min, max) between 0 and 1."
+        self.subsample_ratio_range = subsample_ratio_range
+    def _get_params(self, x: torch.Tensor) -> dict:
         """
-        Args:
-            root_dir (str): Path to the folder containing all HDF5 k-space files.
-            dataset_key (str): The key/path inside each .h5 file to the k-space dataset (e.g. "kspace").
-            file_pattern (str): Glob pattern to match your HDF5 files (default "*.h5").
+        Generates a random ratio and a random start index for each transform.
         """
-        super().__init__()
-        self.root_dir = root_dir
-        self.dataset_key = dataset_key
-        self.slice_idx = slice_idx
-        self.N_time = N_time
-        all_files = sorted(glob.glob(os.path.join(root_dir, file_pattern)))
-        if len(all_files) == 0:
-            raise RuntimeError(
-                f"No files found in {root_dir} matching pattern {file_pattern}"
+        total_time_frames = x.shape[2]  # Shape is (B, C, T, H, W)
+        min_r, max_r = self.subsample_ratio_range
+        ratios = min_r + (max_r - min_r) * torch.rand(self.n_trans, generator=self.rng)
+        start_indices = []
+        for ratio in ratios:
+            subsample_length = int(total_time_frames * ratio.item())
+            if subsample_length >= total_time_frames:
+                start_indices.append(0)
+                continue
+            max_start_index = total_time_frames - subsample_length
+            start_idx = torch.randint(
+                low=0, high=max_start_index + 1, size=(1,), generator=self.rng
+            ).item()
+            start_indices.append(start_idx)
+        return {"ratios": ratios, "start_indices": torch.tensor(start_indices, dtype=torch.long)}
+    def _transform(
+        self, x: torch.Tensor, ratios: torch.Tensor, start_indices: torch.Tensor, **kwargs
+    ) -> torch.Tensor:
+        """Performs the temporal subsampling and resizing for each requested transform."""
+        B, C, total_time_frames, H, W = x.shape
+        assert B == 1, "This transform implementation assumes a batch size of 1 for simplicity."
+        output_list = []
+        for i in range(self.n_trans):
+            ratio = ratios[i]
+            start_idx = start_indices[i]
+            subsample_length = int(total_time_frames * ratio.item())
+            if subsample_length >= total_time_frames:
+                output_list.append(x.clone()) # Use clone to avoid issues
+                continue
+            sub_sequence = x[:, :, start_idx : start_idx + subsample_length, :, :]
+            flat_for_interp = rearrange(sub_sequence, "b c t h w -> b (c h w) t")
+            resized_flat = torch.nn.functional.interpolate(
+                flat_for_interp,
+                size=total_time_frames,
+                mode="linear",
+                align_corners=False,
             )
-        filtered = []
-        for fp in all_files:
-            fname = os.path.basename(fp)
-            if any(pid in fname for pid in patient_ids):
-                filtered.append(fp)
-        self.file_list = filtered
-        if len(self.file_list) == 0:
-            raise RuntimeError("No files matched the provided patient_ids filter.")
-    def load_dynamic_img(self, patient_id):
-        H = W = 320
-        data = np.empty((2, self.N_time, H, W), dtype=np.float32)
-        for t in range(self.N_time):
-            img_path = f'/ess/scratch/scratch1/rachelgordon/dce-{self.N_time}tf/{patient_id}/slice_{self.slice_idx:03d}_frame_{t:03d}.nii'
-            img = nib.load(img_path)
-            img_data = img.get_fdata()
-            if img_data.shape != (2, H, W):
-                raise ValueError(f"{img_path} has shape {img_data.shape}; "
-                                f"expected (2, {H}, {W})")
-            data[:, t] = img_data.astype(np.float32)
-        return torch.from_numpy(data) 
-    def __len__(self):
-        return len(self.file_list)
-    def __getitem__(self, idx):
+            resized_sequence = rearrange(
+                resized_flat, "b (c h w) t -> b c t h w", c=C, h=H, w=W
+            )
+            output_list.append(resized_sequence)
+        return torch.cat(output_list, dim=0)
+class PeakAwareBiPhasicWarp(Transform):
+    r"""
+    An enhancement-peak-aware temporal augmentation that warps BOTH the wash-in
+    and wash-out phases independently with different random ratios.
+    It finds the time of peak enhancement, splits the video, and then
+    time-warps (compresses/stretches) both phases before reassembling them.
+    :param tuple[float, float] warp_ratio_range: The min/max ratio for
+                                                 compressing a phase. e.g., (0.6, 0.95).
+    """
+    def __init__(self, *args, warp_ratio_range: tuple[float, float] = (0.6, 0.95), **kwargs):
+        super().__init__(*args, **kwargs)
+        self.flatten_video_input = False
+        min_r, max_r = warp_ratio_range
+        assert 0.0 < min_r <= max_r <= 1.0, "warp_ratio_range must be valid."
+        self.warp_ratio_range = warp_ratio_range
+    def _get_params(self, x: torch.Tensor) -> dict:
         """
-        Returns a single slice of k-space as a torch.Tensor.
-        The output shape will be the standard (C=2, T, S, I) where C is [real, imag].
+        Generate two independent warp ratios for each requested transform:
+        one for wash-in and one for wash-out.
         """
-        file_path = self.file_list[idx]
-        patient_id = file_path.split('/')[-1].strip('.h5')
-        grasp_img = self.load_dynamic_img(patient_id)
-        with h5py.File(file_path, "r") as f:
-            ds = torch.tensor(f[self.dataset_key][:])
-            kspace_slice = ds[self.slice_idx]
-        kspace_single_coil = kspace_slice[:, 0, :, :]  # Shape: (T, S, I)
-        real_part = kspace_single_coil.real
-        imag_part = kspace_single_coil.imag
-        kspace_final = torch.stack([real_part, imag_part], dim=0).float()
-        return kspace_final, grasp_img
-if __name__ == "__main__":
-    root_dir = "/ess/scratch/scratch1/rachelgordon/dce-12tf/binned_kspace"
-    dataset_key = "ktspace"  # change if your HDF5 group/dataset is named differently
-    def to_complex(x_np: "np.ndarray") -> "np.ndarray":
-        """
-        If x_np.shape = (C, H, W, 2) or similar where the last dim is [real, imag],
-        convert to complex64 with shape (C, H, W).
-        Adjust slicing logic if your real/imag channels are elsewhere.
-        """
-        real = x_np[..., 0].astype("float32")
-        imag = x_np[..., 1].astype("float32")
-        return (real + 1j * imag).astype("complex64")
-    dataset = SliceDataset(
-        root_dir=root_dir, dataset_key=dataset_key, file_pattern="*.h5"
-    )
-    loader = DataLoader(
-        dataset,
-        batch_size=1,
-        shuffle=True,
-        num_workers=4,
-        pin_memory=True,
-    )
-    for batch_idx, kspace_batch in enumerate(loader):
-        print(
-            f"Batch {batch_idx}: k-space batch shape = {kspace_batch.shape}, dtype = {kspace_batch.dtype}"
-        )
-        break
+        params_list = []
+        min_r, max_r = self.warp_ratio_range
+        for _ in range(self.n_trans):
+            washin_ratio = min_r + (max_r - min_r) * torch.rand(1, generator=self.rng).item()
+            washout_ratio = min_r + (max_r - min_r) * torch.rand(1, generator=self.rng).item()
+            params_list.append({
+                "washin_ratio": washin_ratio,
+                "washout_ratio": washout_ratio
+            })
+        return {"params_list": params_list}
+    def _transform(self, x: torch.Tensor, params_list: list[dict], **kwargs) -> torch.Tensor:
+        """Applies the independent, bi-phasic warp."""
+        assert x.shape[0] == 1, "This transform assumes a batch size of 1 for the input."
+        mean_signal_curve = torch.mean(x, dim=(0, 1, 3, 4)) # Avg over B, C, H, W
+        peak_idx = torch.argmax(mean_signal_curve)
+        if peak_idx <= 0 or peak_idx >= x.shape[2] - 1:
+            return x.repeat(self.n_trans, 1, 1, 1, 1)
+        output_list = []
+        for params in params_list:
+            wash_in_phase = x[:, :, :peak_idx, :, :]
+            peak_frame = x[:, :, peak_idx:peak_idx+1, :, :]
+            wash_out_phase = x[:, :, peak_idx+1:, :, :]
+            warped_wash_in = self._warp_phase(wash_in_phase, params["washin_ratio"])
+            warped_wash_out = self._warp_phase(wash_out_phase, params["washout_ratio"])
+            new_x = torch.cat([warped_wash_in, peak_frame, warped_wash_out], dim=2)
+            output_list.append(new_x)
+        return torch.cat(output_list, dim=0)
+    def _warp_phase(self, phase_tensor: torch.Tensor, ratio: float) -> torch.Tensor:
+        """Helper function to subsample and interpolate a video phase."""
+        B, C, T_phase, H, W = phase_tensor.shape
+        if T_phase <= 1: # Cannot warp a single frame or empty tensor
+            return phase_tensor
+        subsample_len = max(1, int(T_phase * ratio)) # Ensure at least 1 frame
+        flat_for_interp = rearrange(phase_tensor, "b c t h w -> b (c h w) t")
+        subsampled_flat = F.interpolate(flat_for_interp, size=subsample_len, mode='linear', align_corners=False)
+        resized_flat = F.interpolate(subsampled_flat, size=T_phase, mode='linear', align_corners=False)
+        warped_phase = rearrange(resized_flat, "b (c h w) t -> b c t h w", c=C, h=H, w=W)
+        return warped_phase
 
 === crnn.py ===
 import torch
@@ -595,15 +699,10 @@ class CRNN(nn.Module):
             x_post_dc = self.datalayer(x_pre_dc, y, self.datalayer.physics.mask)
             global_step = 0
             if i < self.num_cascades - 1:
-                log(f"cascade_{i}/pre_norm_mean", x_post_dc.mean().item(), global_step)
-                log(f"cascade_{i}/pre_norm_std", x_post_dc.std().item(), global_step)
-                log(f"cascade_{i}/pre_norm_min", x_post_dc.min().item(), global_step)
-                log(f"cascade_{i}/pre_norm_max", x_post_dc.max().item(), global_step)
-                x_cascade_in = _renormalize_by_input(x_post_dc, x_pre_dc)
-                log(f"cascade_{i}/post_norm_mean", x_cascade_in.mean().item(), global_step)
-                log(f"cascade_{i}/post_norm_std", x_cascade_in.std().item(), global_step)
-                log(f"cascade_{i}/post_norm_min", x_cascade_in.min().item(), global_step)
-                log(f"cascade_{i}/post_norm_max", x_cascade_in.max().item(), global_step)
+                mean = torch.mean(x_post_dc, dim=(-3, -2, -1), keepdim=True)
+                std = torch.std(x_post_dc, dim=(-3, -2, -1), keepdim=True)
+                epsilon = 1e-8
+                x_cascade_in = (x_post_dc - mean) / (std + epsilon)
             else:
                 x_cascade_in = x_post_dc
         return x_cascade_in
@@ -623,6 +722,114 @@ class ArtifactRemovalCRNN(nn.Module):
         scaling_factor = norm_of_zf_recon / (norm_of_raw_output + 1e-8)
         x_hat_final = x_hat_raw * scaling_factor
         return x_hat_final
+
+=== dataloader.py ===
+import glob
+import os
+import h5py
+import numpy as np
+import torch
+from torch.utils.data import DataLoader, Dataset
+import nibabel as nib
+class SliceDataset(Dataset):
+    """
+    A Dataset that:
+      - Looks for all .h5/.hdf5 files under `root_dir`.
+      - Each file is assumed to contain a dataset at `dataset_key`, with shape (... Z),
+        where Z is the number of slices/partitions.
+      - Splits each volume into Z separate examples (one per slice).
+      - Returns each slice as a torch.Tensor.
+    """
+    def __init__(
+        self,
+        root_dir,
+        patient_ids,
+        dataset_key="kspace",
+        file_pattern="*.h5",
+        slice_idx=41,
+        N_time = 8
+    ):
+        """
+        Args:
+            root_dir (str): Path to the folder containing all HDF5 k-space files.
+            dataset_key (str): The key/path inside each .h5 file to the k-space dataset (e.g. "kspace").
+            file_pattern (str): Glob pattern to match your HDF5 files (default "*.h5").
+        """
+        super().__init__()
+        self.root_dir = root_dir
+        self.dataset_key = dataset_key
+        self.slice_idx = slice_idx
+        self.N_time = N_time
+        all_files = sorted(glob.glob(os.path.join(root_dir, file_pattern)))
+        if len(all_files) == 0:
+            raise RuntimeError(
+                f"No files found in {root_dir} matching pattern {file_pattern}"
+            )
+        filtered = []
+        for fp in all_files:
+            fname = os.path.basename(fp)
+            if any(pid in fname for pid in patient_ids):
+                filtered.append(fp)
+        self.file_list = filtered
+        if len(self.file_list) == 0:
+            raise RuntimeError("No files matched the provided patient_ids filter.")
+    def load_dynamic_img(self, patient_id):
+        H = W = 320
+        data = np.empty((2, self.N_time, H, W), dtype=np.float32)
+        for t in range(self.N_time):
+            img_path = f'/ess/scratch/scratch1/rachelgordon/dce-{self.N_time}tf/{patient_id}/slice_{self.slice_idx:03d}_frame_{t:03d}.nii'
+            img = nib.load(img_path)
+            img_data = img.get_fdata()
+            if img_data.shape != (2, H, W):
+                raise ValueError(f"{img_path} has shape {img_data.shape}; "
+                                f"expected (2, {H}, {W})")
+            data[:, t] = img_data.astype(np.float32)
+        return torch.from_numpy(data) 
+    def __len__(self):
+        return len(self.file_list)
+    def __getitem__(self, idx):
+        """
+        Returns a single slice of k-space as a torch.Tensor.
+        The output shape will be the standard (C=2, T, S, I) where C is [real, imag].
+        """
+        file_path = self.file_list[idx]
+        patient_id = file_path.split('/')[-1].strip('.h5')
+        grasp_img = self.load_dynamic_img(patient_id)
+        with h5py.File(file_path, "r") as f:
+            ds = torch.tensor(f[self.dataset_key][:])
+            kspace_slice = ds[self.slice_idx]
+        kspace_single_coil = kspace_slice[:, 0, :, :]  # Shape: (T, S, I)
+        real_part = kspace_single_coil.real
+        imag_part = kspace_single_coil.imag
+        kspace_final = torch.stack([real_part, imag_part], dim=0).float()
+        return kspace_final, grasp_img
+if __name__ == "__main__":
+    root_dir = "/ess/scratch/scratch1/rachelgordon/dce-12tf/binned_kspace"
+    dataset_key = "ktspace"  # change if your HDF5 group/dataset is named differently
+    def to_complex(x_np: "np.ndarray") -> "np.ndarray":
+        """
+        If x_np.shape = (C, H, W, 2) or similar where the last dim is [real, imag],
+        convert to complex64 with shape (C, H, W).
+        Adjust slicing logic if your real/imag channels are elsewhere.
+        """
+        real = x_np[..., 0].astype("float32")
+        imag = x_np[..., 1].astype("float32")
+        return (real + 1j * imag).astype("complex64")
+    dataset = SliceDataset(
+        root_dir=root_dir, dataset_key=dataset_key, file_pattern="*.h5"
+    )
+    loader = DataLoader(
+        dataset,
+        batch_size=1,
+        shuffle=True,
+        num_workers=4,
+        pin_memory=True,
+    )
+    for batch_idx, kspace_batch in enumerate(loader):
+        print(
+            f"Batch {batch_idx}: k-space batch shape = {kspace_batch.shape}, dtype = {kspace_batch.dtype}"
+        )
+        break
 
 === radial.py ===
 import deepinv as dinv
@@ -792,4 +999,74 @@ class RadialDCLayer(nn.Module):
         x_dc_img = self.physics.A_adjoint(k_dc)
         x_dc_permuted = rearrange(x_dc_img, "b c t h w -> b h w t c")
         return x_dc_permuted
+
+=== ei.py ===
+from typing import Union
+import torch
+import torch.nn as nn
+from deepinv.loss.loss import Loss
+from deepinv.loss.metric.metric import Metric
+from deepinv.transform.base import Transform
+class EILoss(Loss):
+    r"""
+    Equivariant imaging self-supervised loss.
+    Assumes that the set of signals is invariant to a group of transformations (rotations, translations, etc.)
+    in order to learn from incomplete measurement data alone https://https://arxiv.org/pdf/2103.14756.pdf.
+    The EI loss is defined as
+    .. math::
+        \| T_g \hat{x} - \inverse{\forw{T_g \hat{x}}}\|^2
+    where :math:`\hat{x}=\inverse{y}` is a reconstructed signal and
+    :math:`T_g` is a transformation sampled at random from a group :math:`g\sim\group`.
+    By default, the error is computed using the MSE metric, however any other metric (e.g., :math:`\ell_1`)
+    can be used as well.
+    :param deepinv.transform.Transform transform: Transform to generate the virtually augmented measurement.
+        It can be any torch-differentiable function (e.g., a :class:`torch.nn.Module`)
+        including `torchvision transforms <https://pytorch.org/vision/stable/transforms.html>`_.
+    :param Metric, torch.nn.Module metric: Metric used to compute the error between the reconstructed augmented measurement and the reference
+        image.
+    :param bool apply_noise: if ``True``, the augmented measurement is computed with the full sensing model
+        :math:`\sensor{\noise{\forw{\hat{x}}}}` (i.e., noise and sensor model),
+        otherwise is generated as :math:`\forw{\hat{x}}`.
+    :param float weight: Weight of the loss.
+    :param bool no_grad: if ``True``, the gradient does not propagate through :math:`T_g`. Default: ``False``.
+        This option is useful for super-resolution problems, see https://arxiv.org/abs/2312.11232.
+    """
+    def __init__(
+        self,
+        transform: Transform,
+        metric: Union[Metric, nn.Module] = torch.nn.MSELoss(),
+        apply_noise=True,
+        weight=1.0,
+        no_grad=False,
+        *args,
+        **kwargs,
+    ):
+        super(EILoss, self).__init__(*args, **kwargs)
+        self.name = "ei"
+        self.metric = metric
+        self.weight = weight
+        self.T = transform
+        self.noise = apply_noise
+        self.no_grad = no_grad
+    def forward(self, x_net, physics, model, **kwargs):
+        r"""
+        Computes the EI loss
+        :param torch.Tensor x_net: Reconstructed image :math:`\inverse{y}`.
+        :param deepinv.physics.Physics physics: Forward operator associated with the measurements.
+        :param torch.nn.Module model: Reconstruction function.
+        :return: (:class:`torch.Tensor`) loss.
+        """
+        if self.no_grad:
+            with torch.no_grad():
+                x2 = self.T(x_net)
+                x2 = x2.detach()
+        else:
+            x2 = self.T(x_net)
+        if self.noise:
+            y = physics(x2)
+        else:
+            y = physics.A(x2)
+        x3 = model(y, physics)
+        loss_ei = self.weight * self.metric(x3, x2)
+        return loss_ei, x2
 

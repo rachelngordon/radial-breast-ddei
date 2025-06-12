@@ -17,7 +17,7 @@ from torch.utils.data import DataLoader
 from torchvision.transforms import InterpolationMode
 from tqdm import tqdm
 import numpy as np
-from transform import VideoRotate, VideoDiffeo, SubsampleTime, PeakAwareBiPhasicWarp
+from transform import VideoRotate, VideoDiffeo, SubsampleTime, MonophasicTimeWarp, TemporalNoise
 from ei import EILoss
 from torch.optim.lr_scheduler import CosineAnnealingLR
 
@@ -295,11 +295,20 @@ mc_loss_fn = MCLoss()
 
 if use_ei_loss:
     rotate = VideoRotate(n_trans=1, interpolation_mode=InterpolationMode.BILINEAR)
-    diffeo = VideoDiffeo(n_trans=1, device=device)
+    # diffeo = VideoDiffeo(n_trans=1, device=device)
     subsample = SubsampleTime(n_trans=1, subsample_ratio_range=(config['model']['losses']['ei_loss']['subsample_ratio_min'], config['model']['losses']['ei_loss']['subsample_ratio_max']))
-    biphasic_warp = PeakAwareBiPhasicWarp(n_trans=1, warp_ratio_range=(config['model']['losses']['ei_loss']['warp_ratio_min'], config['model']['losses']['ei_loss']['warp_ratio_max']))
+    # biphasic_warp = PeakAwareBiPhasicWarp(n_trans=1, warp_ratio_range=(config['model']['losses']['ei_loss']['warp_ratio_min'], config['model']['losses']['ei_loss']['warp_ratio_max']))
+    monophasic_warp = MonophasicTimeWarp(n_trans=1, warp_ratio_range=(config['model']['losses']['ei_loss']['warp_ratio_min'], config['model']['losses']['ei_loss']['warp_ratio_max']))
+    temp_noise = TemporalNoise(n_trans=1)
 
-    ei_loss_fn = EILoss(biphasic_warp | rotate)
+    if config['model']['losses']['ei_loss']['temporal_transform'] == "monophasic":
+        ei_loss_fn = EILoss(monophasic_warp | rotate)
+    elif config['model']['losses']['ei_loss']['temporal_transform'] == "noise":
+        ei_loss_fn = EILoss(temp_noise | rotate)
+    elif config['model']['losses']['ei_loss']['temporal_transform'] == "subsample":
+        ei_loss_fn = EILoss(subsample | rotate)
+    else:
+        raise(ValueError, "Unsupported Temporal Transform.")
 
 print(
     "--- Generating and saving a Zero-Filled (ZF) reconstruction sample before training ---"

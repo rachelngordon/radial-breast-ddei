@@ -292,3 +292,130 @@ class PeakAwareBiPhasicWarp(Transform):
         # Reshape back to video format
         warped_phase = rearrange(resized_flat, "b (c h w) t -> b c t h w", c=C, h=H, w=W)
         return warped_phase
+    
+
+class MonophasicTimeWarp(Transform):
+    r"""
+    A temporal augmentation specifically designed for monophasic enhancement curves
+    (e.g., persistent or plateau types) where there is no wash-out phase.
+
+    This transform keeps the first (pre-contrast) frame fixed and applies a
+    single, smooth time-warp to the entire subsequent enhancement phase.
+
+    :param tuple[float, float] warp_ratio_range: The min/max ratio for
+        compressing/stretching the enhancement phase. e.g., (0.7, 1.3).
+        Values < 1 compress time, values > 1 stretch time.
+    """
+    def __init__(self, *args, warp_ratio_range: tuple[float, float] = (0.7, 1.3), **kwargs):
+        super().__init__(*args, **kwargs)
+        self.flatten_video_input = False
+        min_r, max_r = warp_ratio_range
+        assert 0.0 < min_r <= max_r, "warp_ratio_range must be a valid positive range."
+        self.warp_ratio_range = warp_ratio_range
+
+    def _get_params(self, x: torch.Tensor) -> dict:
+        """
+        Generates a single random warp ratio for the entire enhancement phase.
+        """
+        min_r, max_r = self.warp_ratio_range
+        # Generate one random ratio from the specified range for each transform requested.
+        ratios = [min_r + (max_r - min_r) * torch.rand(1, generator=self.rng).item() for _ in range(self.n_trans)]
+        
+        return {"ratios": ratios}
+
+    def _transform(self, x: torch.Tensor, ratios: list[float], **kwargs) -> torch.Tensor:
+        """Applies the monophasic time warp."""
+        assert x.shape[0] == 1, "This transform assumes a batch size of 1 for the input."
+        if x.shape[2] <= 1: # Cannot warp if there's only one frame
+             return x.repeat(self.n_trans, 1, 1, 1, 1)
+
+        output_list = []
+        for ratio in ratios:
+            # 1. Isolate the pre-contrast frame (t=0) and the enhancement phase (t=1 onwards)
+            pre_contrast_frame = x[:, :, :1, :, :]
+            enhancement_phase = x[:, :, 1:, :, :]
+
+            # 2. Warp the enhancement phase
+            warped_enhancement_phase = self._warp_phase(enhancement_phase, ratio)
+
+            # 3. Reassemble the video
+            new_x = torch.cat([pre_contrast_frame, warped_enhancement_phase], dim=2)
+            output_list.append(new_x)
+
+        return torch.cat(output_list, dim=0)
+
+    def _warp_phase(self, phase_tensor: torch.Tensor, ratio: float) -> torch.Tensor:
+        """Helper function to interpolate a video phase to a new length."""
+        B, C, T_phase, H, W = phase_tensor.shape
+        if T_phase == 0:
+            return phase_tensor
+
+        # New length is the original length scaled by the ratio.
+        # This allows for both compression (ratio < 1) and stretching (ratio > 1).
+        new_length = int(round(T_phase * ratio))
+        if new_length == 0: new_length = 1 # Ensure at least one frame
+
+        # Reshape for interpolation
+        flat_for_interp = rearrange(phase_tensor, "b c t h w -> b (c h w) t")
+        
+        # Interpolate to the new length
+        resized_flat = F.interpolate(flat_for_interp, size=new_length, mode='linear', align_corners=False)
+
+        # If the length changed, we need to interpolate back to the original length
+        if new_length != T_phase:
+            resized_flat = F.interpolate(resized_flat, size=T_phase, mode='linear', align_corners=False)
+
+        # Reshape back to video format
+        warped_phase = rearrange(resized_flat, "b (c h w) t -> b c t h w", c=C, h=H, w=W)
+        return warped_phase
+    
+
+
+
+class TemporalNoise(Transform):
+    """ 
+    Adds low-frequency random noise to the temporal signal of a video.
+    This simulates smooth, slowly varying noise sources over time.
+    """
+    def __init__(self, *args, noise_strength: float = 0.5, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.flatten_video_input = False
+        self.noise_strength = noise_strength
+
+    def _get_params(self, x: torch.Tensor) -> dict:
+        """
+        Generates a single low-frequency noise vector for the transformation.
+        """
+        B, C, T, H, W = x.shape
+        
+        # Ensure there's at least one point in the low-res vector.
+        low_res_T = max(1, T // 4) 
+        
+        # Create a 3D tensor in the format (Batch, Channels, Length)
+        noise_low_res = torch.randn(B, 1, low_res_T, device=x.device)
+        
+        # --- CORRECTED LINE ---
+        # Interpolate the 3D tensor directly. `size` refers to the target length.
+        noise_high_res = F.interpolate(noise_low_res, size=T, mode='linear', align_corners=False)
+        # The output shape is now (B, 1, T)
+        
+        # Normalize the noise to have zero mean and unit variance
+        noise_norm = (noise_high_res - noise_high_res.mean(dim=-1, keepdim=True)) / (noise_high_res.std(dim=-1, keepdim=True) + 1e-8)
+        
+        # Scale by the desired strength
+        final_noise = noise_norm * self.noise_strength
+        
+        # Return the noise in a dictionary, as required by deepinv
+        return {'noise': final_noise}
+
+    def _transform(self, x: torch.Tensor, noise: torch.Tensor, **kwargs) -> torch.Tensor:
+        """
+        Applies the pre-generated noise to the image tensor.
+        """
+        B, C, T, H, W = x.shape
+        
+        # Reshape noise to be broadcastable and add it to the image
+        # noise shape: (B, 1, T) -> (B, 1, T, 1, 1)
+        x_noisy = x + noise.view(B, 1, T, 1, 1)
+        
+        return x_noisy

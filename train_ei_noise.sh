@@ -2,11 +2,11 @@
 
 # Parameters
 #SBATCH --cpus-per-task=4
-#SBATCH --error=logs/ei_loss_monophasic_warp.err
-#SBATCH --output=logs/ei_loss_monophasic_warp.out
+#SBATCH --error=logs/ei_loss_temp_noise.err
+#SBATCH --output=logs/ei_loss_temp_noise.out
 #SBATCH --exclude=''
 #SBATCH --gpus-per-node=1
-#SBATCH --job-name=ei_loss_monophasic_warp
+#SBATCH --job-name=ei_loss_temp_noise
 #SBATCH --mem-per-gpu=490000
 #SBATCH --nodes=1
 #SBATCH --ntasks-per-node=1
@@ -21,4 +21,4 @@ source /gpfs/data/karczmar-lab/workspaces/rachelgordon/micromamba/etc/profile.d/
 micromamba activate recon_mri
 
 # Run the training script with srun
-python3 train.py --config configs/config_ei.yaml --exp_name ei_loss_monophasic_warp
+python3 train.py --config configs/config_ei_noise.yaml --exp_name ei_loss_temp_noise

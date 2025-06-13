@@ -3,34 +3,129 @@ import deepinv as dinv
 import torch
 from deepinv.transform import Transform
 from einops import rearrange
-from torchvision.transforms import InterpolationMode
 import torch.nn.functional as F
 from torchvision.transforms.functional import rotate
 from typing import Union
 
 
 
-class VideoRotate(dinv.transform.Rotate):
-    """A Rotate transform that correctly handles 5D video tensors by flattening time into the batch dimension."""
+# class VideoRotate(dinv.transform.Rotate):
+#     """A Rotate transform that correctly handles 5D video tensors by flattening time into the batch dimension."""
 
-    def _transform(self, x: torch.Tensor, **params) -> torch.Tensor:
-        # First, check if we even need to flatten. If it's already 4D, just rotate.
+#     def _transform(self, x: torch.Tensor, **params) -> torch.Tensor:
+#         # First, check if we even need to flatten. If it's already 4D, just rotate.
+#         if not self._check_x_5D(x):
+#             return super()._transform(x, **params)
+
+#         # It's a 5D video tensor. Flatten time into the batch dimension.
+#         B = x.shape[0]
+#         x_flat = dinv.physics.TimeMixin.flatten(x)  # (B, C, T, H, W) -> (B*T, C, H, W)
+
+#         # The parent's _transform method can now work correctly on the 4D tensor (batch of 2D images).
+#         # We need to get the right parameters for this new batch size.
+#         # The `get_params` is usually called before `_transform`, so we should be okay.
+#         # However, to be safe, let's pass a modified params dictionary.
+#         flat_params = self.get_params(x_flat)
+
+#         transformed_flat = super()._transform(x_flat, **flat_params)
+
+#         # Unflatten to restore the original 5D video shape.
+#         return dinv.physics.TimeMixin.unflatten(transformed_flat, batch_size=B)
+
+class VideoRotate(Transform):
+    r"""
+    CORRECTED 2D Rotation for Videos (Handles deepinv composition).
+    
+    This class correctly applies a single, consistent random rotation to all frames of a video.
+    It samples angles uniformly from a continuous range and is robust to being called
+    from a deepinv composition operator that pre-flattens the video tensor.
+
+    :param tuple[float, float] or float degrees: Range of degrees to select from.
+        If degrees is a number instead of sequence like (min, max), the range of degrees
+        will be (-degrees, +degrees).
+    :param str interpolation_mode: "bilinear" or "nearest".
+    :param bool constant_shape: if True, output has the same shape as the input.
+    """
+
+    def __init__(
+        self,
+        *args,
+        degrees: Union[float, tuple[float, float]] = 180.0,
+        interpolation_mode: str = "bilinear",
+        **kwargs,
+    ):
+        super().__init__(*args, **kwargs)
+        if isinstance(degrees, (int, float)):
+            if degrees < 0:
+                raise ValueError("If degrees is a single number, it must be non-negative.")
+            self.degrees = (-degrees, degrees)
+        else:
+            if len(degrees) != 2:
+                raise ValueError("If degrees is a sequence, it must be of length 2.")
+            self.degrees = degrees
+            
+        self.interpolation_mode = interpolation_mode
+        # This flag tells the deepinv TimeMixin decorator not to flatten input for us.
+        # We will handle the 5D logic ourselves.
+        self.flatten_video_input = False
+
+    def _get_params(self, x: torch.Tensor) -> dict:
+        """
+        Uniformly samples `n_trans` random angles from the specified continuous range.
+        """
+        # NOTE: self.n_trans comes from the parent Transform class
+        angles = [
+            torch.empty(1).uniform_(self.degrees[0], self.degrees[1]).item()
+            for _ in range(self.n_trans)
+        ]
+        return {"theta": angles}
+
+    def _transform(
+        self,
+        x: torch.Tensor,
+        theta: Union[torch.Tensor, list] = [],
+        **kwargs,
+    ) -> torch.Tensor:
+        """
+        Applies the rotation transformations. This method now explicitly handles 5D video tensors.
+        """
         if not self._check_x_5D(x):
-            return super()._transform(x, **params)
+             raise ValueError("VideoRotate is designed for 5D video tensors (B, C, T, H, W).")
 
-        # It's a 5D video tensor. Flatten time into the batch dimension.
-        B = x.shape[0]
-        x_flat = dinv.physics.TimeMixin.flatten(x)  # (B, C, T, H, W) -> (B*T, C, H, W)
+        B, C, T, H, W = x.shape
+        if not theta:
+            # Important: Get params using the original 5D tensor shape
+            params = self._get_params(x)
+            theta = params["theta"]
 
-        # The parent's _transform method can now work correctly on the 4D tensor (batch of 2D images).
-        # We need to get the right parameters for this new batch size.
-        # The `get_params` is usually called before `_transform`, so we should be okay.
-        # However, to be safe, let's pass a modified params dictionary.
-        flat_params = self.get_params(x_flat)
+        # For video transforms, we assume n_trans=1 and use the first generated angle
+        # to ensure the same rotation is applied to all frames.
+        if not theta:
+            raise ValueError("Rotation angle 'theta' not provided.")
+        angle_for_video = theta[0]
+        
+        # Create affine matrix for the rotation
+        angle_rad = -torch.tensor(angle_for_video) * (torch.pi / 180.0)
+        cos_a, sin_a = torch.cos(angle_rad), torch.sin(angle_rad)
+        
+        # Matrix for a single rotation. Shape: (1, 2, 3)
+        matrix = torch.tensor(
+            [[cos_a, -sin_a, 0], [sin_a, cos_a, 0]], 
+            dtype=torch.float32, device=x.device
+        ).unsqueeze(0)
+        
+        # Expand matrix to apply to the whole batch
+        matrix = matrix.repeat(B, 1, 1)
 
-        transformed_flat = super()._transform(x_flat, **flat_params)
-
-        # Unflatten to restore the original 5D video shape.
+        # Generate the sampling grid once for a single 4D image shape
+        grid_single = F.affine_grid(matrix, (B, C, H, W), align_corners=False)
+        
+        # Apply this same grid to all frames by expanding it and flattening the input
+        grid_expanded = grid_single.repeat_interleave(T, dim=0)
+        x_flat = dinv.physics.TimeMixin.flatten(x)
+        
+        transformed_flat = F.grid_sample(x_flat, grid_expanded, mode=self.interpolation_mode, padding_mode='zeros', align_corners=False)
+        
         return dinv.physics.TimeMixin.unflatten(transformed_flat, batch_size=B)
 
 

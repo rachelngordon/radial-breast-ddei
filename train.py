@@ -296,7 +296,8 @@ scheduler = CosineAnnealingLR(
 mc_loss_fn = MCLoss()
 
 if use_ei_loss:
-    rotate = VideoRotate(n_trans=1, interpolation_mode=InterpolationMode.BILINEAR)
+    # rotate = VideoRotate(n_trans=1, interpolation_mode=InterpolationMode.BILINEAR)
+    rotate = VideoRotate(n_trans=1, interpolation_mode="bilinear")
     diffeo = VideoDiffeo(n_trans=1, device=device)
 
     subsample = SubsampleTime(n_trans=1, subsample_ratio_range=(config['model']['losses']['ei_loss']['subsample_ratio_min'], config['model']['losses']['ei_loss']['subsample_ratio_max']))

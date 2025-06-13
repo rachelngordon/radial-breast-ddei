@@ -48,6 +48,7 @@ model:
       subsample_ratio_max: 0.95
       warp_ratio_min: 0.6
       warp_ratio_max: 0.95
+      noise_ratio: 0.5
 
 
 # Training settings

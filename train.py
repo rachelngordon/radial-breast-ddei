@@ -19,7 +19,6 @@ from tqdm import tqdm
 import numpy as np
 from transform import VideoRotate, VideoDiffeo, SubsampleTime, MonophasicTimeWarp, TemporalNoise
 from ei import EILoss
-from torch.optim.lr_scheduler import CosineAnnealingLR
 
 
 def get_cosine_ei_weight(
@@ -91,12 +90,15 @@ def plot_reconstruction_sample(x_recon, title, filename, output_dir, grasp_img=N
         axes[0, 0].set_ylabel("Transformed Image", fontsize=14, labelpad=10)
         axes[1, 0].set_ylabel("Model Output", fontsize=14, labelpad=10)
 
+    if transform:
+        axes[0, 0].set_ylabel("Transformed Image", fontsize=14, labelpad=10)
+        axes[1, 0].set_ylabel("Model Output", fontsize=14, labelpad=10)
+
         os.makedirs(os.path.join(output_dir, "transforms"), exist_ok=True)
 
     else:
         axes[0, 0].set_ylabel("Model Output", fontsize=14, labelpad=10)
         axes[1, 0].set_ylabel("GRASP Benchmark", fontsize=14, labelpad=10)
-        
     
     for t in range(n_timeframes):
         img = x_recon_mag[batch_idx, t, :, :].cpu().detach().numpy()
@@ -295,20 +297,13 @@ mc_loss_fn = MCLoss()
 
 if use_ei_loss:
     rotate = VideoRotate(n_trans=1, interpolation_mode=InterpolationMode.BILINEAR)
-    # diffeo = VideoDiffeo(n_trans=1, device=device)
+    diffeo = VideoDiffeo(n_trans=1, device=device)
+
     subsample = SubsampleTime(n_trans=1, subsample_ratio_range=(config['model']['losses']['ei_loss']['subsample_ratio_min'], config['model']['losses']['ei_loss']['subsample_ratio_max']))
-    # biphasic_warp = PeakAwareBiPhasicWarp(n_trans=1, warp_ratio_range=(config['model']['losses']['ei_loss']['warp_ratio_min'], config['model']['losses']['ei_loss']['warp_ratio_max']))
     monophasic_warp = MonophasicTimeWarp(n_trans=1, warp_ratio_range=(config['model']['losses']['ei_loss']['warp_ratio_min'], config['model']['losses']['ei_loss']['warp_ratio_max']))
     temp_noise = TemporalNoise(n_trans=1)
 
-    if config['model']['losses']['ei_loss']['temporal_transform'] == "monophasic":
-        ei_loss_fn = EILoss(monophasic_warp | rotate)
-    elif config['model']['losses']['ei_loss']['temporal_transform'] == "noise":
-        ei_loss_fn = EILoss(temp_noise | rotate)
-    elif config['model']['losses']['ei_loss']['temporal_transform'] == "subsample":
-        ei_loss_fn = EILoss(subsample | rotate)
-    else:
-        raise(ValueError, "Unsupported Temporal Transform.")
+    ei_loss_fn = EILoss(subsample | (diffeo | rotate))
 
 print(
     "--- Generating and saving a Zero-Filled (ZF) reconstruction sample before training ---"
@@ -333,7 +328,7 @@ with torch.no_grad():
     )
 print("--- ZF baseline image saved to output directory. Starting training. ---")
 
-# Training Loop
+
 train_mc_losses = []
 val_mc_losses = []
 train_ei_losses = []
@@ -402,7 +397,6 @@ if args.from_checkpoint == False:
         step0_val_ei_loss = initial_val_ei_loss / len(val_loader)
         val_ei_losses.append(step0_val_ei_loss)
 
-
 # Training Loop
 for epoch in range(start_epoch, epochs + 1):
     model.train()
@@ -468,7 +462,6 @@ for epoch in range(start_epoch, epochs + 1):
                     output_dir,
                     grasp_img
                 )
-
 
                 plot_reconstruction_sample(
                     t_img,

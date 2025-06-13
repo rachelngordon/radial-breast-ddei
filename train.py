@@ -17,7 +17,7 @@ from torch.utils.data import DataLoader
 from torchvision.transforms import InterpolationMode
 from tqdm import tqdm
 import numpy as np
-from transform import VideoRotate, VideoDiffeo, SubsampleTime, MonophasicTimeWarp, TemporalNoise
+from transform import VideoRotate, VideoDiffeo, SubsampleTime, MonophasicTimeWarp, TemporalNoise, TimeReverse
 from ei import EILoss
 
 
@@ -287,11 +287,6 @@ optimizer = torch.optim.Adam(
     weight_decay=config["model"]["optimizer"]["weight_decay"],
 )
 
-scheduler = CosineAnnealingLR(
-    optimizer, T_max=epochs, eta_min=1e-7
-)
-
-
 # define transformations and loss functions
 mc_loss_fn = MCLoss()
 
@@ -303,7 +298,9 @@ if use_ei_loss:
     subsample = SubsampleTime(n_trans=1, subsample_ratio_range=(config['model']['losses']['ei_loss']['subsample_ratio_min'], config['model']['losses']['ei_loss']['subsample_ratio_max']))
     monophasic_warp = MonophasicTimeWarp(n_trans=1, warp_ratio_range=(config['model']['losses']['ei_loss']['warp_ratio_min'], config['model']['losses']['ei_loss']['warp_ratio_max']))
     temp_noise = TemporalNoise(n_trans=1)
+    time_reverse = TimeReverse(n_trans=1)
 
+    # ei_loss_fn = EILoss((subsample | time_reverse) | (diffeo | rotate))
     ei_loss_fn = EILoss(subsample | (diffeo | rotate))
 
 print(
@@ -551,9 +548,6 @@ for epoch in range(start_epoch, epochs + 1):
             val_ei_losses.append(epoch_val_ei_loss)
         else:
             val_ei_losses.append(0.0)
-
-        # learning rate scheduler
-        scheduler.step()
 
         # --- Plotting and Logging ---
         if epoch % save_interval == 0:

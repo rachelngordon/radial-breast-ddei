@@ -17,7 +17,7 @@ from torch.utils.data import DataLoader
 from torchvision.transforms import InterpolationMode
 from tqdm import tqdm
 import numpy as np
-from transform import VideoRotate, VideoDiffeo, SubsampleTime
+from transform import VideoRotate, VideoDiffeo, SubsampleTime, MonophasicTimeWarp, TemporalNoise
 from ei import EILoss
 def get_cosine_ei_weight(
     current_epoch,
@@ -66,6 +66,9 @@ def plot_reconstruction_sample(x_recon, title, filename, output_dir, grasp_img=N
         figsize=(n_timeframes * 3, 8),
         squeeze=False,
     )
+    if transform:
+        axes[0, 0].set_ylabel("Transformed Image", fontsize=14, labelpad=10)
+        axes[1, 0].set_ylabel("Model Output", fontsize=14, labelpad=10)
     if transform:
         axes[0, 0].set_ylabel("Transformed Image", fontsize=14, labelpad=10)
         axes[1, 0].set_ylabel("Model Output", fontsize=14, labelpad=10)
@@ -212,11 +215,16 @@ optimizer = torch.optim.Adam(
     eps=config["model"]["optimizer"]["eps"],
     weight_decay=config["model"]["optimizer"]["weight_decay"],
 )
+scheduler = CosineAnnealingLR(
+    optimizer, T_max=epochs, eta_min=1e-7
+)
 mc_loss_fn = MCLoss()
 if use_ei_loss:
-    rotate = VideoRotate(n_trans=1, interpolation_mode=InterpolationMode.BILINEAR)
+    rotate = VideoRotate(n_trans=1, interpolation_mode="bilinear")
     diffeo = VideoDiffeo(n_trans=1, device=device)
     subsample = SubsampleTime(n_trans=1, subsample_ratio_range=(config['model']['losses']['ei_loss']['subsample_ratio_min'], config['model']['losses']['ei_loss']['subsample_ratio_max']))
+    monophasic_warp = MonophasicTimeWarp(n_trans=1, warp_ratio_range=(config['model']['losses']['ei_loss']['warp_ratio_min'], config['model']['losses']['ei_loss']['warp_ratio_max']))
+    temp_noise = TemporalNoise(n_trans=1)
     ei_loss_fn = EILoss(subsample | (diffeo | rotate))
 print(
     "--- Generating and saving a Zero-Filled (ZF) reconstruction sample before training ---"
@@ -240,6 +248,43 @@ val_ei_losses = []
 weighted_train_mc_losses = []
 weighted_train_ei_losses = []
 iteration_count = 0
+if args.from_checkpoint == False:
+    model.eval()
+    initial_train_mc_loss = 0.0
+    initial_val_mc_loss = 0.0
+    initial_train_ei_loss = 0.0
+    initial_val_ei_loss = 0.0
+    with torch.no_grad():
+        for measured_kspace, grasp_img in tqdm(train_loader, desc="Step 0 Training Evaluation"):
+            x_recon = model(
+                measured_kspace.to(device), physics
+            )  # model output shape: (B, C, T, H, W)
+            mc_loss = mc_loss_fn(measured_kspace.to(device), x_recon, physics)
+            initial_train_mc_loss += mc_loss.item()
+            if use_ei_loss:
+                ei_loss, t_img = ei_loss_fn(
+                    x_recon, physics, model
+                )
+                initial_train_ei_loss += ei_loss.item()
+        step0_train_mc_loss = initial_train_mc_loss / len(train_loader)
+        train_mc_losses.append(step0_train_mc_loss)
+        step0_train_ei_loss = initial_train_ei_loss / len(train_loader)
+        train_ei_losses.append(step0_train_ei_loss)
+        for measured_kspace, grasp_img in tqdm(val_loader, desc="Step 0 Validation Evaluation"):
+            x_recon = model(
+                measured_kspace.to(device), physics
+            )  # model output shape: (B, C, T, H, W)
+            mc_loss = mc_loss_fn(measured_kspace.to(device), x_recon, physics)
+            initial_val_mc_loss += mc_loss.item()
+            if use_ei_loss:
+                ei_loss, t_img = ei_loss_fn(
+                    x_recon, physics, model
+                )
+                initial_val_ei_loss += ei_loss.item()
+        step0_val_mc_loss = initial_val_mc_loss / len(val_loader)
+        val_mc_losses.append(step0_val_mc_loss)
+        step0_val_ei_loss = initial_val_ei_loss / len(val_loader)
+        val_ei_losses.append(step0_val_ei_loss)
 for epoch in range(start_epoch, epochs + 1):
     model.train()
     running_mc_loss = 0.0
@@ -360,6 +405,7 @@ for epoch in range(start_epoch, epochs + 1):
             val_ei_losses.append(epoch_val_ei_loss)
         else:
             val_ei_losses.append(0.0)
+        scheduler.step()
         if epoch % save_interval == 0:
             plt.figure()
             plt.plot(train_mc_losses, label="Training MC Loss")
@@ -402,326 +448,6 @@ for epoch in range(start_epoch, epochs + 1):
 model_save_path = os.path.join(output_dir, f'{exp_name}_model_checkpoint.pth')
 torch.save(model.state_dict(), model_save_path)
 print(f'Model saved to {model_save_path}')
-
-=== transform.py ===
-import deepinv as dinv
-import torch
-from deepinv.transform import Transform
-from einops import rearrange
-from torchvision.transforms import InterpolationMode
-class VideoRotate(dinv.transform.Rotate):
-    """A Rotate transform that correctly handles 5D video tensors by flattening time into the batch dimension."""
-    def _transform(self, x: torch.Tensor, **params) -> torch.Tensor:
-        if not self._check_x_5D(x):
-            return super()._transform(x, **params)
-        B = x.shape[0]
-        x_flat = dinv.physics.TimeMixin.flatten(x)  # (B, C, T, H, W) -> (B*T, C, H, W)
-        flat_params = self.get_params(x_flat)
-        transformed_flat = super()._transform(x_flat, **flat_params)
-        return dinv.physics.TimeMixin.unflatten(transformed_flat, batch_size=B)
-class VideoDiffeo(dinv.transform.CPABDiffeomorphism):
-    """A Diffeomorphism transform that correctly handles 5D video tensors."""
-    def _transform(self, x: torch.Tensor, **params) -> torch.Tensor:
-        if not self._check_x_5D(x):
-            return super()._transform(x, **params)
-        B = x.shape[0]
-        x_flat = dinv.physics.TimeMixin.flatten(x)
-        flat_params = self.get_params(x_flat)
-        transformed_flat = super()._transform(x_flat, **flat_params)
-        return dinv.physics.TimeMixin.unflatten(transformed_flat, batch_size=B)
-class SubsampleTime(Transform):
-    r"""
-    Augments a video by taking a random contiguous temporal sub-sequence of a
-    RANDOM length, and then interpolating it back to the original length.
-    :param int n_trans: Number of transformed versions to generate per input image.
-    :param tuple[float, float] subsample_ratio_range: The min and max ratio of the
-                                                     total time frames to keep (e.g., (0.7, 0.95)).
-    :param torch.Generator rng: Random number generator.
-    """
-    def __init__(self, *args, subsample_ratio_range: tuple[float, float] = (0.7, 0.95), **kwargs):
-        super().__init__(*args, **kwargs)
-        self.flatten_video_input = False  # Operate on 5D tensor
-        min_r, max_r = subsample_ratio_range
-        assert 0.0 < min_r <= max_r <= 1.0, "subsample_ratio_range must be a valid range (min, max) between 0 and 1."
-        self.subsample_ratio_range = subsample_ratio_range
-    def _get_params(self, x: torch.Tensor) -> dict:
-        """
-        Generates a random ratio and a random start index for each transform.
-        """
-        total_time_frames = x.shape[2]  # Shape is (B, C, T, H, W)
-        min_r, max_r = self.subsample_ratio_range
-        ratios = min_r + (max_r - min_r) * torch.rand(self.n_trans, generator=self.rng)
-        start_indices = []
-        for ratio in ratios:
-            subsample_length = int(total_time_frames * ratio.item())
-            if subsample_length >= total_time_frames:
-                start_indices.append(0)
-                continue
-            max_start_index = total_time_frames - subsample_length
-            start_idx = torch.randint(
-                low=0, high=max_start_index + 1, size=(1,), generator=self.rng
-            ).item()
-            start_indices.append(start_idx)
-        return {"ratios": ratios, "start_indices": torch.tensor(start_indices, dtype=torch.long)}
-    def _transform(
-        self, x: torch.Tensor, ratios: torch.Tensor, start_indices: torch.Tensor, **kwargs
-    ) -> torch.Tensor:
-        """Performs the temporal subsampling and resizing for each requested transform."""
-        B, C, total_time_frames, H, W = x.shape
-        assert B == 1, "This transform implementation assumes a batch size of 1 for simplicity."
-        output_list = []
-        for i in range(self.n_trans):
-            ratio = ratios[i]
-            start_idx = start_indices[i]
-            subsample_length = int(total_time_frames * ratio.item())
-            if subsample_length >= total_time_frames:
-                output_list.append(x.clone()) # Use clone to avoid issues
-                continue
-            sub_sequence = x[:, :, start_idx : start_idx + subsample_length, :, :]
-            flat_for_interp = rearrange(sub_sequence, "b c t h w -> b (c h w) t")
-            resized_flat = torch.nn.functional.interpolate(
-                flat_for_interp,
-                size=total_time_frames,
-                mode="linear",
-                align_corners=False,
-            )
-            resized_sequence = rearrange(
-                resized_flat, "b (c h w) t -> b c t h w", c=C, h=H, w=W
-            )
-            output_list.append(resized_sequence)
-        return torch.cat(output_list, dim=0)
-class PeakAwareBiPhasicWarp(Transform):
-    r"""
-    An enhancement-peak-aware temporal augmentation that warps BOTH the wash-in
-    and wash-out phases independently with different random ratios.
-    It finds the time of peak enhancement, splits the video, and then
-    time-warps (compresses/stretches) both phases before reassembling them.
-    :param tuple[float, float] warp_ratio_range: The min/max ratio for
-                                                 compressing a phase. e.g., (0.6, 0.95).
-    """
-    def __init__(self, *args, warp_ratio_range: tuple[float, float] = (0.6, 0.95), **kwargs):
-        super().__init__(*args, **kwargs)
-        self.flatten_video_input = False
-        min_r, max_r = warp_ratio_range
-        assert 0.0 < min_r <= max_r <= 1.0, "warp_ratio_range must be valid."
-        self.warp_ratio_range = warp_ratio_range
-    def _get_params(self, x: torch.Tensor) -> dict:
-        """
-        Generate two independent warp ratios for each requested transform:
-        one for wash-in and one for wash-out.
-        """
-        params_list = []
-        min_r, max_r = self.warp_ratio_range
-        for _ in range(self.n_trans):
-            washin_ratio = min_r + (max_r - min_r) * torch.rand(1, generator=self.rng).item()
-            washout_ratio = min_r + (max_r - min_r) * torch.rand(1, generator=self.rng).item()
-            params_list.append({
-                "washin_ratio": washin_ratio,
-                "washout_ratio": washout_ratio
-            })
-        return {"params_list": params_list}
-    def _transform(self, x: torch.Tensor, params_list: list[dict], **kwargs) -> torch.Tensor:
-        """Applies the independent, bi-phasic warp."""
-        assert x.shape[0] == 1, "This transform assumes a batch size of 1 for the input."
-        mean_signal_curve = torch.mean(x, dim=(0, 1, 3, 4)) # Avg over B, C, H, W
-        peak_idx = torch.argmax(mean_signal_curve)
-        if peak_idx <= 0 or peak_idx >= x.shape[2] - 1:
-            return x.repeat(self.n_trans, 1, 1, 1, 1)
-        output_list = []
-        for params in params_list:
-            wash_in_phase = x[:, :, :peak_idx, :, :]
-            peak_frame = x[:, :, peak_idx:peak_idx+1, :, :]
-            wash_out_phase = x[:, :, peak_idx+1:, :, :]
-            warped_wash_in = self._warp_phase(wash_in_phase, params["washin_ratio"])
-            warped_wash_out = self._warp_phase(wash_out_phase, params["washout_ratio"])
-            new_x = torch.cat([warped_wash_in, peak_frame, warped_wash_out], dim=2)
-            output_list.append(new_x)
-        return torch.cat(output_list, dim=0)
-    def _warp_phase(self, phase_tensor: torch.Tensor, ratio: float) -> torch.Tensor:
-        """Helper function to subsample and interpolate a video phase."""
-        B, C, T_phase, H, W = phase_tensor.shape
-        if T_phase <= 1: # Cannot warp a single frame or empty tensor
-            return phase_tensor
-        subsample_len = max(1, int(T_phase * ratio)) # Ensure at least 1 frame
-        flat_for_interp = rearrange(phase_tensor, "b c t h w -> b (c h w) t")
-        subsampled_flat = F.interpolate(flat_for_interp, size=subsample_len, mode='linear', align_corners=False)
-        resized_flat = F.interpolate(subsampled_flat, size=T_phase, mode='linear', align_corners=False)
-        warped_phase = rearrange(resized_flat, "b (c h w) t -> b c t h w", c=C, h=H, w=W)
-        return warped_phase
-
-=== crnn.py ===
-import torch
-import torch.nn as nn
-from einops import rearrange
-import wandb
-def log(key, value, step):
-    print(f"Step {step} - {key}: {value:.4f}")
-def _normalize_batch(x):
-    b, h, w, t, c = x.shape
-    x_flat = x.reshape(b, -1)
-    max_vals, _ = torch.max(torch.abs(x_flat), dim=1, keepdim=True)
-    max_vals = max_vals + 1e-8
-    max_vals_reshaped = max_vals.reshape(b, 1, 1, 1, 1)
-    return x / max_vals_reshaped
-def _renormalize_by_input(x_after_dc, x_before_dc):
-    norm_before = torch.linalg.vector_norm(x_before_dc.flatten(1), dim=1, keepdim=True)
-    norm_after = torch.linalg.vector_norm(x_after_dc.flatten(1), dim=1, keepdim=True)
-    scaling_factor = norm_before / (norm_after + 1e-8)
-    return x_after_dc * scaling_factor.view(-1, 1, 1, 1, 1)
-def _normalize_batch(x):
-    """
-    Normalizes each item in the batch to the range [-1, 1] based on its absolute maximum value.
-    This preserves the internal structure and relative enhancement curve shape.
-    Shape of x: (B, H, W, T, C)
-    """
-    b, h, w, t, c = x.shape
-    x_flat = x.reshape(b, -1)
-    max_vals, _ = torch.max(torch.abs(x_flat), dim=1, keepdim=True)
-    max_vals = max_vals + 1e-8
-    max_vals_reshaped = max_vals.reshape(b, 1, 1, 1, 1)
-    return x / max_vals_reshaped
-def normalize_batch_percentile(x, percentile=99.5):
-    """
-    Normalizes each item in the batch based on a high percentile of its absolute values.
-    This method is more robust to extreme outliers (e.g., from NUFFT artifacts)
-    than normalizing by the absolute maximum. It ensures that the scaling factor
-    is determined by the bulk of the image signal, not a single rogue pixel.
-    Shape of x: (B, H, W, T, C) or any shape starting with Batch.
-    """
-    if not 0 < percentile <= 100:
-        raise ValueError("Percentile must be between 0 and 100.")
-    b = x.shape[0]
-    x_flat = x.reshape(b, -1)
-    q = percentile / 100.0
-    percentile_vals = torch.quantile(torch.abs(x_flat), q, dim=1, keepdim=True)
-    norm_factors = percentile_vals + 1e-8
-    dims_to_unsqueeze = [1] * (x.dim() - 1)
-    norm_factors_reshaped = norm_factors.view(b, *dims_to_unsqueeze)
-    return x / norm_factors_reshaped
-def normalize_batch_standardize(x, epsilon=1e-8):
-    """
-    Standardizes each item in the batch to have a mean of 0 and a standard deviation of 1.
-    This is a very common and robust normalization technique in deep learning. It centers
-    the data and scales it, which can significantly improve network stability and
-    convergence, especially when dealing with inputs that have varying offsets or scales.
-    Shape of x: (B, H, W, T, C) or any shape starting with the Batch dimension.
-    """
-    b = x.shape[0]
-    x_flat = x.reshape(b, -1)
-    mean = torch.mean(x_flat, dim=1, keepdim=True)
-    std = torch.std(x_flat, dim=1, keepdim=True)
-    safe_std = std + epsilon
-    dims_to_unsqueeze = [1] * (x.dim() - 1)
-    mean_reshaped = mean.view(b, *dims_to_unsqueeze)
-    std_reshaped = safe_std.view(b, *dims_to_unsqueeze)
-    return (x - mean_reshaped) / std_reshaped
-class ConvRNNCell(nn.Module):
-    """
-    Convolutional RNN cell.
-    - Removed spectral_norm wrapper from convolutional layers. This reduces regularization,
-      allowing the network to potentially learn finer details of the contrast enhancement,
-      at the cost of relying more on other stabilization techniques.
-    """
-    def __init__(self, in_chans, out_chans, bias=True):
-        super(ConvRNNCell, self).__init__()
-        self.in_chans = in_chans
-        self.out_chans = out_chans
-        self.i2h = nn.Conv2d(in_chans, out_chans, kernel_size=3, padding=1, bias=bias)
-        self.h2h = nn.Conv2d(out_chans, out_chans, kernel_size=3, padding=1, bias=bias)
-        self.relu = nn.ReLU(inplace=True)
-    def forward(self, input, hidden_iteration, hidden):
-        in_to_hid = self.i2h(input)
-        hid_to_hid = self.h2h(hidden)
-        ih_to_ih = self.i2h(hidden_iteration)
-        hidden = self.relu(in_to_hid + hid_to_hid + ih_to_ih)
-        return hidden
-class BCRNN(nn.Module):
-    """
-    Bidirectional Convolutional RNN.
-    Note: The original DDEI implementation calls this BCRNN but it is a standard
-    unidirectional CRNN operating over the time dimension. We keep the naming for consistency.
-    """
-    def __init__(self, in_chans, chans, n_layers, bias=True, device="cuda"):
-        super(BCRNN, self).__init__()
-        self.in_chans = in_chans
-        self.chans = chans
-        self.n_layers = n_layers
-        self.device = device
-        self.CRNN_model = ConvRNNCell(in_chans, chans, bias=bias)
-    def forward(self, input, hidden_iteration):
-        B, H, W, T, C = input.shape
-        input = input.permute(3, 0, 4, 1, 2).contiguous()
-        hidden_iteration = hidden_iteration.permute(3, 0, 4, 1, 2).contiguous()
-        hidden = torch.zeros(B, self.chans, H, W, device=self.device)
-        hidden_list = []
-        for i in range(T):
-            hidden = self.CRNN_model(input[i], hidden_iteration[i], hidden)
-            hidden_list.append(hidden)
-        out = torch.stack(hidden_list, dim=0).permute(1, 3, 4, 0, 2).contiguous()
-        return out
-class CRNN(nn.Module):
-    """
-    Main Unrolled CRNN architecture.
-    1.  **Inter-Cascade Normalization**: The output of the data consistency (DC) layer from each
-        cascade is normalized before being fed into the next cascade. This is the primary fix
-        for the exploding activation problem. It breaks the amplification feedback loop.
-    2.  **Residual Block Fix**: The code block for processing the BCRNN output and adding the
-        residual connection was reshaped incorrectly, which was the likely cause of the
-        `size mismatch` error. This has been completely rewritten to be correct.
-    3.  **Cleaned up Logic**: The variable naming and flow within the forward pass are clarified
-        to distinguish between different states of the image estimate (e.g., `x_pre_dc`, `x_post_dc`).
-    """
-    def __init__(self, num_cascades, chans, in_chans=2, datalayer=None, **kwargs):
-        super(CRNN, self).__init__()
-        self.num_cascades = num_cascades
-        self.chans = chans
-        self.in_chans = in_chans
-        self.datalayer = datalayer
-        self.bcrnn = BCRNN(in_chans, chans, n_layers=1, **kwargs)
-        self.res_conv = nn.Conv2d(chans, in_chans, kernel_size=1, stride=1, padding=0)
-    def forward(self, x_init_permuted, y, mask):  # 'mask' is the unused dummy mask
-        B, H, W, T, C = x_init_permuted.shape
-        x_cascade_in = x_init_permuted
-        for i in range(self.num_cascades):
-            bcrnn_out = self.bcrnn(x_cascade_in, x_init_permuted)
-            bcrnn_out_reshaped = (
-                bcrnn_out.permute(0, 3, 4, 1, 2)
-                .contiguous()
-                .reshape(B * T, self.chans, H, W)
-            )
-            res_out_reshaped = self.res_conv(bcrnn_out_reshaped)
-            res_out = (
-                res_out_reshaped.reshape(B, T, self.in_chans, H, W)
-                .permute(0, 3, 4, 1, 2)
-                .contiguous()
-            )
-            x_pre_dc = x_cascade_in + res_out
-            x_post_dc = self.datalayer(x_pre_dc, y, self.datalayer.physics.mask)
-            global_step = 0
-            if i < self.num_cascades - 1:
-                mean = torch.mean(x_post_dc, dim=(-3, -2, -1), keepdim=True)
-                std = torch.std(x_post_dc, dim=(-3, -2, -1), keepdim=True)
-                epsilon = 1e-8
-                x_cascade_in = (x_post_dc - mean) / (std + epsilon)
-            else:
-                x_cascade_in = x_post_dc
-        return x_cascade_in
-class ArtifactRemovalCRNN(nn.Module):
-    def __init__(self, backbone_net, **kwargs):
-        super(ArtifactRemovalCRNN, self).__init__()
-        self.backbone_net = backbone_net
-    def forward(self, y, physics, **kwargs):
-        x_init = physics.A_adjoint(y)
-        norm_of_zf_recon = torch.linalg.vector_norm(x_init)
-        x_init_permuted = rearrange(x_init, "b c t h w -> b h w t c")
-        x_init_norm_permuted = normalize_batch_standardize(x_init_permuted)
-        mask = physics.mask #torch.ones_like(y)
-        x_hat_permuted_raw = self.backbone_net(x_init_norm_permuted, y, mask)
-        x_hat_raw = rearrange(x_hat_permuted_raw, "b h w t c -> b c t h w")
-        norm_of_raw_output = torch.linalg.vector_norm(x_hat_raw)
-        scaling_factor = norm_of_zf_recon / (norm_of_raw_output + 1e-8)
-        x_hat_final = x_hat_raw * scaling_factor
-        return x_hat_final
 
 === dataloader.py ===
 import glob
@@ -999,6 +725,463 @@ class RadialDCLayer(nn.Module):
         x_dc_img = self.physics.A_adjoint(k_dc)
         x_dc_permuted = rearrange(x_dc_img, "b c t h w -> b h w t c")
         return x_dc_permuted
+
+=== transform.py ===
+import deepinv as dinv
+import torch
+from deepinv.transform import Transform
+from einops import rearrange
+import torch.nn.functional as F
+from torchvision.transforms.functional import rotate
+from typing import Union
+class VideoRotate(Transform):
+    r"""
+    CORRECTED 2D Rotation for Videos (Handles deepinv composition).
+    This class correctly applies a single, consistent random rotation to all frames of a video.
+    It samples angles uniformly from a continuous range and is robust to being called
+    from a deepinv composition operator that pre-flattens the video tensor.
+    :param tuple[float, float] or float degrees: Range of degrees to select from.
+        If degrees is a number instead of sequence like (min, max), the range of degrees
+        will be (-degrees, +degrees).
+    :param str interpolation_mode: "bilinear" or "nearest".
+    :param bool constant_shape: if True, output has the same shape as the input.
+    """
+    def __init__(
+        self,
+        *args,
+        degrees: Union[float, tuple[float, float]] = 180.0,
+        interpolation_mode: str = "bilinear",
+        **kwargs,
+    ):
+        super().__init__(*args, **kwargs)
+        if isinstance(degrees, (int, float)):
+            if degrees < 0:
+                raise ValueError("If degrees is a single number, it must be non-negative.")
+            self.degrees = (-degrees, degrees)
+        else:
+            if len(degrees) != 2:
+                raise ValueError("If degrees is a sequence, it must be of length 2.")
+            self.degrees = degrees
+        self.interpolation_mode = interpolation_mode
+        self.flatten_video_input = False
+    def _get_params(self, x: torch.Tensor) -> dict:
+        """
+        Uniformly samples `n_trans` random angles from the specified continuous range.
+        """
+        angles = [
+            torch.empty(1).uniform_(self.degrees[0], self.degrees[1]).item()
+            for _ in range(self.n_trans)
+        ]
+        return {"theta": angles}
+    def _transform(
+        self,
+        x: torch.Tensor,
+        theta: Union[torch.Tensor, list] = [],
+        **kwargs,
+    ) -> torch.Tensor:
+        """
+        Applies the rotation transformations. This method now explicitly handles 5D video tensors.
+        """
+        if not self._check_x_5D(x):
+             raise ValueError("VideoRotate is designed for 5D video tensors (B, C, T, H, W).")
+        B, C, T, H, W = x.shape
+        if not theta:
+            params = self._get_params(x)
+            theta = params["theta"]
+        if not theta:
+            raise ValueError("Rotation angle 'theta' not provided.")
+        angle_for_video = theta[0]
+        angle_rad = -torch.tensor(angle_for_video) * (torch.pi / 180.0)
+        cos_a, sin_a = torch.cos(angle_rad), torch.sin(angle_rad)
+        matrix = torch.tensor(
+            [[cos_a, -sin_a, 0], [sin_a, cos_a, 0]], 
+            dtype=torch.float32, device=x.device
+        ).unsqueeze(0)
+        matrix = matrix.repeat(B, 1, 1)
+        grid_single = F.affine_grid(matrix, (B, C, H, W), align_corners=False)
+        grid_expanded = grid_single.repeat_interleave(T, dim=0)
+        x_flat = dinv.physics.TimeMixin.flatten(x)
+        transformed_flat = F.grid_sample(x_flat, grid_expanded, mode=self.interpolation_mode, padding_mode='zeros', align_corners=False)
+        return dinv.physics.TimeMixin.unflatten(transformed_flat, batch_size=B)
+class VideoDiffeo(dinv.transform.CPABDiffeomorphism):
+    """A Diffeomorphism transform that correctly handles 5D video tensors."""
+    def _transform(self, x: torch.Tensor, **params) -> torch.Tensor:
+        if not self._check_x_5D(x):
+            return super()._transform(x, **params)
+        B = x.shape[0]
+        x_flat = dinv.physics.TimeMixin.flatten(x)
+        flat_params = self.get_params(x_flat)
+        transformed_flat = super()._transform(x_flat, **flat_params)
+        return dinv.physics.TimeMixin.unflatten(transformed_flat, batch_size=B)
+class SubsampleTime(Transform):
+    r"""
+    Augments a video by taking a random contiguous temporal sub-sequence of a
+    RANDOM length, and then interpolating it back to the original length.
+    :param int n_trans: Number of transformed versions to generate per input image.
+    :param tuple[float, float] subsample_ratio_range: The min and max ratio of the
+                                                     total time frames to keep (e.g., (0.7, 0.95)).
+    :param torch.Generator rng: Random number generator.
+    """
+    def __init__(self, *args, subsample_ratio_range: tuple[float, float] = (0.7, 0.95), **kwargs):
+        super().__init__(*args, **kwargs)
+        self.flatten_video_input = False  # Operate on 5D tensor
+        min_r, max_r = subsample_ratio_range
+        assert 0.0 < min_r <= max_r <= 1.0, "subsample_ratio_range must be a valid range (min, max) between 0 and 1."
+        self.subsample_ratio_range = subsample_ratio_range
+    def _get_params(self, x: torch.Tensor) -> dict:
+        """
+        Generates a random ratio and a random start index for each transform.
+        """
+        total_time_frames = x.shape[2]  # Shape is (B, C, T, H, W)
+        min_r, max_r = self.subsample_ratio_range
+        ratios = min_r + (max_r - min_r) * torch.rand(self.n_trans, generator=self.rng)
+        start_indices = []
+        for ratio in ratios:
+            subsample_length = int(total_time_frames * ratio.item())
+            if subsample_length >= total_time_frames:
+                start_indices.append(0)
+                continue
+            max_start_index = total_time_frames - subsample_length
+            start_idx = torch.randint(
+                low=0, high=max_start_index + 1, size=(1,), generator=self.rng
+            ).item()
+            start_indices.append(start_idx)
+        return {"ratios": ratios, "start_indices": torch.tensor(start_indices, dtype=torch.long)}
+    def _transform(
+        self, x: torch.Tensor, ratios: torch.Tensor, start_indices: torch.Tensor, **kwargs
+    ) -> torch.Tensor:
+        """Performs the temporal subsampling and resizing for each requested transform."""
+        B, C, total_time_frames, H, W = x.shape
+        assert B == 1, "This transform implementation assumes a batch size of 1 for simplicity."
+        output_list = []
+        for i in range(self.n_trans):
+            ratio = ratios[i]
+            start_idx = start_indices[i]
+            subsample_length = int(total_time_frames * ratio.item())
+            if subsample_length >= total_time_frames:
+                output_list.append(x.clone()) # Use clone to avoid issues
+                continue
+            sub_sequence = x[:, :, start_idx : start_idx + subsample_length, :, :]
+            flat_for_interp = rearrange(sub_sequence, "b c t h w -> b (c h w) t")
+            resized_flat = torch.nn.functional.interpolate(
+                flat_for_interp,
+                size=total_time_frames,
+                mode="linear",
+                align_corners=False,
+            )
+            resized_sequence = rearrange(
+                resized_flat, "b (c h w) t -> b c t h w", c=C, h=H, w=W
+            )
+            output_list.append(resized_sequence)
+        return torch.cat(output_list, dim=0)
+class PeakAwareBiPhasicWarp(Transform):
+    r"""
+    An enhancement-peak-aware temporal augmentation that warps BOTH the wash-in
+    and wash-out phases independently with different random ratios.
+    It finds the time of peak enhancement, splits the video, and then
+    time-warps (compresses/stretches) both phases before reassembling them.
+    :param tuple[float, float] warp_ratio_range: The min/max ratio for
+                                                 compressing a phase. e.g., (0.6, 0.95).
+    """
+    def __init__(self, *args, warp_ratio_range: tuple[float, float] = (0.6, 0.95), **kwargs):
+        super().__init__(*args, **kwargs)
+        self.flatten_video_input = False
+        min_r, max_r = warp_ratio_range
+        assert 0.0 < min_r <= max_r <= 1.0, "warp_ratio_range must be valid."
+        self.warp_ratio_range = warp_ratio_range
+    def _get_params(self, x: torch.Tensor) -> dict:
+        """
+        Generate two independent warp ratios for each requested transform:
+        one for wash-in and one for wash-out.
+        """
+        params_list = []
+        min_r, max_r = self.warp_ratio_range
+        for _ in range(self.n_trans):
+            washin_ratio = min_r + (max_r - min_r) * torch.rand(1, generator=self.rng).item()
+            washout_ratio = min_r + (max_r - min_r) * torch.rand(1, generator=self.rng).item()
+            params_list.append({
+                "washin_ratio": washin_ratio,
+                "washout_ratio": washout_ratio
+            })
+        return {"params_list": params_list}
+    def _transform(self, x: torch.Tensor, params_list: list[dict], **kwargs) -> torch.Tensor:
+        """Applies the independent, bi-phasic warp."""
+        assert x.shape[0] == 1, "This transform assumes a batch size of 1 for the input."
+        mean_signal_curve = torch.mean(x, dim=(0, 1, 3, 4)) # Avg over B, C, H, W
+        peak_idx = torch.argmax(mean_signal_curve)
+        if peak_idx <= 0 or peak_idx >= x.shape[2] - 1:
+            return x.repeat(self.n_trans, 1, 1, 1, 1)
+        output_list = []
+        for params in params_list:
+            wash_in_phase = x[:, :, :peak_idx, :, :]
+            peak_frame = x[:, :, peak_idx:peak_idx+1, :, :]
+            wash_out_phase = x[:, :, peak_idx+1:, :, :]
+            warped_wash_in = self._warp_phase(wash_in_phase, params["washin_ratio"])
+            warped_wash_out = self._warp_phase(wash_out_phase, params["washout_ratio"])
+            new_x = torch.cat([warped_wash_in, peak_frame, warped_wash_out], dim=2)
+            output_list.append(new_x)
+        return torch.cat(output_list, dim=0)
+    def _warp_phase(self, phase_tensor: torch.Tensor, ratio: float) -> torch.Tensor:
+        """Helper function to subsample and interpolate a video phase."""
+        B, C, T_phase, H, W = phase_tensor.shape
+        if T_phase <= 1: # Cannot warp a single frame or empty tensor
+            return phase_tensor
+        subsample_len = max(1, int(T_phase * ratio)) # Ensure at least 1 frame
+        flat_for_interp = rearrange(phase_tensor, "b c t h w -> b (c h w) t")
+        subsampled_flat = F.interpolate(flat_for_interp, size=subsample_len, mode='linear', align_corners=False)
+        resized_flat = F.interpolate(subsampled_flat, size=T_phase, mode='linear', align_corners=False)
+        warped_phase = rearrange(resized_flat, "b (c h w) t -> b c t h w", c=C, h=H, w=W)
+        return warped_phase
+class MonophasicTimeWarp(Transform):
+    r"""
+    A temporal augmentation specifically designed for monophasic enhancement curves
+    (e.g., persistent or plateau types) where there is no wash-out phase.
+    This transform keeps the first (pre-contrast) frame fixed and applies a
+    single, smooth time-warp to the entire subsequent enhancement phase.
+    :param tuple[float, float] warp_ratio_range: The min/max ratio for
+        compressing/stretching the enhancement phase. e.g., (0.7, 1.3).
+        Values < 1 compress time, values > 1 stretch time.
+    """
+    def __init__(self, *args, warp_ratio_range: tuple[float, float] = (0.7, 1.3), **kwargs):
+        super().__init__(*args, **kwargs)
+        self.flatten_video_input = False
+        min_r, max_r = warp_ratio_range
+        assert 0.0 < min_r <= max_r, "warp_ratio_range must be a valid positive range."
+        self.warp_ratio_range = warp_ratio_range
+    def _get_params(self, x: torch.Tensor) -> dict:
+        """
+        Generates a single random warp ratio for the entire enhancement phase.
+        """
+        min_r, max_r = self.warp_ratio_range
+        ratios = [min_r + (max_r - min_r) * torch.rand(1, generator=self.rng).item() for _ in range(self.n_trans)]
+        return {"ratios": ratios}
+    def _transform(self, x: torch.Tensor, ratios: list[float], **kwargs) -> torch.Tensor:
+        """Applies the monophasic time warp."""
+        assert x.shape[0] == 1, "This transform assumes a batch size of 1 for the input."
+        if x.shape[2] <= 1: # Cannot warp if there's only one frame
+             return x.repeat(self.n_trans, 1, 1, 1, 1)
+        output_list = []
+        for ratio in ratios:
+            pre_contrast_frame = x[:, :, :1, :, :]
+            enhancement_phase = x[:, :, 1:, :, :]
+            warped_enhancement_phase = self._warp_phase(enhancement_phase, ratio)
+            new_x = torch.cat([pre_contrast_frame, warped_enhancement_phase], dim=2)
+            output_list.append(new_x)
+        return torch.cat(output_list, dim=0)
+    def _warp_phase(self, phase_tensor: torch.Tensor, ratio: float) -> torch.Tensor:
+        """Helper function to interpolate a video phase to a new length."""
+        B, C, T_phase, H, W = phase_tensor.shape
+        if T_phase == 0:
+            return phase_tensor
+        new_length = int(round(T_phase * ratio))
+        if new_length == 0: new_length = 1 # Ensure at least one frame
+        flat_for_interp = rearrange(phase_tensor, "b c t h w -> b (c h w) t")
+        resized_flat = F.interpolate(flat_for_interp, size=new_length, mode='linear', align_corners=False)
+        if new_length != T_phase:
+            resized_flat = F.interpolate(resized_flat, size=T_phase, mode='linear', align_corners=False)
+        warped_phase = rearrange(resized_flat, "b (c h w) t -> b c t h w", c=C, h=H, w=W)
+        return warped_phase
+class TemporalNoise(Transform):
+    """ 
+    Adds low-frequency random noise to the temporal signal of a video.
+    This simulates smooth, slowly varying noise sources over time.
+    """
+    def __init__(self, *args, noise_strength: float = 0.5, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.flatten_video_input = False
+        self.noise_strength = noise_strength
+    def _get_params(self, x: torch.Tensor) -> dict:
+        """
+        Generates a single low-frequency noise vector for the transformation.
+        """
+        B, C, T, H, W = x.shape
+        low_res_T = max(1, T // 4) 
+        noise_low_res = torch.randn(B, 1, low_res_T, device=x.device)
+        noise_high_res = F.interpolate(noise_low_res, size=T, mode='linear', align_corners=False)
+        noise_norm = (noise_high_res - noise_high_res.mean(dim=-1, keepdim=True)) / (noise_high_res.std(dim=-1, keepdim=True) + 1e-8)
+        final_noise = noise_norm * self.noise_strength
+        return {'noise': final_noise}
+    def _transform(self, x: torch.Tensor, noise: torch.Tensor, **kwargs) -> torch.Tensor:
+        """
+        Applies the pre-generated noise to the image tensor.
+        """
+        B, C, T, H, W = x.shape
+        x_noisy = x + noise.view(B, 1, T, 1, 1)
+        return x_noisy
+
+=== crnn.py ===
+import torch
+import torch.nn as nn
+from einops import rearrange
+import wandb
+def log(key, value, step):
+    print(f"Step {step} - {key}: {value:.4f}")
+def _normalize_batch(x):
+    b, h, w, t, c = x.shape
+    x_flat = x.reshape(b, -1)
+    max_vals, _ = torch.max(torch.abs(x_flat), dim=1, keepdim=True)
+    max_vals = max_vals + 1e-8
+    max_vals_reshaped = max_vals.reshape(b, 1, 1, 1, 1)
+    return x / max_vals_reshaped
+def _renormalize_by_input(x_after_dc, x_before_dc):
+    norm_before = torch.linalg.vector_norm(x_before_dc.flatten(1), dim=1, keepdim=True)
+    norm_after = torch.linalg.vector_norm(x_after_dc.flatten(1), dim=1, keepdim=True)
+    scaling_factor = norm_before / (norm_after + 1e-8)
+    return x_after_dc * scaling_factor.view(-1, 1, 1, 1, 1)
+def _normalize_batch(x):
+    """
+    Normalizes each item in the batch to the range [-1, 1] based on its absolute maximum value.
+    This preserves the internal structure and relative enhancement curve shape.
+    Shape of x: (B, H, W, T, C)
+    """
+    b, h, w, t, c = x.shape
+    x_flat = x.reshape(b, -1)
+    max_vals, _ = torch.max(torch.abs(x_flat), dim=1, keepdim=True)
+    max_vals = max_vals + 1e-8
+    max_vals_reshaped = max_vals.reshape(b, 1, 1, 1, 1)
+    return x / max_vals_reshaped
+def normalize_batch_percentile(x, percentile=99.5):
+    """
+    Normalizes each item in the batch based on a high percentile of its absolute values.
+    This method is more robust to extreme outliers (e.g., from NUFFT artifacts)
+    than normalizing by the absolute maximum. It ensures that the scaling factor
+    is determined by the bulk of the image signal, not a single rogue pixel.
+    Shape of x: (B, H, W, T, C) or any shape starting with Batch.
+    """
+    if not 0 < percentile <= 100:
+        raise ValueError("Percentile must be between 0 and 100.")
+    b = x.shape[0]
+    x_flat = x.reshape(b, -1)
+    q = percentile / 100.0
+    percentile_vals = torch.quantile(torch.abs(x_flat), q, dim=1, keepdim=True)
+    norm_factors = percentile_vals + 1e-8
+    dims_to_unsqueeze = [1] * (x.dim() - 1)
+    norm_factors_reshaped = norm_factors.view(b, *dims_to_unsqueeze)
+    return x / norm_factors_reshaped
+def normalize_batch_standardize(x, epsilon=1e-8):
+    """
+    Standardizes each item in the batch to have a mean of 0 and a standard deviation of 1.
+    This is a very common and robust normalization technique in deep learning. It centers
+    the data and scales it, which can significantly improve network stability and
+    convergence, especially when dealing with inputs that have varying offsets or scales.
+    Shape of x: (B, H, W, T, C) or any shape starting with the Batch dimension.
+    """
+    b = x.shape[0]
+    x_flat = x.reshape(b, -1)
+    mean = torch.mean(x_flat, dim=1, keepdim=True)
+    std = torch.std(x_flat, dim=1, keepdim=True)
+    safe_std = std + epsilon
+    dims_to_unsqueeze = [1] * (x.dim() - 1)
+    mean_reshaped = mean.view(b, *dims_to_unsqueeze)
+    std_reshaped = safe_std.view(b, *dims_to_unsqueeze)
+    return (x - mean_reshaped) / std_reshaped
+class ConvRNNCell(nn.Module):
+    """
+    Convolutional RNN cell.
+    - Removed spectral_norm wrapper from convolutional layers. This reduces regularization,
+      allowing the network to potentially learn finer details of the contrast enhancement,
+      at the cost of relying more on other stabilization techniques.
+    """
+    def __init__(self, in_chans, out_chans, bias=True):
+        super(ConvRNNCell, self).__init__()
+        self.in_chans = in_chans
+        self.out_chans = out_chans
+        self.i2h = nn.Conv2d(in_chans, out_chans, kernel_size=3, padding=1, bias=bias)
+        self.h2h = nn.Conv2d(out_chans, out_chans, kernel_size=3, padding=1, bias=bias)
+        self.relu = nn.ReLU(inplace=True)
+    def forward(self, input, hidden_iteration, hidden):
+        in_to_hid = self.i2h(input)
+        hid_to_hid = self.h2h(hidden)
+        ih_to_ih = self.i2h(hidden_iteration)
+        hidden = self.relu(in_to_hid + hid_to_hid + ih_to_ih)
+        return hidden
+class BCRNN(nn.Module):
+    """
+    Bidirectional Convolutional RNN.
+    Note: The original DDEI implementation calls this BCRNN but it is a standard
+    unidirectional CRNN operating over the time dimension. We keep the naming for consistency.
+    """
+    def __init__(self, in_chans, chans, n_layers, bias=True, device="cuda"):
+        super(BCRNN, self).__init__()
+        self.in_chans = in_chans
+        self.chans = chans
+        self.n_layers = n_layers
+        self.device = device
+        self.CRNN_model = ConvRNNCell(in_chans, chans, bias=bias)
+    def forward(self, input, hidden_iteration):
+        B, H, W, T, C = input.shape
+        input = input.permute(3, 0, 4, 1, 2).contiguous()
+        hidden_iteration = hidden_iteration.permute(3, 0, 4, 1, 2).contiguous()
+        hidden = torch.zeros(B, self.chans, H, W, device=self.device)
+        hidden_list = []
+        for i in range(T):
+            hidden = self.CRNN_model(input[i], hidden_iteration[i], hidden)
+            hidden_list.append(hidden)
+        out = torch.stack(hidden_list, dim=0).permute(1, 3, 4, 0, 2).contiguous()
+        return out
+class CRNN(nn.Module):
+    """
+    Main Unrolled CRNN architecture.
+    1.  **Inter-Cascade Normalization**: The output of the data consistency (DC) layer from each
+        cascade is normalized before being fed into the next cascade. This is the primary fix
+        for the exploding activation problem. It breaks the amplification feedback loop.
+    2.  **Residual Block Fix**: The code block for processing the BCRNN output and adding the
+        residual connection was reshaped incorrectly, which was the likely cause of the
+        `size mismatch` error. This has been completely rewritten to be correct.
+    3.  **Cleaned up Logic**: The variable naming and flow within the forward pass are clarified
+        to distinguish between different states of the image estimate (e.g., `x_pre_dc`, `x_post_dc`).
+    """
+    def __init__(self, num_cascades, chans, in_chans=2, datalayer=None, **kwargs):
+        super(CRNN, self).__init__()
+        self.num_cascades = num_cascades
+        self.chans = chans
+        self.in_chans = in_chans
+        self.datalayer = datalayer
+        self.bcrnn = BCRNN(in_chans, chans, n_layers=1, **kwargs)
+        self.res_conv = nn.Conv2d(chans, in_chans, kernel_size=1, stride=1, padding=0)
+    def forward(self, x_init_permuted, y, mask):  # 'mask' is the unused dummy mask
+        B, H, W, T, C = x_init_permuted.shape
+        x_cascade_in = x_init_permuted
+        for i in range(self.num_cascades):
+            bcrnn_out = self.bcrnn(x_cascade_in, x_init_permuted)
+            bcrnn_out_reshaped = (
+                bcrnn_out.permute(0, 3, 4, 1, 2)
+                .contiguous()
+                .reshape(B * T, self.chans, H, W)
+            )
+            res_out_reshaped = self.res_conv(bcrnn_out_reshaped)
+            res_out = (
+                res_out_reshaped.reshape(B, T, self.in_chans, H, W)
+                .permute(0, 3, 4, 1, 2)
+                .contiguous()
+            )
+            x_pre_dc = x_cascade_in + res_out
+            x_post_dc = self.datalayer(x_pre_dc, y, self.datalayer.physics.mask)
+            global_step = 0
+            if i < self.num_cascades - 1:
+                mean = torch.mean(x_post_dc, dim=(-3, -2, -1), keepdim=True)
+                std = torch.std(x_post_dc, dim=(-3, -2, -1), keepdim=True)
+                epsilon = 1e-8
+                x_cascade_in = (x_post_dc - mean) / (std + epsilon)
+            else:
+                x_cascade_in = x_post_dc
+        return x_cascade_in
+class ArtifactRemovalCRNN(nn.Module):
+    def __init__(self, backbone_net, **kwargs):
+        super(ArtifactRemovalCRNN, self).__init__()
+        self.backbone_net = backbone_net
+    def forward(self, y, physics, **kwargs):
+        x_init = physics.A_adjoint(y)
+        norm_of_zf_recon = torch.linalg.vector_norm(x_init)
+        x_init_permuted = rearrange(x_init, "b c t h w -> b h w t c")
+        x_init_norm_permuted = normalize_batch_standardize(x_init_permuted)
+        mask = physics.mask #torch.ones_like(y)
+        x_hat_permuted_raw = self.backbone_net(x_init_norm_permuted, y, mask)
+        x_hat_raw = rearrange(x_hat_permuted_raw, "b h w t c -> b c t h w")
+        norm_of_raw_output = torch.linalg.vector_norm(x_hat_raw)
+        scaling_factor = norm_of_zf_recon / (norm_of_raw_output + 1e-8)
+        x_hat_final = x_hat_raw * scaling_factor
+        return x_hat_final
 
 === ei.py ===
 from typing import Union

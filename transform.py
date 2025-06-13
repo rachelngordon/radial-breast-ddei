@@ -516,3 +516,40 @@ class TemporalNoise(Transform):
         x_noisy = x + noise.view(B, 1, T, 1, 1)
         
         return x_noisy
+    
+
+class TimeReverse(Transform):
+    r"""
+    Reverses the temporal order of frames in a video tensor.
+
+    This transform flips the video along the time axis, effectively playing it
+    backwards. This is a deterministic transformation.
+
+    :param int n_trans: Number of transformed versions to generate per input image.
+                        Since this is deterministic, it will just repeat the same
+                        output if n_trans > 1.
+    """
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        # We need the 5D video tensor (B, C, T, H, W) to access the time dimension.
+        self.flatten_video_input = False
+
+    def _get_params(self, x: torch.Tensor) -> dict:
+        """
+        No random parameters are needed for time reversal as it's a
+        deterministic operation.
+        """
+        return {}
+
+    def _transform(self, x: torch.Tensor, **kwargs) -> torch.Tensor:
+        """
+        Applies the time reversal transformation using torch.flip().
+        """
+        # Ensure we are working with a 5D tensor
+        if len(x.shape) != 5:
+            raise ValueError(f"TimeReverse expects a 5D tensor (B, C, T, H, W), but got shape {x.shape}.")
+
+        # The core operation: flip along the time dimension (dim=2)
+        # B, C, T, H, W
+        # 0, 1, 2, 3, 4
+        return torch.flip(x, dims=[2])

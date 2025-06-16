@@ -416,7 +416,7 @@ class MonophasicTimeWarp(Transform):
         """
         min_r, max_r = self.warp_ratio_range
         # Generate one random ratio from the specified range for each transform requested.
-        ratios = [min_r + (max_r - min_r) * torch.rand(1, generator=self.rng).item() for _ in range(self.n_trans)]
+        ratios = [min_r + (max_r - min_r) * torch.rand(1, generator=self.rng) for _ in range(self.n_trans)]
         
         return {"ratios": ratios}
 
@@ -446,6 +446,8 @@ class MonophasicTimeWarp(Transform):
         B, C, T_phase, H, W = phase_tensor.shape
         if T_phase == 0:
             return phase_tensor
+        
+        ratio = ratio.item()
 
         # New length is the original length scaled by the ratio.
         # This allows for both compression (ratio < 1) and stretching (ratio > 1).
@@ -465,7 +467,6 @@ class MonophasicTimeWarp(Transform):
         # Reshape back to video format
         warped_phase = rearrange(resized_flat, "b (c h w) t -> b c t h w", c=C, h=H, w=W)
         return warped_phase
-    
 
 
 

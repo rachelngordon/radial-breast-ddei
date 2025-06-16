@@ -26,7 +26,7 @@ dataloader:
 # Model settings
 model:
   name: "DDEI"
-  cascades: 4
+  cascades: 2
   channels: 64
   optimizer:
     name: "Adam"
@@ -42,7 +42,7 @@ model:
     ei_loss:
       temporal_transform: "noise"
       weight: 0.0003
-      warmup: 5
+      warmup: 3
       duration: 5
       subsample_ratio_min: 0.7
       subsample_ratio_max: 0.95
@@ -52,7 +52,7 @@ model:
 
 # Training settings
 training:
-  epochs: 15
+  epochs: 10
   save_interval: 1
   plot_interval: 20
   device: "cuda"  # or "cpu"

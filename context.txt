@@ -17,7 +17,7 @@ from torch.utils.data import DataLoader
 from torchvision.transforms import InterpolationMode
 from tqdm import tqdm
 import numpy as np
-from transform import VideoRotate, VideoDiffeo, SubsampleTime, MonophasicTimeWarp, TemporalNoise
+from transform import VideoRotate, VideoDiffeo, SubsampleTime, MonophasicTimeWarp, TemporalNoise, TimeReverse
 from ei import EILoss
 def get_cosine_ei_weight(
     current_epoch,
@@ -215,9 +215,6 @@ optimizer = torch.optim.Adam(
     eps=config["model"]["optimizer"]["eps"],
     weight_decay=config["model"]["optimizer"]["weight_decay"],
 )
-scheduler = CosineAnnealingLR(
-    optimizer, T_max=epochs, eta_min=1e-7
-)
 mc_loss_fn = MCLoss()
 if use_ei_loss:
     rotate = VideoRotate(n_trans=1, interpolation_mode="bilinear")
@@ -225,7 +222,17 @@ if use_ei_loss:
     subsample = SubsampleTime(n_trans=1, subsample_ratio_range=(config['model']['losses']['ei_loss']['subsample_ratio_min'], config['model']['losses']['ei_loss']['subsample_ratio_max']))
     monophasic_warp = MonophasicTimeWarp(n_trans=1, warp_ratio_range=(config['model']['losses']['ei_loss']['warp_ratio_min'], config['model']['losses']['ei_loss']['warp_ratio_max']))
     temp_noise = TemporalNoise(n_trans=1)
-    ei_loss_fn = EILoss(subsample | (diffeo | rotate))
+    time_reverse = TimeReverse(n_trans=1)
+    if config['model']['losses']['ei_loss']['temporal_transform'] == "subsample":
+        ei_loss_fn = EILoss(subsample | (diffeo | rotate))
+    elif config['model']['losses']['ei_loss']['temporal_transform'] == "monophasic":
+        ei_loss_fn = EILoss(monophasic_warp | (diffeo | rotate))
+    elif config['model']['losses']['ei_loss']['temporal_transform'] == "noise":
+        ei_loss_fn = EILoss(temp_noise | (diffeo | rotate))
+    elif config['model']['losses']['ei_loss']['temporal_transform'] == "reverse":
+        ei_loss_fn = EILoss(time_reverse | (diffeo | rotate))
+    else:
+        raise(ValueError, "Unsupported Temporal Transform.")
 print(
     "--- Generating and saving a Zero-Filled (ZF) reconstruction sample before training ---"
 )
@@ -405,7 +412,6 @@ for epoch in range(start_epoch, epochs + 1):
             val_ei_losses.append(epoch_val_ei_loss)
         else:
             val_ei_losses.append(0.0)
-        scheduler.step()
         if epoch % save_interval == 0:
             plt.figure()
             plt.plot(train_mc_losses, label="Training MC Loss")
@@ -448,283 +454,6 @@ for epoch in range(start_epoch, epochs + 1):
 model_save_path = os.path.join(output_dir, f'{exp_name}_model_checkpoint.pth')
 torch.save(model.state_dict(), model_save_path)
 print(f'Model saved to {model_save_path}')
-
-=== dataloader.py ===
-import glob
-import os
-import h5py
-import numpy as np
-import torch
-from torch.utils.data import DataLoader, Dataset
-import nibabel as nib
-class SliceDataset(Dataset):
-    """
-    A Dataset that:
-      - Looks for all .h5/.hdf5 files under `root_dir`.
-      - Each file is assumed to contain a dataset at `dataset_key`, with shape (... Z),
-        where Z is the number of slices/partitions.
-      - Splits each volume into Z separate examples (one per slice).
-      - Returns each slice as a torch.Tensor.
-    """
-    def __init__(
-        self,
-        root_dir,
-        patient_ids,
-        dataset_key="kspace",
-        file_pattern="*.h5",
-        slice_idx=41,
-        N_time = 8
-    ):
-        """
-        Args:
-            root_dir (str): Path to the folder containing all HDF5 k-space files.
-            dataset_key (str): The key/path inside each .h5 file to the k-space dataset (e.g. "kspace").
-            file_pattern (str): Glob pattern to match your HDF5 files (default "*.h5").
-        """
-        super().__init__()
-        self.root_dir = root_dir
-        self.dataset_key = dataset_key
-        self.slice_idx = slice_idx
-        self.N_time = N_time
-        all_files = sorted(glob.glob(os.path.join(root_dir, file_pattern)))
-        if len(all_files) == 0:
-            raise RuntimeError(
-                f"No files found in {root_dir} matching pattern {file_pattern}"
-            )
-        filtered = []
-        for fp in all_files:
-            fname = os.path.basename(fp)
-            if any(pid in fname for pid in patient_ids):
-                filtered.append(fp)
-        self.file_list = filtered
-        if len(self.file_list) == 0:
-            raise RuntimeError("No files matched the provided patient_ids filter.")
-    def load_dynamic_img(self, patient_id):
-        H = W = 320
-        data = np.empty((2, self.N_time, H, W), dtype=np.float32)
-        for t in range(self.N_time):
-            img_path = f'/ess/scratch/scratch1/rachelgordon/dce-{self.N_time}tf/{patient_id}/slice_{self.slice_idx:03d}_frame_{t:03d}.nii'
-            img = nib.load(img_path)
-            img_data = img.get_fdata()
-            if img_data.shape != (2, H, W):
-                raise ValueError(f"{img_path} has shape {img_data.shape}; "
-                                f"expected (2, {H}, {W})")
-            data[:, t] = img_data.astype(np.float32)
-        return torch.from_numpy(data) 
-    def __len__(self):
-        return len(self.file_list)
-    def __getitem__(self, idx):
-        """
-        Returns a single slice of k-space as a torch.Tensor.
-        The output shape will be the standard (C=2, T, S, I) where C is [real, imag].
-        """
-        file_path = self.file_list[idx]
-        patient_id = file_path.split('/')[-1].strip('.h5')
-        grasp_img = self.load_dynamic_img(patient_id)
-        with h5py.File(file_path, "r") as f:
-            ds = torch.tensor(f[self.dataset_key][:])
-            kspace_slice = ds[self.slice_idx]
-        kspace_single_coil = kspace_slice[:, 0, :, :]  # Shape: (T, S, I)
-        real_part = kspace_single_coil.real
-        imag_part = kspace_single_coil.imag
-        kspace_final = torch.stack([real_part, imag_part], dim=0).float()
-        return kspace_final, grasp_img
-if __name__ == "__main__":
-    root_dir = "/ess/scratch/scratch1/rachelgordon/dce-12tf/binned_kspace"
-    dataset_key = "ktspace"  # change if your HDF5 group/dataset is named differently
-    def to_complex(x_np: "np.ndarray") -> "np.ndarray":
-        """
-        If x_np.shape = (C, H, W, 2) or similar where the last dim is [real, imag],
-        convert to complex64 with shape (C, H, W).
-        Adjust slicing logic if your real/imag channels are elsewhere.
-        """
-        real = x_np[..., 0].astype("float32")
-        imag = x_np[..., 1].astype("float32")
-        return (real + 1j * imag).astype("complex64")
-    dataset = SliceDataset(
-        root_dir=root_dir, dataset_key=dataset_key, file_pattern="*.h5"
-    )
-    loader = DataLoader(
-        dataset,
-        batch_size=1,
-        shuffle=True,
-        num_workers=4,
-        pin_memory=True,
-    )
-    for batch_idx, kspace_batch in enumerate(loader):
-        print(
-            f"Batch {batch_idx}: k-space batch shape = {kspace_batch.shape}, dtype = {kspace_batch.dtype}"
-        )
-        break
-
-=== radial.py ===
-import deepinv as dinv
-import numpy as np
-import torch
-import torch.nn as nn
-from deepinv.physics.time import TimeMixin
-from einops import rearrange
-from torchkbnufft import KbNufft, KbNufftAdjoint
-def to_torch_complex(x: torch.Tensor):
-    """(B, 2, ...) real -> (B, ...) complex"""
-    assert x.shape[1] == 2, (
-        f"Input tensor must have 2 channels (real, imag), but got shape {x.shape}"
-    )
-    return torch.view_as_complex(rearrange(x, "b c ... -> b ... c").contiguous())
-def from_torch_complex(x: torch.Tensor):
-    """(B, ...) complex -> (B, 2, ...) real"""
-    return rearrange(torch.view_as_real(x), "b ... c -> b c ...").contiguous()
-class RadialPhysics(dinv.physics.Physics):
-    def __init__(self, im_size, N_spokes, N_samples, **kwargs):
-        super().__init__(**kwargs)
-        self.im_size = im_size
-        self.N_spokes = N_spokes
-        self.N_samples = N_samples
-        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-        grid_size = [int(s * 2.0) for s in im_size]
-        self.NUFFT = KbNufft(im_size=im_size, grid_size=grid_size).to(self.device)
-        self.AdjNUFFT = KbNufftAdjoint(im_size=im_size, grid_size=grid_size).to(
-            self.device
-        )
-        self.traj, self.sqrt_dcf = self.get_traj_and_dcf()
-        self.traj = self.traj.to(self.device)
-        self.sqrt_dcf = self.sqrt_dcf.to(self.device)
-    def get_traj_and_dcf(self, angle_offset_rad=0.0):
-        base_res = self.im_size[0]
-        gind = 1
-        N_samples = base_res * 2
-        if N_samples != self.N_samples:
-            print(
-                f"Warning: Vendor logic implies N_samples should be {N_samples}, but class has {self.N_samples}. Using class value."
-            )
-            N_samples = self.N_samples  # Trust the class value passed during init
-        base_lin = np.arange(N_samples).reshape(1, -1) - (N_samples // 2)
-        tau = 0.5 * (1 + 5**0.5)
-        base_rad = np.pi / (gind + tau - 1)
-        base_rad = np.pi / (gind + tau - 1)
-        spoke_indices = np.arange(self.N_spokes)
-        base_rot = (spoke_indices * base_rad + angle_offset_rad).reshape(-1, 1)
-        traj_flat = np.zeros((self.N_spokes, N_samples, 2))
-        traj_flat[..., 0] = np.cos(base_rot) @ base_lin
-        traj_flat[..., 1] = np.sin(base_rot) @ base_lin
-        max_radius = N_samples / 2.0
-        traj_flat = (traj_flat / max_radius) * np.pi
-        traj = torch.from_numpy(traj_flat).float()
-        traj_nufft_ready = rearrange(traj, "s i xy -> 1 xy (s i)")
-        dcf_vals = torch.sqrt(
-            traj_nufft_ready[0, 0, :] ** 2 + traj_nufft_ready[0, 1, :] ** 2
-        )
-        sqrt_dcf_vals = torch.sqrt(dcf_vals)
-        sqrt_dcf = rearrange(sqrt_dcf_vals, "(s i) -> 1 1 (s i)", s=self.N_spokes)
-        return traj_nufft_ready, sqrt_dcf
-    def A(self, x: torch.Tensor, **kwargs) -> torch.Tensor:
-        x_complex = to_torch_complex(x).unsqueeze(1)
-        k_complex_nufft = self.NUFFT(x_complex, self.traj)
-        y_complex_weighted = k_complex_nufft * self.sqrt_dcf
-        y = from_torch_complex(y_complex_weighted.squeeze(1))
-        return rearrange(y, "b c (s i) -> b c s i", s=self.N_spokes)
-    def A_adjoint(self, y: torch.Tensor, **kwargs) -> torch.Tensor:
-        y_flat = rearrange(y, "b c s i -> b c (s i)")
-        y_complex = to_torch_complex(y_flat).unsqueeze(1)
-        y_dcf_complex = y_complex * self.sqrt_dcf
-        if torch.isnan(y_dcf_complex).any():
-            print("!!! ERROR: NaN detected in y_dcf_complex in A_adjoint !!!")
-        x_complex = self.AdjNUFFT(y_dcf_complex, self.traj).squeeze(1)
-        return from_torch_complex(x_complex)
-class DynamicRadialPhysics(RadialPhysics, TimeMixin):
-    def __init__(self, im_size, N_spokes, N_samples, N_time, N_coils=1, **kwargs):
-        TimeMixin.__init__(self)
-        dinv.physics.Physics.__init__(self, **kwargs)
-        self.im_size = im_size[:2]  # Static image size
-        self.N_spokes = N_spokes  # Spokes PER FRAME
-        self.N_samples = N_samples
-        self.N_time = N_time
-        self.N_coils = N_coils
-        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-        grid_size = [int(s * 2.0) for s in self.im_size]
-        self.NUFFT = KbNufft(im_size=self.im_size, grid_size=grid_size).to(self.device)
-        self.AdjNUFFT = KbNufftAdjoint(im_size=self.im_size, grid_size=grid_size).to(
-            self.device
-        )
-        total_spokes_in_scan = self.N_spokes * self.N_time
-        temp_physics = RadialPhysics(
-            self.im_size, N_spokes=total_spokes_in_scan, N_samples=self.N_samples
-        )
-        full_traj, full_sqrt_dcf = temp_physics.get_traj_and_dcf()
-        self.traj_per_frame = rearrange(
-            full_traj, "b c (t s i) -> t b c (s i)", t=self.N_time, s=self.N_spokes
-        )
-        self.sqrt_dcf_per_frame = rearrange(
-            full_sqrt_dcf, "b c (t s i) -> t b c (s i)", t=self.N_time, s=self.N_spokes
-        )
-        self.traj_per_frame = self.traj_per_frame.to(self.device)
-        self.sqrt_dcf_per_frame = self.sqrt_dcf_per_frame.to(self.device)
-        self.mask = torch.ones(1, 2, self.N_time, self.N_spokes, self.N_samples).to(
-            self.device
-        )
-    def A(self, x: torch.Tensor, **kwargs) -> torch.Tensor:
-        B, C, T, H, W = x.shape
-        output_kspace_frames = []
-        for t in range(T):
-            x_frame = x[:, :, t, :, :].unsqueeze(2)  # -> (B, C, 1, H, W)
-            x_flat = self.flatten(x_frame)  # -> (B, C, H, W)
-            traj_t = self.traj_per_frame[t]
-            sqrt_dcf_t = self.sqrt_dcf_per_frame[t]
-            x_complex = to_torch_complex(x_flat).unsqueeze(1)
-            k_complex_nufft = self.NUFFT(x_complex, traj_t)
-            y_complex_weighted = k_complex_nufft * sqrt_dcf_t
-            y_frame = from_torch_complex(y_complex_weighted.squeeze(1))
-            y_frame_reshaped = rearrange(
-                y_frame, "b c (s i) -> b c s i", s=self.N_spokes
-            )
-            output_kspace_frames.append(y_frame_reshaped)
-        y = torch.stack(output_kspace_frames, dim=2)  # Stack along the time dimension
-        return y * self.mask
-    def A_adjoint(self, y: torch.Tensor, **kwargs) -> torch.Tensor:
-        B, C, T, S, I = y.shape
-        output_image_frames = []
-        y_masked = y * self.mask
-        for t in range(T):
-            y_frame = y_masked[:, :, t, :, :]  # -> (B, C, S, I)
-            traj_t = self.traj_per_frame[t]
-            sqrt_dcf_t = self.sqrt_dcf_per_frame[t]
-            y_flat = rearrange(y_frame, "b c s i -> b c (s i)")
-            y_complex = to_torch_complex(y_flat).unsqueeze(1)
-            y_dcf_complex = y_complex * sqrt_dcf_t
-            x_complex_frame = self.AdjNUFFT(y_dcf_complex, traj_t).squeeze(1)
-            x_frame = from_torch_complex(x_complex_frame)  # -> (B, C, H, W)
-            output_image_frames.append(x_frame)
-        x = torch.stack(output_image_frames, dim=2)  # -> (B, C, T, H, W)
-        return x
-class RadialDCLayer(nn.Module):
-    """
-    Final Data Consistency layer.
-    It takes the network's current image estimate and the original measurements,
-    and returns a new image estimate that is a weighted average in k-space.
-    """
-    def __init__(
-        self,
-        physics: nn.Module,  # The DC layer now requires the physics operator
-        lambda_init=np.log(np.exp(1) - 1.0) / 1.0,
-        learnable=True,
-    ):
-        super(RadialDCLayer, self).__init__()
-        self.learnable = learnable
-        self.lambda_ = nn.Parameter(
-            torch.ones(1) * lambda_init, requires_grad=self.learnable
-        )
-        self.physics = physics
-    def forward(self, x_img_permuted, y_kspace_meas, mask_kspace):
-        x_img = rearrange(x_img_permuted, "b h w t c -> b c t h w")
-        y = y_kspace_meas
-        A_x = self.physics.A(x_img)
-        lambda_ = torch.sigmoid(self.lambda_)
-        k_dc = (1 - mask_kspace) * A_x + mask_kspace * (
-            lambda_ * A_x + (1 - lambda_) * y
-        )
-        x_dc_img = self.physics.A_adjoint(k_dc)
-        x_dc_permuted = rearrange(x_dc_img, "b c t h w -> b h w t c")
-        return x_dc_permuted
 
 === transform.py ===
 import deepinv as dinv
@@ -953,7 +682,7 @@ class MonophasicTimeWarp(Transform):
         Generates a single random warp ratio for the entire enhancement phase.
         """
         min_r, max_r = self.warp_ratio_range
-        ratios = [min_r + (max_r - min_r) * torch.rand(1, generator=self.rng).item() for _ in range(self.n_trans)]
+        ratios = [min_r + (max_r - min_r) * torch.rand(1, generator=self.rng) for _ in range(self.n_trans)]
         return {"ratios": ratios}
     def _transform(self, x: torch.Tensor, ratios: list[float], **kwargs) -> torch.Tensor:
         """Applies the monophasic time warp."""
@@ -973,6 +702,7 @@ class MonophasicTimeWarp(Transform):
         B, C, T_phase, H, W = phase_tensor.shape
         if T_phase == 0:
             return phase_tensor
+        ratio = ratio.item()
         new_length = int(round(T_phase * ratio))
         if new_length == 0: new_length = 1 # Ensure at least one frame
         flat_for_interp = rearrange(phase_tensor, "b c t h w -> b (c h w) t")
@@ -1008,6 +738,378 @@ class TemporalNoise(Transform):
         B, C, T, H, W = x.shape
         x_noisy = x + noise.view(B, 1, T, 1, 1)
         return x_noisy
+class TimeReverse(Transform):
+    r"""
+    Reverses the temporal order of frames in a video tensor.
+    This transform flips the video along the time axis, effectively playing it
+    backwards. This is a deterministic transformation.
+    :param int n_trans: Number of transformed versions to generate per input image.
+                        Since this is deterministic, it will just repeat the same
+                        output if n_trans > 1.
+    """
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.flatten_video_input = False
+    def _get_params(self, x: torch.Tensor) -> dict:
+        """
+        No random parameters are needed for time reversal as it's a
+        deterministic operation.
+        """
+        return {}
+    def _transform(self, x: torch.Tensor, **kwargs) -> torch.Tensor:
+        """
+        Applies the time reversal transformation using torch.flip().
+        """
+        if len(x.shape) != 5:
+            raise ValueError(f"TimeReverse expects a 5D tensor (B, C, T, H, W), but got shape {x.shape}.")
+        return torch.flip(x, dims=[2])
+
+=== radial.py ===
+import deepinv as dinv
+import numpy as np
+import torch
+import torch.nn as nn
+from deepinv.physics.time import TimeMixin
+from einops import rearrange
+from torchkbnufft import KbNufft, KbNufftAdjoint
+def to_torch_complex(x: torch.Tensor):
+    """(B, 2, ...) real -> (B, ...) complex"""
+    assert x.shape[1] == 2, (
+        f"Input tensor must have 2 channels (real, imag), but got shape {x.shape}"
+    )
+    return torch.view_as_complex(rearrange(x, "b c ... -> b ... c").contiguous())
+def from_torch_complex(x: torch.Tensor):
+    """(B, ...) complex -> (B, 2, ...) real"""
+    return rearrange(torch.view_as_real(x), "b ... c -> b c ...").contiguous()
+class RadialPhysics(dinv.physics.Physics):
+    def __init__(self, im_size, N_spokes, N_samples, **kwargs):
+        super().__init__(**kwargs)
+        self.im_size = im_size
+        self.N_spokes = N_spokes
+        self.N_samples = N_samples
+        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        grid_size = [int(s * 2.0) for s in im_size]
+        self.NUFFT = KbNufft(im_size=im_size, grid_size=grid_size).to(self.device)
+        self.AdjNUFFT = KbNufftAdjoint(im_size=im_size, grid_size=grid_size).to(
+            self.device
+        )
+        self.traj, self.sqrt_dcf = self.get_traj_and_dcf()
+        self.traj = self.traj.to(self.device)
+        self.sqrt_dcf = self.sqrt_dcf.to(self.device)
+    def get_traj_and_dcf(self, angle_offset_rad=0.0):
+        base_res = self.im_size[0]
+        gind = 1
+        N_samples = base_res * 2
+        if N_samples != self.N_samples:
+            print(
+                f"Warning: Vendor logic implies N_samples should be {N_samples}, but class has {self.N_samples}. Using class value."
+            )
+            N_samples = self.N_samples  # Trust the class value passed during init
+        base_lin = np.arange(N_samples).reshape(1, -1) - (N_samples // 2)
+        tau = 0.5 * (1 + 5**0.5)
+        base_rad = np.pi / (gind + tau - 1)
+        base_rad = np.pi / (gind + tau - 1)
+        spoke_indices = np.arange(self.N_spokes)
+        base_rot = (spoke_indices * base_rad + angle_offset_rad).reshape(-1, 1)
+        traj_flat = np.zeros((self.N_spokes, N_samples, 2))
+        traj_flat[..., 0] = np.cos(base_rot) @ base_lin
+        traj_flat[..., 1] = np.sin(base_rot) @ base_lin
+        max_radius = N_samples / 2.0
+        traj_flat = (traj_flat / max_radius) * np.pi
+        traj = torch.from_numpy(traj_flat).float()
+        traj_nufft_ready = rearrange(traj, "s i xy -> 1 xy (s i)")
+        dcf_vals = torch.sqrt(
+            traj_nufft_ready[0, 0, :] ** 2 + traj_nufft_ready[0, 1, :] ** 2
+        )
+        sqrt_dcf_vals = torch.sqrt(dcf_vals)
+        sqrt_dcf = rearrange(sqrt_dcf_vals, "(s i) -> 1 1 (s i)", s=self.N_spokes)
+        return traj_nufft_ready, sqrt_dcf
+    def A(self, x: torch.Tensor, **kwargs) -> torch.Tensor:
+        x_complex = to_torch_complex(x).unsqueeze(1)
+        k_complex_nufft = self.NUFFT(x_complex, self.traj)
+        y_complex_weighted = k_complex_nufft * self.sqrt_dcf
+        y = from_torch_complex(y_complex_weighted.squeeze(1))
+        return rearrange(y, "b c (s i) -> b c s i", s=self.N_spokes)
+    def A_adjoint(self, y: torch.Tensor, **kwargs) -> torch.Tensor:
+        y_flat = rearrange(y, "b c s i -> b c (s i)")
+        y_complex = to_torch_complex(y_flat).unsqueeze(1)
+        y_dcf_complex = y_complex * self.sqrt_dcf
+        if torch.isnan(y_dcf_complex).any():
+            print("!!! ERROR: NaN detected in y_dcf_complex in A_adjoint !!!")
+        x_complex = self.AdjNUFFT(y_dcf_complex, self.traj).squeeze(1)
+        return from_torch_complex(x_complex)
+class DynamicRadialPhysics(RadialPhysics, TimeMixin):
+    def __init__(self, im_size, N_spokes, N_samples, N_time, N_coils=1, **kwargs):
+        TimeMixin.__init__(self)
+        dinv.physics.Physics.__init__(self, **kwargs)
+        self.im_size = im_size[:2]  # Static image size
+        self.N_spokes = N_spokes  # Spokes PER FRAME
+        self.N_samples = N_samples
+        self.N_time = N_time
+        self.N_coils = N_coils
+        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        grid_size = [int(s * 2.0) for s in self.im_size]
+        self.NUFFT = KbNufft(im_size=self.im_size, grid_size=grid_size).to(self.device)
+        self.AdjNUFFT = KbNufftAdjoint(im_size=self.im_size, grid_size=grid_size).to(
+            self.device
+        )
+        total_spokes_in_scan = self.N_spokes * self.N_time
+        temp_physics = RadialPhysics(
+            self.im_size, N_spokes=total_spokes_in_scan, N_samples=self.N_samples
+        )
+        full_traj, full_sqrt_dcf = temp_physics.get_traj_and_dcf()
+        self.traj_per_frame = rearrange(
+            full_traj, "b c (t s i) -> t b c (s i)", t=self.N_time, s=self.N_spokes
+        )
+        self.sqrt_dcf_per_frame = rearrange(
+            full_sqrt_dcf, "b c (t s i) -> t b c (s i)", t=self.N_time, s=self.N_spokes
+        )
+        self.traj_per_frame = self.traj_per_frame.to(self.device)
+        self.sqrt_dcf_per_frame = self.sqrt_dcf_per_frame.to(self.device)
+        self.mask = torch.ones(1, 2, self.N_time, self.N_spokes, self.N_samples).to(
+            self.device
+        )
+    def A(self, x: torch.Tensor, **kwargs) -> torch.Tensor:
+        B, C, T, H, W = x.shape
+        output_kspace_frames = []
+        for t in range(T):
+            x_frame = x[:, :, t, :, :].unsqueeze(2)  # -> (B, C, 1, H, W)
+            x_flat = self.flatten(x_frame)  # -> (B, C, H, W)
+            traj_t = self.traj_per_frame[t]
+            sqrt_dcf_t = self.sqrt_dcf_per_frame[t]
+            x_complex = to_torch_complex(x_flat).unsqueeze(1)
+            k_complex_nufft = self.NUFFT(x_complex, traj_t)
+            y_complex_weighted = k_complex_nufft * sqrt_dcf_t
+            y_frame = from_torch_complex(y_complex_weighted.squeeze(1))
+            y_frame_reshaped = rearrange(
+                y_frame, "b c (s i) -> b c s i", s=self.N_spokes
+            )
+            output_kspace_frames.append(y_frame_reshaped)
+        y = torch.stack(output_kspace_frames, dim=2)  # Stack along the time dimension
+        return y * self.mask
+    def A_adjoint(self, y: torch.Tensor, **kwargs) -> torch.Tensor:
+        B, C, T, S, I = y.shape
+        output_image_frames = []
+        y_masked = y * self.mask
+        for t in range(T):
+            y_frame = y_masked[:, :, t, :, :]  # -> (B, C, S, I)
+            traj_t = self.traj_per_frame[t]
+            sqrt_dcf_t = self.sqrt_dcf_per_frame[t]
+            y_flat = rearrange(y_frame, "b c s i -> b c (s i)")
+            y_complex = to_torch_complex(y_flat).unsqueeze(1)
+            y_dcf_complex = y_complex * sqrt_dcf_t
+            x_complex_frame = self.AdjNUFFT(y_dcf_complex, traj_t).squeeze(1)
+            x_frame = from_torch_complex(x_complex_frame)  # -> (B, C, H, W)
+            output_image_frames.append(x_frame)
+        x = torch.stack(output_image_frames, dim=2)  # -> (B, C, T, H, W)
+        return x
+class RadialDCLayer(nn.Module):
+    """
+    Final Data Consistency layer.
+    It takes the network's current image estimate and the original measurements,
+    and returns a new image estimate that is a weighted average in k-space.
+    """
+    def __init__(
+        self,
+        physics: nn.Module,  # The DC layer now requires the physics operator
+        lambda_init=np.log(np.exp(1) - 1.0) / 1.0,
+        learnable=True,
+    ):
+        super(RadialDCLayer, self).__init__()
+        self.learnable = learnable
+        self.lambda_ = nn.Parameter(
+            torch.ones(1) * lambda_init, requires_grad=self.learnable
+        )
+        self.physics = physics
+    def forward(self, x_img_permuted, y_kspace_meas, mask_kspace):
+        x_img = rearrange(x_img_permuted, "b h w t c -> b c t h w")
+        y = y_kspace_meas
+        A_x = self.physics.A(x_img)
+        lambda_ = torch.sigmoid(self.lambda_)
+        k_dc = (1 - mask_kspace) * A_x + mask_kspace * (
+            lambda_ * A_x + (1 - lambda_) * y
+        )
+        x_dc_img = self.physics.A_adjoint(k_dc)
+        x_dc_permuted = rearrange(x_dc_img, "b c t h w -> b h w t c")
+        return x_dc_permuted
+
+=== ei.py ===
+from typing import Union
+import torch
+import torch.nn as nn
+from deepinv.loss.loss import Loss
+from deepinv.loss.metric.metric import Metric
+from deepinv.transform.base import Transform
+class EILoss(Loss):
+    r"""
+    Equivariant imaging self-supervised loss.
+    Assumes that the set of signals is invariant to a group of transformations (rotations, translations, etc.)
+    in order to learn from incomplete measurement data alone https://https://arxiv.org/pdf/2103.14756.pdf.
+    The EI loss is defined as
+    .. math::
+        \| T_g \hat{x} - \inverse{\forw{T_g \hat{x}}}\|^2
+    where :math:`\hat{x}=\inverse{y}` is a reconstructed signal and
+    :math:`T_g` is a transformation sampled at random from a group :math:`g\sim\group`.
+    By default, the error is computed using the MSE metric, however any other metric (e.g., :math:`\ell_1`)
+    can be used as well.
+    :param deepinv.transform.Transform transform: Transform to generate the virtually augmented measurement.
+        It can be any torch-differentiable function (e.g., a :class:`torch.nn.Module`)
+        including `torchvision transforms <https://pytorch.org/vision/stable/transforms.html>`_.
+    :param Metric, torch.nn.Module metric: Metric used to compute the error between the reconstructed augmented measurement and the reference
+        image.
+    :param bool apply_noise: if ``True``, the augmented measurement is computed with the full sensing model
+        :math:`\sensor{\noise{\forw{\hat{x}}}}` (i.e., noise and sensor model),
+        otherwise is generated as :math:`\forw{\hat{x}}`.
+    :param float weight: Weight of the loss.
+    :param bool no_grad: if ``True``, the gradient does not propagate through :math:`T_g`. Default: ``False``.
+        This option is useful for super-resolution problems, see https://arxiv.org/abs/2312.11232.
+    """
+    def __init__(
+        self,
+        transform: Transform,
+        metric: Union[Metric, nn.Module] = torch.nn.MSELoss(),
+        apply_noise=True,
+        weight=1.0,
+        no_grad=False,
+        *args,
+        **kwargs,
+    ):
+        super(EILoss, self).__init__(*args, **kwargs)
+        self.name = "ei"
+        self.metric = metric
+        self.weight = weight
+        self.T = transform
+        self.noise = apply_noise
+        self.no_grad = no_grad
+    def forward(self, x_net, physics, model, **kwargs):
+        r"""
+        Computes the EI loss
+        :param torch.Tensor x_net: Reconstructed image :math:`\inverse{y}`.
+        :param deepinv.physics.Physics physics: Forward operator associated with the measurements.
+        :param torch.nn.Module model: Reconstruction function.
+        :return: (:class:`torch.Tensor`) loss.
+        """
+        if self.no_grad:
+            with torch.no_grad():
+                x2 = self.T(x_net)
+                x2 = x2.detach()
+        else:
+            x2 = self.T(x_net)
+        if self.noise:
+            y = physics(x2)
+        else:
+            y = physics.A(x2)
+        x3 = model(y, physics)
+        loss_ei = self.weight * self.metric(x3, x2)
+        return loss_ei, x2
+
+=== dataloader.py ===
+import glob
+import os
+import h5py
+import numpy as np
+import torch
+from torch.utils.data import DataLoader, Dataset
+import nibabel as nib
+class SliceDataset(Dataset):
+    """
+    A Dataset that:
+      - Looks for all .h5/.hdf5 files under `root_dir`.
+      - Each file is assumed to contain a dataset at `dataset_key`, with shape (... Z),
+        where Z is the number of slices/partitions.
+      - Splits each volume into Z separate examples (one per slice).
+      - Returns each slice as a torch.Tensor.
+    """
+    def __init__(
+        self,
+        root_dir,
+        patient_ids,
+        dataset_key="kspace",
+        file_pattern="*.h5",
+        slice_idx=41,
+        N_time = 8
+    ):
+        """
+        Args:
+            root_dir (str): Path to the folder containing all HDF5 k-space files.
+            dataset_key (str): The key/path inside each .h5 file to the k-space dataset (e.g. "kspace").
+            file_pattern (str): Glob pattern to match your HDF5 files (default "*.h5").
+        """
+        super().__init__()
+        self.root_dir = root_dir
+        self.dataset_key = dataset_key
+        self.slice_idx = slice_idx
+        self.N_time = N_time
+        all_files = sorted(glob.glob(os.path.join(root_dir, file_pattern)))
+        if len(all_files) == 0:
+            raise RuntimeError(
+                f"No files found in {root_dir} matching pattern {file_pattern}"
+            )
+        filtered = []
+        for fp in all_files:
+            fname = os.path.basename(fp)
+            if any(pid in fname for pid in patient_ids):
+                filtered.append(fp)
+        self.file_list = filtered
+        if len(self.file_list) == 0:
+            raise RuntimeError("No files matched the provided patient_ids filter.")
+    def load_dynamic_img(self, patient_id):
+        H = W = 320
+        data = np.empty((2, self.N_time, H, W), dtype=np.float32)
+        for t in range(self.N_time):
+            img_path = f'/ess/scratch/scratch1/rachelgordon/dce-{self.N_time}tf/{patient_id}/slice_{self.slice_idx:03d}_frame_{t:03d}.nii'
+            img = nib.load(img_path)
+            img_data = img.get_fdata()
+            if img_data.shape != (2, H, W):
+                raise ValueError(f"{img_path} has shape {img_data.shape}; "
+                                f"expected (2, {H}, {W})")
+            data[:, t] = img_data.astype(np.float32)
+        return torch.from_numpy(data) 
+    def __len__(self):
+        return len(self.file_list)
+    def __getitem__(self, idx):
+        """
+        Returns a single slice of k-space as a torch.Tensor.
+        The output shape will be the standard (C=2, T, S, I) where C is [real, imag].
+        """
+        file_path = self.file_list[idx]
+        patient_id = file_path.split('/')[-1].strip('.h5')
+        grasp_img = self.load_dynamic_img(patient_id)
+        with h5py.File(file_path, "r") as f:
+            ds = torch.tensor(f[self.dataset_key][:])
+            kspace_slice = ds[self.slice_idx]
+        kspace_single_coil = kspace_slice[:, 0, :, :]  # Shape: (T, S, I)
+        real_part = kspace_single_coil.real
+        imag_part = kspace_single_coil.imag
+        kspace_final = torch.stack([real_part, imag_part], dim=0).float()
+        return kspace_final, grasp_img
+if __name__ == "__main__":
+    root_dir = "/ess/scratch/scratch1/rachelgordon/dce-12tf/binned_kspace"
+    dataset_key = "ktspace"  # change if your HDF5 group/dataset is named differently
+    def to_complex(x_np: "np.ndarray") -> "np.ndarray":
+        """
+        If x_np.shape = (C, H, W, 2) or similar where the last dim is [real, imag],
+        convert to complex64 with shape (C, H, W).
+        Adjust slicing logic if your real/imag channels are elsewhere.
+        """
+        real = x_np[..., 0].astype("float32")
+        imag = x_np[..., 1].astype("float32")
+        return (real + 1j * imag).astype("complex64")
+    dataset = SliceDataset(
+        root_dir=root_dir, dataset_key=dataset_key, file_pattern="*.h5"
+    )
+    loader = DataLoader(
+        dataset,
+        batch_size=1,
+        shuffle=True,
+        num_workers=4,
+        pin_memory=True,
+    )
+    for batch_idx, kspace_batch in enumerate(loader):
+        print(
+            f"Batch {batch_idx}: k-space batch shape = {kspace_batch.shape}, dtype = {kspace_batch.dtype}"
+        )
+        break
 
 === crnn.py ===
 import torch
@@ -1182,74 +1284,4 @@ class ArtifactRemovalCRNN(nn.Module):
         scaling_factor = norm_of_zf_recon / (norm_of_raw_output + 1e-8)
         x_hat_final = x_hat_raw * scaling_factor
         return x_hat_final
-
-=== ei.py ===
-from typing import Union
-import torch
-import torch.nn as nn
-from deepinv.loss.loss import Loss
-from deepinv.loss.metric.metric import Metric
-from deepinv.transform.base import Transform
-class EILoss(Loss):
-    r"""
-    Equivariant imaging self-supervised loss.
-    Assumes that the set of signals is invariant to a group of transformations (rotations, translations, etc.)
-    in order to learn from incomplete measurement data alone https://https://arxiv.org/pdf/2103.14756.pdf.
-    The EI loss is defined as
-    .. math::
-        \| T_g \hat{x} - \inverse{\forw{T_g \hat{x}}}\|^2
-    where :math:`\hat{x}=\inverse{y}` is a reconstructed signal and
-    :math:`T_g` is a transformation sampled at random from a group :math:`g\sim\group`.
-    By default, the error is computed using the MSE metric, however any other metric (e.g., :math:`\ell_1`)
-    can be used as well.
-    :param deepinv.transform.Transform transform: Transform to generate the virtually augmented measurement.
-        It can be any torch-differentiable function (e.g., a :class:`torch.nn.Module`)
-        including `torchvision transforms <https://pytorch.org/vision/stable/transforms.html>`_.
-    :param Metric, torch.nn.Module metric: Metric used to compute the error between the reconstructed augmented measurement and the reference
-        image.
-    :param bool apply_noise: if ``True``, the augmented measurement is computed with the full sensing model
-        :math:`\sensor{\noise{\forw{\hat{x}}}}` (i.e., noise and sensor model),
-        otherwise is generated as :math:`\forw{\hat{x}}`.
-    :param float weight: Weight of the loss.
-    :param bool no_grad: if ``True``, the gradient does not propagate through :math:`T_g`. Default: ``False``.
-        This option is useful for super-resolution problems, see https://arxiv.org/abs/2312.11232.
-    """
-    def __init__(
-        self,
-        transform: Transform,
-        metric: Union[Metric, nn.Module] = torch.nn.MSELoss(),
-        apply_noise=True,
-        weight=1.0,
-        no_grad=False,
-        *args,
-        **kwargs,
-    ):
-        super(EILoss, self).__init__(*args, **kwargs)
-        self.name = "ei"
-        self.metric = metric
-        self.weight = weight
-        self.T = transform
-        self.noise = apply_noise
-        self.no_grad = no_grad
-    def forward(self, x_net, physics, model, **kwargs):
-        r"""
-        Computes the EI loss
-        :param torch.Tensor x_net: Reconstructed image :math:`\inverse{y}`.
-        :param deepinv.physics.Physics physics: Forward operator associated with the measurements.
-        :param torch.nn.Module model: Reconstruction function.
-        :return: (:class:`torch.Tensor`) loss.
-        """
-        if self.no_grad:
-            with torch.no_grad():
-                x2 = self.T(x_net)
-                x2 = x2.detach()
-        else:
-            x2 = self.T(x_net)
-        if self.noise:
-            y = physics(x2)
-        else:
-            y = physics.A(x2)
-        x3 = model(y, physics)
-        loss_ei = self.weight * self.metric(x3, x2)
-        return loss_ei, x2
 

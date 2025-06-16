@@ -2,12 +2,12 @@
 
 # Parameters
 #SBATCH --cpus-per-task=4
-#SBATCH --error=logs/ei_loss_subsample.err
-#SBATCH --output=logs/ei_loss_subsample.out
+#SBATCH --error=logs/ei_loss_per_frame_norm_subsample.err
+#SBATCH --output=logs/ei_loss_per_frame_norm_subsample.out
 #SBATCH --exclude=''
 #SBATCH --gpus-per-node=1
-#SBATCH --job-name=ei_loss_subsample
-#SBATCH --mem-per-gpu=490000
+#SBATCH --job-name=ei_loss_per_frame_norm_subsample
+#SBATCH --mem-per-gpu=80000
 #SBATCH --nodes=1
 #SBATCH --ntasks-per-node=1
 #SBATCH --open-mode=append
@@ -21,4 +21,4 @@ source /gpfs/data/karczmar-lab/workspaces/rachelgordon/micromamba/etc/profile.d/
 micromamba activate recon_mri
 
 # Run the training script with srun
-python3 train.py --config configs/config_ei_subsample.yaml --exp_name ei_loss_subsample
+python3 train.py --config configs/config_ei_subsample.yaml --exp_name ei_loss_per_frame_norm_subsample

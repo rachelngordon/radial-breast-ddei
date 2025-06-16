@@ -87,6 +87,31 @@ def normalize_batch_percentile(x, percentile=99.5):
     return x / norm_factors_reshaped
 
 
+def normalize_batch_percentile_and_clip(x, percentile=99.5, clip_value=10.0):
+    """
+    Combines robust percentile normalization with hard clipping to tame extreme outliers.
+    """
+    if not 0 < percentile <= 100:
+        raise ValueError("Percentile must be between 0 and 100.")
+
+    b = x.shape[0]
+    x_flat = x.reshape(b, -1)
+    q = percentile / 100.0
+
+    percentile_vals = torch.quantile(torch.abs(x_flat), q, dim=1, keepdim=True)
+    norm_factors = percentile_vals + 1e-8
+
+    dims_to_unsqueeze = [1] * (x.dim() - 1)
+    norm_factors_reshaped = norm_factors.view(b, *dims_to_unsqueeze)
+    
+    normalized_x = x / norm_factors_reshaped
+    
+    # Clip the result to a reasonable range
+    clipped_x = torch.clamp(normalized_x, -clip_value, clip_value)
+    
+    return clipped_x
+
+
 def normalize_batch_standardize(x, epsilon=1e-8):
     """
     Standardizes each item in the batch to have a mean of 0 and a standard deviation of 1.
@@ -254,11 +279,20 @@ class CRNN(nn.Module):
                 # x_cascade_in = _renormalize_by_input(x_post_dc, x_pre_dc)
 
                 # z score normalization
-                mean = torch.mean(x_post_dc, dim=(-3, -2, -1), keepdim=True)
-                std = torch.std(x_post_dc, dim=(-3, -2, -1), keepdim=True)
-                epsilon = 1e-8
+                #x_cascade_in = normalize_batch_standardize(x_post_dc)
+                # x_cascade_in = normalize_batch_percentile_and_clip(x_post_dc)
 
-                x_cascade_in = (x_post_dc - mean) / (std + epsilon)
+                # per-frame normalization
+                # Reshape for per-frame normalization. Current shape: (B, H, W, T, C)
+                B, H, W, T, C = x_post_dc.shape
+                x_reshaped = x_post_dc.permute(0, 3, 1, 2, 4).contiguous().view(B * T, H, W, C) # Reshape to (B*T, H, W, C)
+
+                # Standardize each frame independently
+                x_cascade_in = normalize_batch_standardize(x_reshaped)
+
+                # Reshape back to the original format for the next BCRNN pass
+                x_cascade_in = x_cascade_in.view(B, T, H, W, C).permute(0, 2, 3, 1, 4).contiguous()
+
 
                 # Log metrics AFTER normalization
                 # log(f"cascade_{i}/post_norm_mean", x_cascade_in.mean().item(), global_step)
@@ -289,7 +323,8 @@ class ArtifactRemovalCRNN(nn.Module):
 
         # x_init_norm_permuted = _normalize_batch(x_init_permuted)
         # x_init_norm_permuted = normalize_batch_percentile(x_init_permuted)
-        x_init_norm_permuted = normalize_batch_standardize(x_init_permuted)
+        # x_init_norm_permuted = normalize_batch_standardize(x_init_permuted)
+        x_init_norm_permuted = normalize_batch_percentile_and_clip(x_init_permuted)
 
         mask = physics.mask #torch.ones_like(y)
 

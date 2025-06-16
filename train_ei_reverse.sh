@@ -2,11 +2,11 @@
 
 # Parameters
 #SBATCH --cpus-per-task=4
-#SBATCH --error=logs/ei_loss_new_rotate_check.err
-#SBATCH --output=logs/ei_loss_new_rotate_check.out
+#SBATCH --error=logs/ei_loss_reverse_only.err
+#SBATCH --output=logs/ei_loss_reverse_only.out
 #SBATCH --exclude=''
 #SBATCH --gpus-per-node=1
-#SBATCH --job-name=ei_loss_new_rotate_check
+#SBATCH --job-name=ei_loss_reverse_only
 #SBATCH --mem-per-gpu=80000
 #SBATCH --nodes=1
 #SBATCH --ntasks-per-node=1
@@ -21,4 +21,4 @@ source /gpfs/data/karczmar-lab/workspaces/rachelgordon/micromamba/etc/profile.d/
 micromamba activate recon_mri
 
 # Run the training script with srun
-python3 train.py --config configs/config_ei.yaml --exp_name ei_loss_new_rotate_check
+python3 train.py --config configs/config_ei_reverse.yaml --exp_name ei_loss_reverse_only

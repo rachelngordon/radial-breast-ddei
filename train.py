@@ -300,8 +300,17 @@ if use_ei_loss:
     temp_noise = TemporalNoise(n_trans=1)
     time_reverse = TimeReverse(n_trans=1)
 
-    # ei_loss_fn = EILoss((subsample | time_reverse) | (diffeo | rotate))
-    ei_loss_fn = EILoss(subsample | (diffeo | rotate))
+    if config['model']['losses']['ei_loss']['temporal_transform'] == "subsample":
+        ei_loss_fn = EILoss(subsample | (diffeo | rotate))
+    elif config['model']['losses']['ei_loss']['temporal_transform'] == "monophasic":
+        ei_loss_fn = EILoss(monophasic_warp | (diffeo | rotate))
+    elif config['model']['losses']['ei_loss']['temporal_transform'] == "noise":
+        ei_loss_fn = EILoss(temp_noise | (diffeo | rotate))
+    elif config['model']['losses']['ei_loss']['temporal_transform'] == "reverse":
+        ei_loss_fn = EILoss(time_reverse | (diffeo | rotate))
+    else:
+        raise(ValueError, "Unsupported Temporal Transform.")
+
 
 print(
     "--- Generating and saving a Zero-Filled (ZF) reconstruction sample before training ---"

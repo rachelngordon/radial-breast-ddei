@@ -308,6 +308,8 @@ if use_ei_loss:
         ei_loss_fn = EILoss(temp_noise | (diffeo | rotate))
     elif config['model']['losses']['ei_loss']['temporal_transform'] == "reverse":
         ei_loss_fn = EILoss(time_reverse | (diffeo | rotate))
+    elif config['model']['losses']['ei_loss']['temporal_transform'] == "all":
+        ei_loss_fn = EILoss((subsample | monophasic_warp | temp_noise | time_reverse) | (diffeo | rotate))
     else:
         raise(ValueError, "Unsupported Temporal Transform.")
 

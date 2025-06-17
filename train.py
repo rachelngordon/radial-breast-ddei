@@ -9,7 +9,7 @@ import torch
 import yaml
 from crnn import CRNN, ArtifactRemovalCRNN
 from dataloader import SliceDataset
-from deepinv.loss import MCLoss#, EILoss
+# from deepinv.loss import MCLoss#, EILoss
 from deepinv.transform import Transform
 from einops import rearrange
 from radial import DynamicRadialPhysics, RadialDCLayer
@@ -19,7 +19,7 @@ from tqdm import tqdm
 import numpy as np
 from transform import VideoRotate, VideoDiffeo, SubsampleTime, MonophasicTimeWarp, TemporalNoise, TimeReverse
 from ei import EILoss
-
+from mc import MCLoss
 
 def get_cosine_ei_weight(
     current_epoch,
@@ -199,6 +199,14 @@ plot_interval = config["training"]["plot_interval"]
 device = torch.device(config["training"]["device"])
 start_epoch = 1
 
+H, W = config["data"]["height"], config["data"]["width"]
+N_time, N_samples, N_coils = (
+    config["data"]["timeframes"],
+    config["data"]["spokes_per_frame"],
+    config["data"]["coils"],
+)
+N_spokes = int(config["data"]["total_spokes"] / N_time)
+
 
 # load data
 with open(split_file, "r") as fp:
@@ -223,6 +231,7 @@ train_dataset = SliceDataset(
     dataset_key=config["data"]["dataset_key"],
     file_pattern="*.h5",
     slice_idx=config["dataloader"]["slice_idx"],
+    N_coils=N_coils
 )
 
 val_dataset = SliceDataset(
@@ -231,6 +240,7 @@ val_dataset = SliceDataset(
     dataset_key=config["data"]["dataset_key"],
     file_pattern="*.h5",
     slice_idx=config["dataloader"]["slice_idx"],
+    N_coils=N_coils
 )
 
 
@@ -250,15 +260,7 @@ val_loader = DataLoader(
 )
 
 
-# define physics operators
-H, W = config["data"]["height"], config["data"]["width"]
-N_time, N_samples, N_coils = (
-    config["data"]["timeframes"],
-    config["data"]["spokes_per_frame"],
-    config["data"]["coils"],
-)
-N_spokes = int(config["data"]["total_spokes"] / N_time)
-
+# define physics operator
 physics = DynamicRadialPhysics(
     im_size=(H, W, N_time),
     N_spokes=N_spokes,
@@ -300,16 +302,17 @@ if use_ei_loss:
     temp_noise = TemporalNoise(n_trans=1)
     time_reverse = TimeReverse(n_trans=1)
 
+    # NOTE: set apply_noise = FALSE for now multi coil implementation
     if config['model']['losses']['ei_loss']['temporal_transform'] == "subsample":
-        ei_loss_fn = EILoss(subsample | (diffeo | rotate))
+        ei_loss_fn = EILoss(subsample | (diffeo | rotate), apply_noise=False)
     elif config['model']['losses']['ei_loss']['temporal_transform'] == "monophasic":
-        ei_loss_fn = EILoss(monophasic_warp | (diffeo | rotate))
+        ei_loss_fn = EILoss(monophasic_warp | (diffeo | rotate), apply_noise=False)
     elif config['model']['losses']['ei_loss']['temporal_transform'] == "noise":
-        ei_loss_fn = EILoss(temp_noise | (diffeo | rotate))
+        ei_loss_fn = EILoss(temp_noise | (diffeo | rotate), apply_noise=False)
     elif config['model']['losses']['ei_loss']['temporal_transform'] == "reverse":
-        ei_loss_fn = EILoss(time_reverse | (diffeo | rotate))
+        ei_loss_fn = EILoss(time_reverse | (diffeo | rotate), apply_noise=False)
     elif config['model']['losses']['ei_loss']['temporal_transform'] == "all":
-        ei_loss_fn = EILoss((subsample | monophasic_warp | temp_noise | time_reverse) | (diffeo | rotate))
+        ei_loss_fn = EILoss((subsample | monophasic_warp | temp_noise | time_reverse) | (diffeo | rotate), apply_noise=False)
     else:
         raise(ValueError, "Unsupported Temporal Transform.")
 
@@ -320,12 +323,12 @@ print(
 # Use the validation loader to get a sample without affecting the training loader's state
 with torch.no_grad():
     # Get a single batch of validation k-space data
-    val_kspace_sample, grasp_img = next(iter(val_loader))
+    val_kspace_sample, csmap, grasp_img = next(iter(val_loader))
     val_kspace_sample = val_kspace_sample.to(device)
 
     # Perform the simplest reconstruction: A_adjoint(y)
     # This is the "zero-filled" image (or more accurately, the gridded image)
-    x_zf = physics.A_adjoint(val_kspace_sample)
+    x_zf = physics.A_adjoint(val_kspace_sample, csmap)
 
     # Plot and save the image using your existing function
     plot_reconstruction_sample(
@@ -358,19 +361,19 @@ if args.from_checkpoint == False:
 
     with torch.no_grad():
         # Evaluate on training data
-        for measured_kspace, grasp_img in tqdm(train_loader, desc="Step 0 Training Evaluation"):
+        for measured_kspace, csmap, grasp_img in tqdm(train_loader, desc="Step 0 Training Evaluation"):
 
             x_recon = model(
-                measured_kspace.to(device), physics
+                measured_kspace.to(device), physics, csmap
             )  # model output shape: (B, C, T, H, W)
 
-            mc_loss = mc_loss_fn(measured_kspace.to(device), x_recon, physics)
+            mc_loss = mc_loss_fn(measured_kspace.to(device), x_recon, physics, csmap)
             initial_train_mc_loss += mc_loss.item()
 
             if use_ei_loss:
                 # x_recon: reconstructed image
                 ei_loss, t_img = ei_loss_fn(
-                    x_recon, physics, model
+                    x_recon, physics, model, csmap
                 )
 
                 initial_train_ei_loss += ei_loss.item()
@@ -383,19 +386,19 @@ if args.from_checkpoint == False:
 
 
         # Evaluate on validation data
-        for measured_kspace, grasp_img in tqdm(val_loader, desc="Step 0 Validation Evaluation"):
+        for measured_kspace, csmap, grasp_img in tqdm(val_loader, desc="Step 0 Validation Evaluation"):
 
             x_recon = model(
-                measured_kspace.to(device), physics
+                measured_kspace.to(device), physics, csmap
             )  # model output shape: (B, C, T, H, W)
 
-            mc_loss = mc_loss_fn(measured_kspace.to(device), x_recon, physics)
+            mc_loss = mc_loss_fn(measured_kspace.to(device), x_recon, physics, csmap)
             initial_val_mc_loss += mc_loss.item()
 
             if use_ei_loss:
                 # x_recon: reconstructed image
                 ei_loss, t_img = ei_loss_fn(
-                    x_recon, physics, model
+                    x_recon, physics, model, csmap
                 )
 
                 initial_val_ei_loss += ei_loss.item()
@@ -417,21 +420,21 @@ for epoch in range(start_epoch, epochs + 1):
             train_loader, desc=f"Epoch {epoch}/{epochs}  Training", unit="batch"
         )
         # measured_kspace shape: (B, C, I, S, T) = 1, 1, 2, 23040, 8
-        for measured_kspace, grasp_img in train_loader_tqdm:  # measured_kspace shape: (B, C, I, S, T)
+        for measured_kspace, csmap, grasp_img in train_loader_tqdm:  # measured_kspace shape: (B, C, I, S, T)
             iteration_count += 1
             optimizer.zero_grad()
 
             x_recon = model(
-                measured_kspace.to(device), physics
+                measured_kspace.to(device), physics, csmap
             )  # model output shape: (B, C, T, H, W)
 
-            mc_loss = mc_loss_fn(measured_kspace.to(device), x_recon, physics)
+            mc_loss = mc_loss_fn(measured_kspace.to(device), x_recon, physics, csmap)
             running_mc_loss += mc_loss.item()
 
             if use_ei_loss:
                 # x_recon: reconstructed image
                 ei_loss, t_img = ei_loss_fn(
-                    x_recon, physics, model
+                    x_recon, physics, model, csmap
                 )
 
                 ei_loss_weight = get_cosine_ei_weight(
@@ -505,18 +508,18 @@ for epoch in range(start_epoch, epochs + 1):
             leave=False,
         )
         with torch.no_grad():
-            for val_kspace_batch, val_grasp_img in val_loader_tqdm:
+            for val_kspace_batch, val_csmap, val_grasp_img in val_loader_tqdm:
                 # The model takes the raw k-space and physics operator
-                val_x_recon = model(val_kspace_batch.to(device), physics)
+                val_x_recon = model(val_kspace_batch.to(device), physics, val_csmap)
 
                 # For MCLoss, compare the physics model's output with the measured k-space.
                 val_y_meas = val_kspace_batch
-                val_mc_loss = mc_loss_fn(val_y_meas.to(device), val_x_recon, physics)
+                val_mc_loss = mc_loss_fn(val_y_meas.to(device), val_x_recon, physics, val_csmap)
                 val_running_mc_loss += val_mc_loss.item()
 
                 if use_ei_loss:
                     val_ei_loss, val_t_img = ei_loss_fn(
-                        val_x_recon, physics, model
+                        val_x_recon, physics, model, val_csmap
                     )
                     val_running_ei_loss += val_ei_loss.item()
                     val_loader_tqdm.set_postfix(

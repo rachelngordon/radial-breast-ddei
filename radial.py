@@ -160,18 +160,30 @@ class DynamicRadialPhysics(RadialPhysics, TimeMixin):
         self.traj_per_frame = self.traj_per_frame.to(self.device)
         self.sqrt_dcf_per_frame = self.sqrt_dcf_per_frame.to(self.device)
 
-        self.mask = torch.ones(1, 2, self.N_time, self.N_spokes, self.N_samples).to(
-            self.device
-        )
+        if self.N_coils == 1:
+            self.mask = torch.ones(1, 2, self.N_time, self.N_spokes, self.N_samples).to(
+                self.device
+            )
+        else:
+            self.mask = torch.ones(1, 2, self.N_time, self.N_coils, self.N_spokes, self.N_samples).to(
+                self.device
+            )
+
 
     # --- We need to override A and A_adjoint to use the per-frame trajectory ---
-    def A(self, x: torch.Tensor, **kwargs) -> torch.Tensor:
+    def A(self, x: torch.Tensor, csmap, **kwargs) -> torch.Tensor:
         # x has shape (B, C, T, H, W)
         B, C, T, H, W = x.shape
         output_kspace_frames = []
 
+        csmap = from_torch_complex(csmap).to(self.device)
+
         for t in range(T):
             x_frame = x[:, :, t, :, :].unsqueeze(2)  # -> (B, C, 1, H, W)
+
+            if self.N_coils > 1:
+                x_frame = x_frame * csmap.to(x_frame.dtype)
+
             x_flat = self.flatten(x_frame)  # -> (B, C, H, W)
 
             # Use the trajectory for this specific time frame 't'
@@ -183,17 +195,33 @@ class DynamicRadialPhysics(RadialPhysics, TimeMixin):
             y_complex_weighted = k_complex_nufft * sqrt_dcf_t
 
             y_frame = from_torch_complex(y_complex_weighted.squeeze(1))
-            y_frame_reshaped = rearrange(
-                y_frame, "b c (s i) -> b c s i", s=self.N_spokes
-            )
+
+            if self.N_coils == 1:
+                y_frame_reshaped = rearrange(
+                    y_frame, "b c (s i) -> b c s i", s=self.N_spokes
+                )
+            else: 
+                y_frame_reshaped = rearrange(
+                    y_frame, "co c (s i) -> c co s i", s=self.N_spokes
+                )
+
             output_kspace_frames.append(y_frame_reshaped)
 
-        y = torch.stack(output_kspace_frames, dim=2)  # Stack along the time dimension
+        if self.N_coils == 1:
+            y = torch.stack(output_kspace_frames, dim=2)  # Stack along the time dimension
+        else:
+            y = torch.stack(output_kspace_frames, dim=1).unsqueeze(0)
+
         return y * self.mask
 
-    def A_adjoint(self, y: torch.Tensor, **kwargs) -> torch.Tensor:
-        # y has shape (B, C, T, S, I)
-        B, C, T, S, I = y.shape
+    def A_adjoint(self, y: torch.Tensor, csmap: torch.Tensor, **kwargs) -> torch.Tensor:
+
+        # check if input has coil dimension
+        if len(y.shape) == 5:
+            B, C, T, S, I = y.shape
+        elif len(y.shape) == 6:
+            B, C, T, Co, S, I = y.shape
+
         output_image_frames = []
 
         y_masked = y * self.mask
@@ -205,15 +233,37 @@ class DynamicRadialPhysics(RadialPhysics, TimeMixin):
             traj_t = self.traj_per_frame[t]
             sqrt_dcf_t = self.sqrt_dcf_per_frame[t]
 
-            y_flat = rearrange(y_frame, "b c s i -> b c (s i)")
-            y_complex = to_torch_complex(y_flat).unsqueeze(1)
-            y_dcf_complex = y_complex * sqrt_dcf_t
+            if self.N_coils == 1:
+                y_flat = rearrange(y_frame, "b c s i -> b c (s i)")
+                y_complex = to_torch_complex(y_flat).unsqueeze(1)
 
-            x_complex_frame = self.AdjNUFFT(y_dcf_complex, traj_t).squeeze(1)
-            x_frame = from_torch_complex(x_complex_frame)  # -> (B, C, H, W)
+                y_dcf_complex = y_complex * sqrt_dcf_t
+                x_complex_frame = self.AdjNUFFT(y_dcf_complex, traj_t).squeeze(1) # -> (B, H, W)
+
+            else:
+                y_flat = rearrange(y_frame, "b c co s i -> b c co (s i)")
+                y_complex = to_torch_complex(y_flat)
+
+                y_dcf_complex = y_complex * sqrt_dcf_t
+                x_complex_frame = self.AdjNUFFT(y_dcf_complex, traj_t) # -> (B, Co, H, W)
+
+
+            if self.N_coils > 1:
+
+                # Multiply raw images by conjugate of sensitivity maps
+                raw_combined_sens_prod = x_complex_frame * np.conj(csmap.to(x_complex_frame.dtype)).to(self.device)
+
+                # Create combined image from sensitivity-weighted coil images
+                x_complex_frame = torch.sum(raw_combined_sens_prod, axis=1)#.to(torch.float)
+                # raw_combined_img_sens_mag = torch.abs(raw_combined_img_sens)
+
+            
+            x_frame = from_torch_complex(x_complex_frame)
             output_image_frames.append(x_frame)
 
+
         x = torch.stack(output_image_frames, dim=2)  # -> (B, C, T, H, W)
+
         return x
 
 
@@ -237,14 +287,14 @@ class RadialDCLayer(nn.Module):
         )
         self.physics = physics
 
-    def forward(self, x_img_permuted, y_kspace_meas, mask_kspace):
+    def forward(self, x_img_permuted, y_kspace_meas, mask_kspace, csmap):
         # x_img_permuted from CRNN: (b, h, w, t, c)
         # y_kspace_meas from dataloader: (b, c, t, s, i)
         # mask_kspace: same shape as y_kspace_meas
         x_img = rearrange(x_img_permuted, "b h w t c -> b c t h w")
         y = y_kspace_meas
 
-        A_x = self.physics.A(x_img)
+        A_x = self.physics.A(x_img, csmap)
 
         lambda_ = torch.sigmoid(self.lambda_)
 
@@ -254,7 +304,7 @@ class RadialDCLayer(nn.Module):
 
         # Step 3: Transform the corrected k-space back to image space.
         # The physics operator `A_adjoint` handles all Adjoint NUFFT logic.
-        x_dc_img = self.physics.A_adjoint(k_dc)
+        x_dc_img = self.physics.A_adjoint(k_dc, csmap)
 
         # Step 4: Convert back to CRNN's expected permuted format.
         x_dc_permuted = rearrange(x_dc_img, "b c t h w -> b h w t c")

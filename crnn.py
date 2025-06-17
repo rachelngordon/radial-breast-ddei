@@ -242,7 +242,7 @@ class CRNN(nn.Module):
         self.bcrnn = BCRNN(in_chans, chans, n_layers=1, **kwargs)
         self.res_conv = nn.Conv2d(chans, in_chans, kernel_size=1, stride=1, padding=0)
 
-    def forward(self, x_init_permuted, y, mask):  # 'mask' is the unused dummy mask
+    def forward(self, x_init_permuted, y, mask, csmap):  # 'mask' is the unused dummy mask
         B, H, W, T, C = x_init_permuted.shape
         x_cascade_in = x_init_permuted
 
@@ -264,7 +264,7 @@ class CRNN(nn.Module):
 
             # --- 2. Data Consistency Block (The Explosion) ---
             # Use the correct physics mask from the datalayer itself
-            x_post_dc = self.datalayer(x_pre_dc, y, self.datalayer.physics.mask)
+            x_post_dc = self.datalayer(x_pre_dc, y, self.datalayer.physics.mask, csmap)
 
             # --- 3. Normalization Block (The Fix) ---
             # This is the crucial step to prevent the feedback loop explosion.
@@ -312,9 +312,9 @@ class ArtifactRemovalCRNN(nn.Module):
         super(ArtifactRemovalCRNN, self).__init__()
         self.backbone_net = backbone_net
 
-    def forward(self, y, physics, **kwargs):
+    def forward(self, y, physics, csmap, **kwargs):
         # 1. Get the initial ZF recon. This defines our target energy/scale.
-        x_init = physics.A_adjoint(y)
+        x_init = physics.A_adjoint(y, csmap)
 
         # We need its norm before any permutations.
         norm_of_zf_recon = torch.linalg.vector_norm(x_init)
@@ -325,12 +325,23 @@ class ArtifactRemovalCRNN(nn.Module):
         # x_init_norm_permuted = _normalize_batch(x_init_permuted)
         # x_init_norm_permuted = normalize_batch_percentile(x_init_permuted)
         # x_init_norm_permuted = normalize_batch_standardize(x_init_permuted)
-        x_init_norm_permuted = normalize_batch_percentile_and_clip(x_init_permuted)
+        # x_init_norm_permuted = normalize_batch_percentile_and_clip(x_init_permuted)
+
+        # per-frame normalization
+        B, H, W, T, C = x_init_permuted.shape
+        x_init_permuted = x_init_permuted.permute(0, 3, 1, 2, 4).contiguous().view(B * T, H, W, C) # Reshape to (B*T, H, W, C)
+
+        # Standardize each frame independently
+        x_init_norm_permuted = normalize_batch_standardize(x_init_permuted)
+
+        # Reshape back to the original format for the next BCRNN pass
+        x_init_norm_permuted = x_init_norm_permuted.view(B, T, H, W, C).permute(0, 2, 3, 1, 4).contiguous()
+
 
         mask = physics.mask #torch.ones_like(y)
 
         # 3. Get the raw, high-magnitude output from the backbone
-        x_hat_permuted_raw = self.backbone_net(x_init_norm_permuted, y, mask)
+        x_hat_permuted_raw = self.backbone_net(x_init_norm_permuted, y, mask, csmap)
 
         # 4. Convert it back to standard image tensor format
         x_hat_raw = rearrange(x_hat_permuted_raw, "b h w t c -> b c t h w")

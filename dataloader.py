@@ -25,7 +25,8 @@ class SliceDataset(Dataset):
         dataset_key="kspace",
         file_pattern="*.h5",
         slice_idx=41,
-        N_time = 8
+        N_time = 8,
+        N_coils=16
     ):
         """
         Args:
@@ -38,6 +39,7 @@ class SliceDataset(Dataset):
         self.dataset_key = dataset_key
         self.slice_idx = slice_idx
         self.N_time = N_time
+        self.N_coils = N_coils
 
         # Find all matching HDF5 files under root_dir
         all_files = sorted(glob.glob(os.path.join(root_dir, file_pattern)))
@@ -94,7 +96,15 @@ class SliceDataset(Dataset):
             #     return None
 
         return torch.from_numpy(data) 
+    
+    def load_csmaps(self, patient_id):
 
+        ground_truth_dir = os.path.join(os.path.dirname(self.root_dir), 'cs_maps')
+        csmap_path = os.path.join(ground_truth_dir, patient_id + '_cs_maps', f'cs_map_slice_{self.slice_idx:03d}.npy')
+
+        csmap = np.load(csmap_path)
+
+        return csmap.squeeze()
 
 
     def __len__(self):
@@ -111,17 +121,19 @@ class SliceDataset(Dataset):
         patient_id = file_path.split('/')[-1].strip('.h5')
 
         grasp_img = self.load_dynamic_img(patient_id)
+        csmap = self.load_csmaps(patient_id)
 
         with h5py.File(file_path, "r") as f:
             ds = torch.tensor(f[self.dataset_key][:])
             kspace_slice = ds[self.slice_idx]
 
         # Select the first coil
-        kspace_single_coil = kspace_slice[:, 0, :, :]  # Shape: (T, S, I)
+        if self.N_coils == 1:
+            kspace_slice = kspace_slice[:, 0, :, :]  # Shape: (T, S, I)
 
         # Separate real and imaginary components
-        real_part = kspace_single_coil.real
-        imag_part = kspace_single_coil.imag
+        real_part = kspace_slice.real
+        imag_part = kspace_slice.imag
 
         # Stack them along a new 'channel' dimension (dim=0).
         # This creates the final, standard (C=2, T, S, I) format.
@@ -129,7 +141,7 @@ class SliceDataset(Dataset):
 
         # The final shape is (2, num_timeframes, num_spokes, num_samples)
         # e.g., (2, 8, 36, 640)
-        return kspace_final, grasp_img
+        return kspace_final, csmap, grasp_img
 
 
 # ----------------------------

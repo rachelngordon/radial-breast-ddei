@@ -58,7 +58,7 @@ class EILoss(Loss):
         self.noise = apply_noise
         self.no_grad = no_grad
 
-    def forward(self, x_net, physics, model, **kwargs):
+    def forward(self, x_net, physics, model, csmap, **kwargs):
         r"""
         Computes the EI loss
 
@@ -79,11 +79,12 @@ class EILoss(Loss):
             x2 = self.T(x_net)
 
         if self.noise:
+            # NOTE: need to pass csmap for multi coil imp
             y = physics(x2)
         else:
-            y = physics.A(x2)
+            y = physics.A(x2, csmap)
 
-        x3 = model(y, physics)
+        x3 = model(y, physics, csmap)
 
         loss_ei = self.weight * self.metric(x3, x2)
         return loss_ei, x2

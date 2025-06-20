@@ -280,7 +280,7 @@ class CRNN(nn.Module):
                 # x_cascade_in = _renormalize_by_input(x_post_dc, x_pre_dc)
 
                 # z score normalization
-                #x_cascade_in = normalize_batch_standardize(x_post_dc)
+                # x_cascade_in = normalize_batch_standardize(x_post_dc)
                 # x_cascade_in = normalize_batch_percentile_and_clip(x_post_dc)
 
                 # per-frame normalization
@@ -349,10 +349,10 @@ class ArtifactRemovalCRNN(nn.Module):
         # --- 5. Rescale the final output ---
         # Rescale the network's huge output to match the norm of the initial ZF recon.
         # This gives the loss function two tensors of a similar magnitude to compare.
-        norm_of_raw_output = torch.linalg.vector_norm(x_hat_raw)
+        # norm_of_raw_output = torch.linalg.vector_norm(x_hat_raw)
 
-        scaling_factor = norm_of_zf_recon / (norm_of_raw_output + 1e-8)
+        # scaling_factor = norm_of_zf_recon / (norm_of_raw_output + 1e-8)
 
-        x_hat_final = x_hat_raw * scaling_factor
+        # x_hat_final = x_hat_raw * scaling_factor
 
-        return x_hat_final
+        return x_hat_raw

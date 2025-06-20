@@ -21,6 +21,182 @@ from transform import VideoRotate, VideoDiffeo, SubsampleTime, MonophasicTimeWar
 from ei import EILoss
 from mc import MCLoss
 
+def _calculate_top_percentile_curve(dynamic_slice: torch.Tensor, percentile: float) -> list[float]:
+    """Helper function to calculate the enhancement curve for a single dynamic slice."""
+    
+    if dynamic_slice.dim() != 5 or dynamic_slice.shape[0] != 1 or dynamic_slice.shape[1] != 2:
+        raise ValueError(f"Expected input shape (1, 2, T, H, W), but got {dynamic_slice.shape}")
+
+    # Calculate magnitude: sqrt(real^2 + imag^2) and remove batch/channel dims
+    magnitude_video = torch.sqrt(dynamic_slice[:, 0, ...] ** 2 + dynamic_slice[:, 1, ...] ** 2).squeeze(0)
+    
+    num_time_frames = magnitude_video.shape[0]
+    top_percentile_means = []
+    
+    q = percentile / 100.0
+
+    for t in range(num_time_frames):
+        frame_t = magnitude_video[t, :, :]
+        
+        if frame_t.max() == 0:
+            top_percentile_means.append(0)
+            continue
+            
+        threshold = torch.quantile(frame_t.flatten(), q)
+        bright_pixels = frame_t[frame_t > threshold]
+        
+        mean_val = torch.mean(bright_pixels) if bright_pixels.numel() > 0 else threshold
+        top_percentile_means.append(mean_val.item())
+        
+    return top_percentile_means
+
+
+def plot_enhancement_curve(
+    model_output: torch.Tensor,
+    percentile: float = 99.0,
+    title: str = "Enhancement Curve Comparison",
+    output_filename: str = None
+):
+    """
+    Calculates and plots the enhancement curves for a model output and a benchmark
+    image on the same graph for direct comparison.
+
+    Args:
+        model_output (torch.Tensor): The model's reconstructed dynamic slice.
+                                     Shape (1, 2, T, H, W).
+        benchmark_image (torch.Tensor): The ground truth or benchmark dynamic slice.
+                                        Shape (1, 2, T, H, W).
+        percentile (float, optional): The percentile for defining the brightest pixels.
+                                      Defaults to 99.0.
+        title (str, optional): The title for the plot. Defaults to "Enhancement Curve Comparison".
+        output_filename (str, optional): If provided, saves the plot to this file path.
+                                         Defaults to None (displays plot).
+    """
+    # --- 1. Input Validation ---
+    if not 0 < percentile < 100:
+        raise ValueError("Percentile must be between 0 and 100.")
+
+    # --- 2. Calculate Curves for Both Images ---
+    model_curve = _calculate_top_percentile_curve(model_output.detach(), percentile)
+    # benchmark_curve = _calculate_top_percentile_curve(benchmark_image.detach(), percentile)
+    
+    # Ensure time axis is consistent
+    num_time_frames = model_output.shape[2]
+    time_axis = np.arange(num_time_frames)
+
+    # --- 3. Plotting ---
+    plt.figure(figsize=(12, 7))
+    
+    # Plot model output curve
+    plt.plot(time_axis, model_curve, label='Model Output', marker='o', linestyle='-', color='tab:blue')
+    
+    # Plot benchmark curve
+    # plt.plot(time_axis, benchmark_curve, label='GRASP Benchmark', marker='x', linestyle='--', color='tab:orange')
+    
+    plt.title(title, fontsize=16)
+    plt.xlabel("Time Frame", fontsize=12)
+    plt.ylabel(f"Mean Signal of Top {100-percentile:.1f}% Pixels", fontsize=12)
+    plt.legend()
+    plt.grid(True)
+    plt.tight_layout()
+    
+    if output_filename:
+        # Create directory if it doesn't exist
+        output_dir = os.path.dirname(output_filename)
+        if output_dir:
+            os.makedirs(output_dir, exist_ok=True)
+            
+        plt.savefig(output_filename)
+        print(f"Saved enhancement curve comparison to {output_filename}")
+    else:
+        plt.show()
+        
+    plt.close()
+
+
+# def plot_top_percentile_enhancement_curve(
+#     dynamic_slice: torch.Tensor,
+#     percentile: float = 99.0,
+#     title: str = "Top Percentile Enhancement Curve",
+#     output_filename: str = None
+# ):
+#     """
+#     Plots the enhancement curve for the top percentile of pixels in a dynamic image slice.
+
+#     For each time frame, it calculates the mean signal intensity of only the pixels
+#     that are brighter than the specified percentile for that frame.
+
+#     Args:
+#         dynamic_slice (torch.Tensor): A single dynamic image slice with a shape like
+#                                       (B, C, T, H, W), where B=1 and C=2 (real, imag).
+#         percentile (float, optional): The percentile to use for defining the "top"
+#                                       pixels. Defaults to 99.0.
+#         title (str, optional): The title for the plot.
+#         output_filename (str, optional): If provided, saves the plot to this file path.
+#                                          If None, displays the plot. Defaults to None.
+#     """
+#     # --- 1. Input Validation and Preparation ---
+#     if not 0 < percentile < 100:
+#         raise ValueError("Percentile must be between 0 and 100.")
+
+#     if dynamic_slice.dim() != 5 or dynamic_slice.shape[0] != 1 or dynamic_slice.shape[1] != 2:
+#         raise ValueError(f"Expected input shape (1, 2, T, H, W), but got {dynamic_slice.shape}")
+
+#     # Calculate magnitude: sqrt(real^2 + imag^2)
+#     # Squeeze out the batch and channel dimensions to get a (T, H, W) tensor
+#     magnitude_video = torch.sqrt(dynamic_slice[:, 0, ...] ** 2 + dynamic_slice[:, 1, ...] ** 2).squeeze(0)
+    
+#     num_time_frames = magnitude_video.shape[0]
+#     time_axis = np.arange(num_time_frames)
+#     top_percentile_means = []
+    
+#     q = percentile / 100.0
+
+#     # --- 2. Calculate Mean of Top Percentile for Each Frame ---
+#     for t in range(num_time_frames):
+#         frame_t = magnitude_video[t, :, :]
+        
+#         # Skip calculation for empty/black frames to avoid errors
+#         if frame_t.max() == 0:
+#             top_percentile_means.append(0)
+#             continue
+            
+#         # Find the intensity value at the specified percentile
+#         threshold = torch.quantile(frame_t.flatten(), q)
+        
+#         # Select only the pixels with intensity above this threshold
+#         bright_pixels = frame_t[frame_t > threshold]
+        
+#         # Handle the edge case where no pixels are above the threshold
+#         if bright_pixels.numel() > 0:
+#             # Calculate the mean of these bright pixels
+#             mean_val = torch.mean(bright_pixels)
+#         else:
+#             # If no pixels are brighter, use the threshold value itself
+#             mean_val = threshold
+
+#         top_percentile_means.append(mean_val.item())
+
+#     # --- 3. Plotting ---
+#     plt.figure(figsize=(10, 6))
+#     plt.plot(time_axis, top_percentile_means, label=f'Mean of Top {100-percentile:.1f}% Pixels', marker='o', linestyle='-')
+    
+#     plt.title(title, fontsize=16)
+#     plt.xlabel("Time Frame", fontsize=12)
+#     plt.ylabel("Signal Intensity (Arbitrary Units)", fontsize=12)
+#     plt.legend()
+#     plt.grid(True)
+#     plt.tight_layout()
+    
+#     if output_filename:
+#         plt.savefig(output_filename)
+#         print(f"Saved enhancement curve to {output_filename}")
+#     else:
+#         plt.show()
+        
+#     plt.close()
+    
+
 def get_cosine_ei_weight(
     current_epoch,
     warmup_epochs,
@@ -75,6 +251,8 @@ def plot_reconstruction_sample(x_recon, title, filename, output_dir, grasp_img=N
         output_dir: Directory to save the plot
         batch_idx: Which batch element to plot (default: 0)
     """
+    os.makedirs(output_dir, exist_ok=True)
+
     # compute magnitude from complex reconstruction
     x_recon_mag = torch.sqrt(x_recon[:, 0, ...] ** 2 + x_recon[:, 1, ...] ** 2)
     grasp_img_mag = torch.sqrt(grasp_img[:, 0, ...] ** 2 + grasp_img[:, 1, ...] ** 2)
@@ -207,6 +385,7 @@ N_time, N_samples, N_coils = (
 )
 N_spokes = int(config["data"]["total_spokes"] / N_time)
 
+os.makedirs(os.path.join(output_dir, 'enhancement_curves'), exist_ok=True)
 
 # load data
 with open(split_file, "r") as fp:
@@ -304,15 +483,15 @@ if use_ei_loss:
 
     # NOTE: set apply_noise = FALSE for now multi coil implementation
     if config['model']['losses']['ei_loss']['temporal_transform'] == "subsample":
-        ei_loss_fn = EILoss(subsample | (diffeo | rotate), apply_noise=False)
+        ei_loss_fn = EILoss(subsample | (diffeo | rotate))
     elif config['model']['losses']['ei_loss']['temporal_transform'] == "monophasic":
-        ei_loss_fn = EILoss(monophasic_warp | (diffeo | rotate), apply_noise=False)
+        ei_loss_fn = EILoss(monophasic_warp | (diffeo | rotate))
     elif config['model']['losses']['ei_loss']['temporal_transform'] == "noise":
-        ei_loss_fn = EILoss(temp_noise | (diffeo | rotate), apply_noise=False)
+        ei_loss_fn = EILoss(temp_noise | (diffeo | rotate))
     elif config['model']['losses']['ei_loss']['temporal_transform'] == "reverse":
-        ei_loss_fn = EILoss(time_reverse | (diffeo | rotate), apply_noise=False)
+        ei_loss_fn = EILoss(time_reverse | (diffeo | rotate))
     elif config['model']['losses']['ei_loss']['temporal_transform'] == "all":
-        ei_loss_fn = EILoss((subsample | monophasic_warp | temp_noise | time_reverse) | (diffeo | rotate), apply_noise=False)
+        ei_loss_fn = EILoss((subsample | monophasic_warp | temp_noise | time_reverse) | (diffeo | rotate))
     else:
         raise(ValueError, "Unsupported Temporal Transform.")
 
@@ -475,14 +654,24 @@ for epoch in range(start_epoch, epochs + 1):
                     grasp_img
                 )
 
-                plot_reconstruction_sample(
-                    t_img,
-                    f"Transformed Train Sample - Epoch {epoch}",
-                    f"transforms/transform_train_sample_epoch_{epoch}",
-                    output_dir,
+                plot_enhancement_curve(
                     x_recon,
-                    transform=True
-                )
+                    output_filename = os.path.join(output_dir, 'enhancement_curves', f'train_sample_enhancement_curve_epoch_{epoch}.png'))
+                
+                plot_enhancement_curve(
+                    grasp_img,
+                    output_filename = os.path.join(output_dir, 'enhancement_curves', f'grasp_sample_enhancement_curve_epoch_{epoch}.png'))
+
+                if use_ei_loss:
+
+                    plot_reconstruction_sample(
+                        t_img,
+                        f"Transformed Train Sample - Epoch {epoch}",
+                        f"transforms/transform_train_sample_epoch_{epoch}",
+                        output_dir,
+                        x_recon,
+                        transform=True
+                    )
 
         # Calculate and store average epoch losses
         epoch_train_mc_loss = running_mc_loss / len(train_loader)
@@ -538,14 +727,23 @@ for epoch in range(start_epoch, epochs + 1):
                     val_grasp_img
                 )
 
-                plot_reconstruction_sample(
-                    val_t_img,
-                    f"Transformed Validation Sample - Epoch {epoch}",
-                    f"transforms/transform_val_sample_epoch_{epoch}",
-                    output_dir,
+                plot_enhancement_curve(
                     val_x_recon,
-                    transform=True
-                )
+                    output_filename = os.path.join(output_dir, 'enhancement_curves', f'val_sample_enhancement_curve_epoch_{epoch}.png'))
+                
+                plot_enhancement_curve(
+                    val_grasp_img,
+                    output_filename = os.path.join(output_dir, 'enhancement_curves', f'val_grasp_sample_enhancement_curve_epoch_{epoch}.png'))
+
+                if use_ei_loss:
+                    plot_reconstruction_sample(
+                        val_t_img,
+                        f"Transformed Validation Sample - Epoch {epoch}",
+                        f"transforms/transform_val_sample_epoch_{epoch}",
+                        output_dir,
+                        val_x_recon,
+                        transform=True
+                    )
 
 
                 # Save the model checkpoint

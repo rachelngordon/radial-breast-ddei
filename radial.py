@@ -1,3 +1,4 @@
+# from __future__ import annotations
 import deepinv as dinv
 import numpy as np
 import torch
@@ -5,6 +6,9 @@ import torch.nn as nn
 from deepinv.physics.time import TimeMixin
 from einops import rearrange
 from torchkbnufft import KbNufft, KbNufftAdjoint
+from noise import ZeroNoise
+import warnings
+from torch import Tensor
 
 
 def to_torch_complex(x: torch.Tensor):
@@ -20,8 +24,244 @@ def from_torch_complex(x: torch.Tensor):
     return rearrange(torch.view_as_real(x), "b ... c -> b c ...").contiguous()
 
 
+
+class Physics(torch.nn.Module):  # parent class for forward models
+    r"""
+    Parent class for forward operators
+
+    It describes the general forward measurement process
+
+    .. math::
+
+        y = \noise(\forw(x))
+
+    where :math:`x` is an image of :math:`n` pixels, :math:`y` is the measurements of size :math:`m`,
+    :math:`\forw:\xset\mapsto \yset` is a deterministic mapping capturing the physics of the acquisition
+    and :math:`\noise:\yset\mapsto \yset` is a stochastic mapping which characterizes the noise affecting
+    the measurements.
+
+    :param Callable A: forward operator function which maps an image to the observed measurements :math:`x\mapsto y`.
+    :param deepinv.physics.NoiseModel, Callable noise_model: function that adds noise to the measurements :math:`N(z)`.
+        See the noise module for some predefined functions.
+    :param Callable sensor_model: function that incorporates any sensor non-linearities to the sensing process,
+        such as quantization or saturation, defined as a function :math:`\eta(z)`, such that
+        :math:`y=\eta\left(N(A(x))\right)`. By default, the `sensor_model` is set to the identity :math:`\eta(z)=z`.
+    :param int max_iter: If the operator does not have a closed form pseudoinverse, the gradient descent algorithm
+        is used for computing it, and this parameter fixes the maximum number of gradient descent iterations.
+    :param float tol: If the operator does not have a closed form pseudoinverse, the gradient descent algorithm
+        is used for computing it, and this parameter fixes the absolute tolerance of the gradient descent algorithm.
+    :param str solver: least squares solver to use. Only gradient descent is available for non-linear operators.
+    """
+
+    def __init__(
+        self,
+        A=lambda x, **kwargs: x,
+        noise_model=ZeroNoise(),
+        sensor_model=lambda x: x,
+        solver="gradient_descent",
+        max_iter=50,
+        tol=1e-4,
+    ):
+        super().__init__()
+        self.noise_model = noise_model
+        self.sensor_model = sensor_model
+        self.forw = A
+        self.SVD = False  # flag indicating SVD available
+        self.max_iter = max_iter
+        self.tol = tol
+        self.solver = solver
+
+    def __mul__(self, other):
+        r"""
+        Concatenates two forward operators :math:`A = A_1\circ A_2` via the mul operation
+
+        The resulting operator keeps the noise and sensor models of :math:`A_1`.
+
+        :param deepinv.physics.Physics other: Physics operator :math:`A_2`
+        :return: (:class:`deepinv.physics.Physics`) concatenated operator
+
+        """
+
+        warnings.warn(
+            "You are composing two physics objects. The resulting physics will not retain the original attributes. "
+            "You may instead retrieve attributes of the original physics by indexing the resulting physics."
+        )
+        return compose(other, self, max_iter=self.max_iter, tol=self.tol)
+
+    def stack(self, other):
+        r"""
+        Stacks two forward operators :math:`A(x) = \begin{bmatrix} A_1(x) \\ A_2(x) \end{bmatrix}`
+
+        The measurements produced by the resulting model are :class:`deepinv.utils.TensorList` objects, where
+        each entry corresponds to the measurements of the corresponding operator.
+
+        Returns a :class:`deepinv.physics.StackedPhysics` object.
+
+        See :ref:`physics_combining` for more information.
+
+        :param deepinv.physics.Physics other: Physics operator :math:`A_2`
+        :return: (:class:`deepinv.physics.StackedPhysics`) stacked operator
+
+        """
+        return stack(self, other)
+
+    def forward(self, x, csmaps, **kwargs):
+        r"""
+        Computes forward operator
+
+        .. math::
+
+                y = N(A(x), \sigma)
+
+
+        :param torch.Tensor, list[torch.Tensor] x: signal/image
+        :return: (:class:`torch.Tensor`) noisy measurements
+
+        """
+        return self.sensor(self.noise(self.A(x, csmaps, **kwargs), **kwargs))
+    
+    def A(self, x, **kwargs):
+        r"""
+        Computes forward operator :math:`y = A(x)` (without noise and/or sensor non-linearities)
+
+        :param torch.Tensor,list[torch.Tensor] x: signal/image
+        :return: (:class:`torch.Tensor`) clean measurements
+
+        """
+        return self.forw(x, **kwargs)
+
+    def sensor(self, x):
+        r"""
+        Computes sensor non-linearities :math:`y = \eta(y)`
+
+        :param torch.Tensor,list[torch.Tensor] x: signal/image
+        :return: (:class:`torch.Tensor`) clean measurements
+        """
+        return self.sensor_model(x)
+
+    def set_noise_model(self, noise_model, **kwargs):
+        r"""
+        Sets the noise model
+
+        :param Callable noise_model: noise model
+        """
+        self.noise_model = noise_model
+
+    def noise(self, x, **kwargs) -> Tensor:
+        r"""
+        Incorporates noise into the measurements :math:`\tilde{y} = N(y)`
+
+        :param torch.Tensor x:  clean measurements
+        :param None, float noise_level: optional noise level parameter
+        :return: noisy measurements
+
+        """
+
+        return self.noise_model(x, **kwargs)
+
+    def A_dagger(self, y, x_init=None):
+        r"""
+        Computes an inverse as:
+
+        .. math::
+
+            x^* \in \underset{x}{\arg\min} \quad \|\forw{x}-y\|^2.
+
+        This function uses gradient descent to find the inverse. It can be overwritten by a more efficient pseudoinverse in cases where closed form formulas exist.
+
+        :param torch.Tensor y: a measurement :math:`y` to reconstruct via the pseudoinverse.
+        :param torch.Tensor x_init: initial guess for the reconstruction.
+        :return: (:class:`torch.Tensor`) The reconstructed image :math:`x`.
+
+        """
+
+        if self.solver == "gradient_descent":
+            if x_init is None:
+                x_init = self.A_adjoint(y)
+
+            x = x_init
+
+            lr = 1e-1
+            loss = torch.nn.MSELoss()
+            for _ in range(self.max_iter):
+                x = x - lr * self.A_vjp(x, self.A(x) - y)
+                err = loss(self.A(x), y)
+                if err < self.tol:
+                    break
+        else:
+            raise NotImplementedError(
+                f"Solver {self.solver} not implemented for A_dagger"
+            )
+
+        return x.clone()
+
+    def set_ls_solver(self, solver, max_iter=None, tol=None):
+        r"""
+        Change default solver for computing the least squares solution:
+
+        .. math::
+
+            x^* \in \underset{x}{\arg\min} \quad \|\forw{x}-y\|^2.
+
+        :param str solver: solver to use. If the physics are non-linear, the only available solver is `'gradient_descent'`.
+            For linear operators, the options are `'CG'`, `'lsqr'`, `'BiCGStab'` and `'minres'` (see :func:`deepinv.optim.utils.least_squares` for more details).
+        :param int max_iter: maximum number of iterations for the solver.
+        :param float tol: relative tolerance for the solver, stopping when :math:`\|A(x) - y\| < \text{tol} \|y\|`.
+        """
+
+        if max_iter is not None:
+            self.max_iter = max_iter
+        if tol is not None:
+            self.tol = tol
+        self.solver = solver
+
+    def A_vjp(self, x, v):
+        r"""
+        Computes the product between a vector :math:`v` and the Jacobian of the forward operator :math:`A` evaluated at :math:`x`, defined as:
+
+        .. math::
+
+            A_{vjp}(x, v) = \left. \frac{\partial A}{\partial x}  \right|_x^\top  v.
+
+        By default, the Jacobian is computed using automatic differentiation.
+
+        :param torch.Tensor x: signal/image.
+        :param torch.Tensor v: vector.
+        :return: (:class:`torch.Tensor`) the VJP product between :math:`v` and the Jacobian.
+        """
+        _, vjpfunc = torch.func.vjp(self.A, x)
+        return vjpfunc(v)[0]
+
+    def update(self, **kwargs):
+        r"""
+        Update the parameters of the physics: forward operator and noise model.
+
+        :param dict kwargs: dictionary of parameters to update.
+        """
+        self.update_parameters(**kwargs)
+        if hasattr(self.noise_model, "update_parameters"):
+            self.noise_model.update_parameters(**kwargs)
+
+    def update_parameters(self, **kwargs):
+        r"""
+
+        Update the parameters of the forward operator.
+
+        :param dict kwargs: dictionary of parameters to update.
+        """
+        if kwargs:
+            for key, value in kwargs.items():
+                if (
+                    value is not None
+                    and hasattr(self, key)
+                    and isinstance(value, torch.Tensor)
+                ):
+                    self.register_buffer(key, value)
+
+
+
 # This class only knows how to handle a batch of 2D images (4D Tensors)
-class RadialPhysics(dinv.physics.Physics):
+class RadialPhysics(Physics):
     def __init__(self, im_size, N_spokes, N_samples, **kwargs):
         super().__init__(**kwargs)
         self.im_size = im_size
@@ -88,17 +328,17 @@ class RadialPhysics(dinv.physics.Physics):
         sqrt_dcf = rearrange(sqrt_dcf_vals, "(s i) -> 1 1 (s i)", s=self.N_spokes)
         return traj_nufft_ready, sqrt_dcf
 
-    def A(self, x: torch.Tensor, **kwargs) -> torch.Tensor:
+    def A(self, x: torch.Tensor, csmaps, **kwargs) -> torch.Tensor:
         # The call signature is back to the original version
         x_complex = to_torch_complex(x).unsqueeze(1)
-        k_complex_nufft = self.NUFFT(x_complex, self.traj)
+        k_complex_nufft = self.NUFFT(x_complex, self.traj, csmaps)
 
         y_complex_weighted = k_complex_nufft * self.sqrt_dcf
 
         y = from_torch_complex(y_complex_weighted.squeeze(1))
         return rearrange(y, "b c (s i) -> b c s i", s=self.N_spokes)
 
-    def A_adjoint(self, y: torch.Tensor, **kwargs) -> torch.Tensor:
+    def A_adjoint(self, y: torch.Tensor, csmaps, **kwargs) -> torch.Tensor:
         # The call signature is back to the original version
         y_flat = rearrange(y, "b c s i -> b c (s i)")
         y_complex = to_torch_complex(y_flat).unsqueeze(1)
@@ -108,7 +348,7 @@ class RadialPhysics(dinv.physics.Physics):
         if torch.isnan(y_dcf_complex).any():
             print("!!! ERROR: NaN detected in y_dcf_complex in A_adjoint !!!")
 
-        x_complex = self.AdjNUFFT(y_dcf_complex, self.traj).squeeze(1)
+        x_complex = self.AdjNUFFT(y_dcf_complex, self.traj, csmaps).squeeze(1)
         return from_torch_complex(x_complex)
 
 
@@ -119,7 +359,8 @@ class DynamicRadialPhysics(RadialPhysics, TimeMixin):
         TimeMixin.__init__(self)
 
         # We call the base Physics init, not RadialPhysics's init directly
-        dinv.physics.Physics.__init__(self, **kwargs)
+        # dinv.physics.Physics.__init__(self, **kwargs)
+        Physics.__init__(self, **kwargs)
 
         # Store all dynamic parameters
         self.im_size = im_size[:2]  # Static image size
@@ -176,41 +417,39 @@ class DynamicRadialPhysics(RadialPhysics, TimeMixin):
         B, C, T, H, W = x.shape
         output_kspace_frames = []
 
-        csmap = from_torch_complex(csmap).to(self.device)
+        csmap = csmap.to(self.device)
+
+        x_complex = to_torch_complex(x) # -> (B, T, H, W)
 
         for t in range(T):
-            x_frame = x[:, :, t, :, :].unsqueeze(2)  # -> (B, C, 1, H, W)
+            x_complex_frame = x_complex[:, t, :, :].unsqueeze(1)  # -> (B, Co, H, W)
 
             if self.N_coils > 1:
-                x_frame = x_frame * csmap.to(x_frame.dtype)
-
-            x_flat = self.flatten(x_frame)  # -> (B, C, H, W)
+                x_complex_frame = x_complex_frame * csmap.to(x_complex_frame.dtype)
 
             # Use the trajectory for this specific time frame 't'
             traj_t = self.traj_per_frame[t]
             sqrt_dcf_t = self.sqrt_dcf_per_frame[t]
 
-            x_complex = to_torch_complex(x_flat).unsqueeze(1)
-            k_complex_nufft = self.NUFFT(x_complex, traj_t)
+
+            k_complex_nufft = self.NUFFT(x_complex_frame, traj_t)
             y_complex_weighted = k_complex_nufft * sqrt_dcf_t
 
-            y_frame = from_torch_complex(y_complex_weighted.squeeze(1))
 
             if self.N_coils == 1:
+                y_frame = from_torch_complex(y_complex_weighted.squeeze(1))
                 y_frame_reshaped = rearrange(
                     y_frame, "b c (s i) -> b c s i", s=self.N_spokes
                 )
             else: 
+                y_frame = from_torch_complex(y_complex_weighted)
                 y_frame_reshaped = rearrange(
-                    y_frame, "co c (s i) -> c co s i", s=self.N_spokes
+                    y_frame, "b c co (s i) -> b c co s i", s=self.N_spokes
                 )
 
             output_kspace_frames.append(y_frame_reshaped)
 
-        if self.N_coils == 1:
-            y = torch.stack(output_kspace_frames, dim=2)  # Stack along the time dimension
-        else:
-            y = torch.stack(output_kspace_frames, dim=1).unsqueeze(0)
+        y = torch.stack(output_kspace_frames, dim=2)  # Stack along the time dimension
 
         return y * self.mask
 
@@ -250,12 +489,18 @@ class DynamicRadialPhysics(RadialPhysics, TimeMixin):
 
             if self.N_coils > 1:
 
-                # Multiply raw images by conjugate of sensitivity maps
-                raw_combined_sens_prod = x_complex_frame * np.conj(csmap.to(x_complex_frame.dtype)).to(self.device)
+                csmap = csmap.to(x_complex_frame.dtype).to(self.device)
 
-                # Create combined image from sensitivity-weighted coil images
-                x_complex_frame = torch.sum(raw_combined_sens_prod, axis=1)#.to(torch.float)
-                # raw_combined_img_sens_mag = torch.abs(raw_combined_img_sens)
+                # Multiply raw images by conjugate of sensitivity maps
+                sens_weighted_imgs = x_complex_frame * csmap.conj()
+
+                # Calculate the sum-of-squares of the sensitivity maps
+                combined_numerator = torch.sum(sens_weighted_imgs, dim=1)
+                sos_sens_maps = torch.sum(csmap.abs()**2, dim=1)
+                epsilon = torch.finfo(sos_sens_maps.dtype).eps
+                
+                # Obtain final combined image
+                x_complex_frame = combined_numerator / (sos_sens_maps + epsilon)
 
             
             x_frame = from_torch_complex(x_complex_frame)

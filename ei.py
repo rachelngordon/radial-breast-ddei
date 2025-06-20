@@ -80,7 +80,7 @@ class EILoss(Loss):
 
         if self.noise:
             # NOTE: need to pass csmap for multi coil imp
-            y = physics(x2)
+            y = physics(x2, csmap)
         else:
             y = physics.A(x2, csmap)
 

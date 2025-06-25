@@ -25,7 +25,7 @@ dataloader:
 
 # Model settings
 model:
-  name: "DDEI"
+  name: "CRNN"
   cascades: 2
   channels: 64
   optimizer:
@@ -43,7 +43,7 @@ model:
       temporal_transform: "subsample"
       weight: 0.0003
       warmup: 5
-      duration: 15
+      duration: 50
       subsample_ratio_min: 0.7
       subsample_ratio_max: 0.95
       warp_ratio_min: 0.6
@@ -52,7 +52,7 @@ model:
 
 # Training settings
 training:
-  epochs: 25
+  epochs: 50
   save_interval: 1
   plot_interval: 20
   device: "cuda"  # or "cpu"

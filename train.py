@@ -20,6 +20,7 @@ import numpy as np
 from transform import VideoRotate, VideoDiffeo, SubsampleTime, MonophasicTimeWarp, TemporalNoise, TimeReverse
 from ei import EILoss
 from mc import MCLoss
+from lsfpnet import LSFPNet, ArtifactRemovalLSFPNet
 
 def _calculate_top_percentile_curve(dynamic_slice: torch.Tensor, percentile: float) -> list[float]:
     """Helper function to calculate the enhancement curve for a single dynamic slice."""
@@ -107,94 +108,11 @@ def plot_enhancement_curve(
             os.makedirs(output_dir, exist_ok=True)
             
         plt.savefig(output_filename)
-        print(f"Saved enhancement curve comparison to {output_filename}")
     else:
         plt.show()
         
     plt.close()
 
-
-# def plot_top_percentile_enhancement_curve(
-#     dynamic_slice: torch.Tensor,
-#     percentile: float = 99.0,
-#     title: str = "Top Percentile Enhancement Curve",
-#     output_filename: str = None
-# ):
-#     """
-#     Plots the enhancement curve for the top percentile of pixels in a dynamic image slice.
-
-#     For each time frame, it calculates the mean signal intensity of only the pixels
-#     that are brighter than the specified percentile for that frame.
-
-#     Args:
-#         dynamic_slice (torch.Tensor): A single dynamic image slice with a shape like
-#                                       (B, C, T, H, W), where B=1 and C=2 (real, imag).
-#         percentile (float, optional): The percentile to use for defining the "top"
-#                                       pixels. Defaults to 99.0.
-#         title (str, optional): The title for the plot.
-#         output_filename (str, optional): If provided, saves the plot to this file path.
-#                                          If None, displays the plot. Defaults to None.
-#     """
-#     # --- 1. Input Validation and Preparation ---
-#     if not 0 < percentile < 100:
-#         raise ValueError("Percentile must be between 0 and 100.")
-
-#     if dynamic_slice.dim() != 5 or dynamic_slice.shape[0] != 1 or dynamic_slice.shape[1] != 2:
-#         raise ValueError(f"Expected input shape (1, 2, T, H, W), but got {dynamic_slice.shape}")
-
-#     # Calculate magnitude: sqrt(real^2 + imag^2)
-#     # Squeeze out the batch and channel dimensions to get a (T, H, W) tensor
-#     magnitude_video = torch.sqrt(dynamic_slice[:, 0, ...] ** 2 + dynamic_slice[:, 1, ...] ** 2).squeeze(0)
-    
-#     num_time_frames = magnitude_video.shape[0]
-#     time_axis = np.arange(num_time_frames)
-#     top_percentile_means = []
-    
-#     q = percentile / 100.0
-
-#     # --- 2. Calculate Mean of Top Percentile for Each Frame ---
-#     for t in range(num_time_frames):
-#         frame_t = magnitude_video[t, :, :]
-        
-#         # Skip calculation for empty/black frames to avoid errors
-#         if frame_t.max() == 0:
-#             top_percentile_means.append(0)
-#             continue
-            
-#         # Find the intensity value at the specified percentile
-#         threshold = torch.quantile(frame_t.flatten(), q)
-        
-#         # Select only the pixels with intensity above this threshold
-#         bright_pixels = frame_t[frame_t > threshold]
-        
-#         # Handle the edge case where no pixels are above the threshold
-#         if bright_pixels.numel() > 0:
-#             # Calculate the mean of these bright pixels
-#             mean_val = torch.mean(bright_pixels)
-#         else:
-#             # If no pixels are brighter, use the threshold value itself
-#             mean_val = threshold
-
-#         top_percentile_means.append(mean_val.item())
-
-#     # --- 3. Plotting ---
-#     plt.figure(figsize=(10, 6))
-#     plt.plot(time_axis, top_percentile_means, label=f'Mean of Top {100-percentile:.1f}% Pixels', marker='o', linestyle='-')
-    
-#     plt.title(title, fontsize=16)
-#     plt.xlabel("Time Frame", fontsize=12)
-#     plt.ylabel("Signal Intensity (Arbitrary Units)", fontsize=12)
-#     plt.legend()
-#     plt.grid(True)
-#     plt.tight_layout()
-    
-#     if output_filename:
-#         plt.savefig(output_filename)
-#         print(f"Saved enhancement curve to {output_filename}")
-#     else:
-#         plt.show()
-        
-#     plt.close()
     
 
 def get_cosine_ei_weight(
@@ -309,6 +227,48 @@ def get_git_commit():
     except Exception as e:
         print(f"Error retrieving Git commit: {e}")
         return "unknown"
+    
+
+def remove_module_prefix(state_dict):
+    new_state_dict = {}
+    for k, v in state_dict.items():
+        new_key = k.replace('module.', '')  # Remove 'module.' prefix
+        new_state_dict[new_key] = v
+    return new_state_dict
+
+
+def save_checkpoint(model, optimizer, epoch,
+                    train_curves, val_curves, filename):
+    checkpoint = {
+        "epoch": epoch,
+        "model_state_dict": model.state_dict(),
+        "optimizer_state_dict": optimizer.state_dict(),
+        **train_curves,   # unpack the dicts
+        **val_curves,
+    }
+    torch.save(checkpoint, filename)
+    print(f"Checkpoint saved at epoch {epoch} to {filename}")
+
+
+def load_checkpoint(model, optimizer, filename):
+    ckpt = torch.load(filename, map_location="cpu")
+
+    model.load_state_dict(remove_module_prefix(ckpt["model_state_dict"]))
+    optimizer.load_state_dict(remove_module_prefix(ckpt["optimizer_state_dict"]))
+
+    # curves come back as Python lists (or start empty if key not found)
+    train_curves = {
+        "train_mc_losses": ckpt.get("train_mc_losses", []),
+        "train_ei_losses": ckpt.get("train_ei_losses", []),
+        "weighted_train_mc_losses": ckpt.get("weighted_train_mc_losses", []),
+        "weighted_train_ei_losses": ckpt.get("weighted_train_ei_losses", []),
+    }
+    val_curves = {
+        "val_mc_losses": ckpt.get("val_mc_losses", []),
+        "val_ei_losses": ckpt.get("val_ei_losses", []),
+    }
+
+    return model, optimizer, ckpt.get("epoch", 1), train_curves, val_curves
 
     
 
@@ -344,9 +304,16 @@ print(f"Experiment: {exp_name}")
 if args.from_checkpoint == True:
     with open(f"output/{exp_name}/config.yaml", "r") as file:
         config = yaml.safe_load(file)
+
+    with open(args.config, "r") as file:
+        new_config = yaml.safe_load(file)
+    
+    epochs = new_config['training']["epochs"]
 else:
     with open(args.config, "r") as file:
         config = yaml.safe_load(file)
+
+    epochs = config['training']["epochs"]
 
 
 output_dir = os.path.join(config["experiment"]["output_dir"], exp_name)
@@ -371,7 +338,6 @@ target_weight = config["model"]["losses"]["ei_loss"]["weight"]
 warmup = config["model"]["losses"]["ei_loss"]["warmup"]
 duration = config["model"]["losses"]["ei_loss"]["duration"]
 
-epochs = config["training"]["epochs"]
 save_interval = config["training"]["save_interval"]
 plot_interval = config["training"]["plot_interval"]
 device = torch.device(config["training"]["device"])
@@ -450,16 +416,20 @@ physics = DynamicRadialPhysics(
 
 datalayer = RadialDCLayer(physics=physics)
 
-backbone = CRNN(
-    num_cascades=config["model"]["cascades"],
-    chans=config["model"]["channels"],
-    datalayer=datalayer,
-).to(device)
+if config["model"]["name"] == "CRNN":
+    backbone = CRNN(
+        num_cascades=config["model"]["cascades"],
+        chans=config["model"]["channels"],
+        datalayer=datalayer,
+    ).to(device)
 
-model = ArtifactRemovalCRNN(backbone_net=backbone).to(device)
+    model = ArtifactRemovalCRNN(backbone_net=backbone).to(device)
+elif config["model"]["name"] == "LSFPNet":
+    lsfp_backbone = LSFPNet(LayerNo=config["model"]["num_layers"], channels=config['model']['channels'])
+    model = ArtifactRemovalLSFPNet(lsfp_backbone).to(device)
+else:
+    raise(ValueError("Unsupported model."))
 
-
-# define loss functions and optimizer
 optimizer = torch.optim.Adam(
     model.parameters(),
     lr=config["model"]["optimizer"]["lr"],
@@ -467,6 +437,15 @@ optimizer = torch.optim.Adam(
     eps=config["model"]["optimizer"]["eps"],
     weight_decay=config["model"]["optimizer"]["weight_decay"],
 )
+
+# Load the checkpoint to resume training
+if args.from_checkpoint == True:
+    checkpoint_file = f'output/{exp_name}/{exp_name}_model.pth'
+    model, optimizer, start_epoch, train_curves, val_curves = load_checkpoint(model, optimizer, checkpoint_file)
+    print("start epoch: ", start_epoch)
+else:
+    start_epoch = 1
+
 
 # define transformations and loss functions
 mc_loss_fn = MCLoss()
@@ -519,13 +498,20 @@ with torch.no_grad():
     )
 print("--- ZF baseline image saved to output directory. Starting training. ---")
 
-
-train_mc_losses = []
-val_mc_losses = []
-train_ei_losses = []
-val_ei_losses = []
-weighted_train_mc_losses = []
-weighted_train_ei_losses = []
+if args.from_checkpoint:
+    train_mc_losses = train_curves["train_mc_losses"]
+    val_mc_losses = val_curves["val_mc_losses"]
+    train_ei_losses = train_curves["train_ei_losses"]
+    val_ei_losses = val_curves["val_ei_losses"]
+    weighted_train_mc_losses = train_curves["weighted_train_mc_losses"]
+    weighted_train_ei_losses = train_curves["weighted_train_ei_losses"]
+else:
+    train_mc_losses = []
+    val_mc_losses = []
+    train_ei_losses = []
+    val_ei_losses = []
+    weighted_train_mc_losses = []
+    weighted_train_ei_losses = []
 
 iteration_count = 0
 
@@ -589,235 +575,264 @@ if args.from_checkpoint == False:
         val_ei_losses.append(step0_val_ei_loss)
 
 # Training Loop
-for epoch in range(start_epoch, epochs + 1):
-    model.train()
-    running_mc_loss = 0.0
-    running_ei_loss = 0.0
-    # turn on anomaly detection for debugging but slows down training
-    with torch.autograd.set_detect_anomaly(False):
-        train_loader_tqdm = tqdm(
-            train_loader, desc=f"Epoch {epoch}/{epochs}  Training", unit="batch"
-        )
-        # measured_kspace shape: (B, C, I, S, T) = 1, 1, 2, 23040, 8
-        for measured_kspace, csmap, grasp_img in train_loader_tqdm:  # measured_kspace shape: (B, C, I, S, T)
-            iteration_count += 1
-            optimizer.zero_grad()
+if (epochs + 1) == start_epoch:
+    raise(ValueError("Full training epochs already complete."))
 
-            x_recon = model(
-                measured_kspace.to(device), physics, csmap
-            )  # model output shape: (B, C, T, H, W)
+else: 
 
-            mc_loss = mc_loss_fn(measured_kspace.to(device), x_recon, physics, csmap)
-            running_mc_loss += mc_loss.item()
-
-            if use_ei_loss:
-                # x_recon: reconstructed image
-                ei_loss, t_img = ei_loss_fn(
-                    x_recon, physics, model, csmap
-                )
-
-                ei_loss_weight = get_cosine_ei_weight(
-                    current_epoch=epoch,
-                    warmup_epochs=warmup,
-                    schedule_duration=duration,
-                    target_weight=target_weight
-                )
-
-                print(f"Epoch {epoch:2d}: EI Weight = {ei_loss_weight:.8f}")
-                
-                running_ei_loss += ei_loss.item()
-                total_loss = mc_loss * mc_loss_weight + ei_loss * ei_loss_weight
-                train_loader_tqdm.set_postfix(
-                    mc_loss=mc_loss.item(), ei_loss=ei_loss.item()
-                )
-
-            else:
-                total_loss = mc_loss
-                train_loader_tqdm.set_postfix(mc_loss=mc_loss.item())
-
-            if torch.isnan(total_loss):
-                print(
-                    "!!! ERROR: total_loss is NaN before backward pass. Aborting. !!!"
-                )
-                raise RuntimeError("total_loss is NaN")
-
-            total_loss.backward()
-            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
-            optimizer.step()
-
-            if epoch % save_interval == 0:
-                plot_reconstruction_sample(
-                    x_recon,
-                    f"Training Sample - Epoch {epoch}",
-                    f"train_sample_epoch_{epoch}",
-                    output_dir,
-                    grasp_img
-                )
-
-                plot_enhancement_curve(
-                    x_recon,
-                    output_filename = os.path.join(output_dir, 'enhancement_curves', f'train_sample_enhancement_curve_epoch_{epoch}.png'))
-                
-                plot_enhancement_curve(
-                    grasp_img,
-                    output_filename = os.path.join(output_dir, 'enhancement_curves', f'grasp_sample_enhancement_curve_epoch_{epoch}.png'))
-
-                if use_ei_loss:
-
-                    plot_reconstruction_sample(
-                        t_img,
-                        f"Transformed Train Sample - Epoch {epoch}",
-                        f"transforms/transform_train_sample_epoch_{epoch}",
-                        output_dir,
-                        x_recon,
-                        transform=True
-                    )
-
-        # Calculate and store average epoch losses
-        epoch_train_mc_loss = running_mc_loss / len(train_loader)
-        train_mc_losses.append(epoch_train_mc_loss)
-        weighted_train_mc_losses.append(epoch_train_mc_loss*mc_loss_weight)
-        if use_ei_loss:
-            epoch_train_ei_loss = running_ei_loss / len(train_loader)
-            train_ei_losses.append(epoch_train_ei_loss)
-            weighted_train_ei_losses.append(epoch_train_ei_loss*ei_loss_weight)
-        else:
-            # Append 0 if EI loss is not used to keep lists aligned
-            train_ei_losses.append(0.0)
-            weighted_train_ei_losses.append(0.0)
-
-        # --- Validation Loop ---
-        model.eval()
-        val_running_mc_loss = 0.0
-        val_running_ei_loss = 0.0
-        val_loader_tqdm = tqdm(
-            val_loader,
-            desc=f"Epoch {epoch}/{epochs}  Validation",
-            unit="batch",
-            leave=False,
-        )
-        with torch.no_grad():
-            for val_kspace_batch, val_csmap, val_grasp_img in val_loader_tqdm:
-                # The model takes the raw k-space and physics operator
-                val_x_recon = model(val_kspace_batch.to(device), physics, val_csmap)
-
-                # For MCLoss, compare the physics model's output with the measured k-space.
-                val_y_meas = val_kspace_batch
-                val_mc_loss = mc_loss_fn(val_y_meas.to(device), val_x_recon, physics, val_csmap)
-                val_running_mc_loss += val_mc_loss.item()
-
-                if use_ei_loss:
-                    val_ei_loss, val_t_img = ei_loss_fn(
-                        val_x_recon, physics, model, val_csmap
-                    )
-                    val_running_ei_loss += val_ei_loss.item()
-                    val_loader_tqdm.set_postfix(
-                        val_mc_loss=val_mc_loss.item(), val_ei_loss=val_ei_loss.item()
-                    )
-                else:
-                    val_loader_tqdm.set_postfix(val_mc_loss=val_mc_loss.item())
-
-            # save a sample from the last validation batch of the epoch
-            if epoch % save_interval == 0:
-                plot_reconstruction_sample(
-                    val_x_recon,
-                    f"Validation Sample - Epoch {epoch}",
-                    f"val_sample_epoch_{epoch}",
-                    output_dir,
-                    val_grasp_img
-                )
-
-                plot_enhancement_curve(
-                    val_x_recon,
-                    output_filename = os.path.join(output_dir, 'enhancement_curves', f'val_sample_enhancement_curve_epoch_{epoch}.png'))
-                
-                plot_enhancement_curve(
-                    val_grasp_img,
-                    output_filename = os.path.join(output_dir, 'enhancement_curves', f'val_grasp_sample_enhancement_curve_epoch_{epoch}.png'))
-
-                if use_ei_loss:
-                    plot_reconstruction_sample(
-                        val_t_img,
-                        f"Transformed Validation Sample - Epoch {epoch}",
-                        f"transforms/transform_val_sample_epoch_{epoch}",
-                        output_dir,
-                        val_x_recon,
-                        transform=True
-                    )
-
-
-                # Save the model checkpoint
-                model_save_path = os.path.join(output_dir, f'{exp_name}_model_checkpoint_epoch{epoch}.pth')
-                torch.save(model.state_dict(), model_save_path)
-                print(f'Model saved to {model_save_path}')
-
-
-        # Calculate and store average validation losses
-        epoch_val_mc_loss = val_running_mc_loss / len(val_loader)
-        val_mc_losses.append(epoch_val_mc_loss)
-        if use_ei_loss:
-            epoch_val_ei_loss = val_running_ei_loss / len(val_loader)
-            val_ei_losses.append(epoch_val_ei_loss)
-        else:
-            val_ei_losses.append(0.0)
-
-        # --- Plotting and Logging ---
-        if epoch % save_interval == 0:
-            # Plot MC Loss
-            plt.figure()
-            plt.plot(train_mc_losses, label="Training MC Loss")
-            plt.plot(val_mc_losses, label="Validation MC Loss")
-            plt.xlabel("Epoch")
-            plt.ylabel("MC Loss")
-            plt.title("Measurement Consistency Loss")
-            plt.legend()
-            plt.grid(True)
-            plt.savefig(os.path.join(output_dir, "mc_losses.png"))
-            plt.close()
-
-            if use_ei_loss:
-                # Plot EI Loss
-                plt.figure()
-                plt.plot(train_ei_losses, label="Training EI Loss")
-                plt.plot(val_ei_losses, label="Validation EI Loss")
-                plt.xlabel("Epoch")
-                plt.ylabel("EI Loss")
-                plt.title("Equivariant Imaging Loss")
-                plt.legend()
-                plt.grid(True)
-                plt.savefig(os.path.join(output_dir, "ei_losses.png"))
-                plt.close()
-
-
-                # Plot Weighted Losses
-                plt.figure()
-                plt.plot(weighted_train_mc_losses, label="MC Loss")
-                plt.plot(weighted_train_ei_losses, label="EI Loss")
-                plt.xlabel("Epoch")
-                plt.ylabel("Loss")
-                plt.title("Weighted Training Losses")
-                plt.legend()
-                plt.grid(True)
-                plt.savefig(os.path.join(output_dir, "weighted_losses.png"))
-                plt.close()
-
-
-        # Print epoch summary
-        print(
-            f"Epoch {epoch}: Training MC Loss: {epoch_train_mc_loss:.6f}, Validation MC Loss: {epoch_val_mc_loss:.6f}"
-        )
-        if use_ei_loss:
-            print(
-                f"Epoch {epoch}: Training EI Loss: {epoch_train_ei_loss:.6f}, Validation EI Loss: {epoch_val_ei_loss:.6f}"
+    for epoch in range(start_epoch, epochs + 1):
+        model.train()
+        running_mc_loss = 0.0
+        running_ei_loss = 0.0
+        # turn on anomaly detection for debugging but slows down training
+        with torch.autograd.set_detect_anomaly(False):
+            train_loader_tqdm = tqdm(
+                train_loader, desc=f"Epoch {epoch}/{epochs}  Training", unit="batch"
             )
+            # measured_kspace shape: (B, C, I, S, T) = 1, 1, 2, 23040, 8
+            for measured_kspace, csmap, grasp_img in train_loader_tqdm:  # measured_kspace shape: (B, C, I, S, T)
+                iteration_count += 1
+                optimizer.zero_grad()
+
+                x_recon = model(
+                    measured_kspace.to(device), physics, csmap
+                )  # model output shape: (B, C, T, H, W)
+
+                mc_loss = mc_loss_fn(measured_kspace.to(device), x_recon, physics, csmap)
+                running_mc_loss += mc_loss.item()
+
+                if use_ei_loss:
+                    # x_recon: reconstructed image
+                    ei_loss, t_img = ei_loss_fn(
+                        x_recon, physics, model, csmap
+                    )
+
+                    ei_loss_weight = get_cosine_ei_weight(
+                        current_epoch=epoch,
+                        warmup_epochs=warmup,
+                        schedule_duration=duration,
+                        target_weight=target_weight
+                    )
+
+                    # print(f"Epoch {epoch:2d}: EI Weight = {ei_loss_weight:.8f}")
+                    
+                    running_ei_loss += ei_loss.item()
+                    total_loss = mc_loss * mc_loss_weight + ei_loss * ei_loss_weight
+                    train_loader_tqdm.set_postfix(
+                        mc_loss=mc_loss.item(), ei_loss=ei_loss.item()
+                    )
+
+                else:
+                    total_loss = mc_loss
+                    train_loader_tqdm.set_postfix(mc_loss=mc_loss.item())
+
+                if torch.isnan(total_loss):
+                    print(
+                        "!!! ERROR: total_loss is NaN before backward pass. Aborting. !!!"
+                    )
+                    raise RuntimeError("total_loss is NaN")
+
+                total_loss.backward()
+                torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+                optimizer.step()
+
+                if epoch % save_interval == 0:
+                    plot_reconstruction_sample(
+                        x_recon,
+                        f"Training Sample - Epoch {epoch}",
+                        f"train_sample_epoch_{epoch}",
+                        output_dir,
+                        grasp_img
+                    )
+
+                    plot_enhancement_curve(
+                        x_recon,
+                        output_filename = os.path.join(output_dir, 'enhancement_curves', f'train_sample_enhancement_curve_epoch_{epoch}.png'))
+                    
+                    plot_enhancement_curve(
+                        grasp_img,
+                        output_filename = os.path.join(output_dir, 'enhancement_curves', f'grasp_sample_enhancement_curve_epoch_{epoch}.png'))
+
+                    if use_ei_loss:
+
+                        plot_reconstruction_sample(
+                            t_img,
+                            f"Transformed Train Sample - Epoch {epoch}",
+                            f"transforms/transform_train_sample_epoch_{epoch}",
+                            output_dir,
+                            x_recon,
+                            transform=True
+                        )
+
+            # Calculate and store average epoch losses
+            epoch_train_mc_loss = running_mc_loss / len(train_loader)
+            train_mc_losses.append(epoch_train_mc_loss)
+            weighted_train_mc_losses.append(epoch_train_mc_loss*mc_loss_weight)
+            if use_ei_loss:
+                epoch_train_ei_loss = running_ei_loss / len(train_loader)
+                train_ei_losses.append(epoch_train_ei_loss)
+                weighted_train_ei_losses.append(epoch_train_ei_loss*ei_loss_weight)
+            else:
+                # Append 0 if EI loss is not used to keep lists aligned
+                train_ei_losses.append(0.0)
+                weighted_train_ei_losses.append(0.0)
+
+            # --- Validation Loop ---
+            model.eval()
+            val_running_mc_loss = 0.0
+            val_running_ei_loss = 0.0
+            val_loader_tqdm = tqdm(
+                val_loader,
+                desc=f"Epoch {epoch}/{epochs}  Validation",
+                unit="batch",
+                leave=False,
+            )
+            with torch.no_grad():
+                for val_kspace_batch, val_csmap, val_grasp_img in val_loader_tqdm:
+                    # The model takes the raw k-space and physics operator
+                    val_x_recon = model(val_kspace_batch.to(device), physics, val_csmap)
+
+                    # For MCLoss, compare the physics model's output with the measured k-space.
+                    val_y_meas = val_kspace_batch
+                    val_mc_loss = mc_loss_fn(val_y_meas.to(device), val_x_recon, physics, val_csmap)
+                    val_running_mc_loss += val_mc_loss.item()
+
+                    if use_ei_loss:
+                        val_ei_loss, val_t_img = ei_loss_fn(
+                            val_x_recon, physics, model, val_csmap
+                        )
+                        val_running_ei_loss += val_ei_loss.item()
+                        val_loader_tqdm.set_postfix(
+                            val_mc_loss=val_mc_loss.item(), val_ei_loss=val_ei_loss.item()
+                        )
+                    else:
+                        val_loader_tqdm.set_postfix(val_mc_loss=val_mc_loss.item())
+
+                # save a sample from the last validation batch of the epoch
+                if epoch % save_interval == 0:
+                    plot_reconstruction_sample(
+                        val_x_recon,
+                        f"Validation Sample - Epoch {epoch}",
+                        f"val_sample_epoch_{epoch}",
+                        output_dir,
+                        val_grasp_img
+                    )
+
+                    plot_enhancement_curve(
+                        val_x_recon,
+                        output_filename = os.path.join(output_dir, 'enhancement_curves', f'val_sample_enhancement_curve_epoch_{epoch}.png'))
+                    
+                    plot_enhancement_curve(
+                        val_grasp_img,
+                        output_filename = os.path.join(output_dir, 'enhancement_curves', f'val_grasp_sample_enhancement_curve_epoch_{epoch}.png'))
+
+                    if use_ei_loss:
+                        plot_reconstruction_sample(
+                            val_t_img,
+                            f"Transformed Validation Sample - Epoch {epoch}",
+                            f"transforms/transform_val_sample_epoch_{epoch}",
+                            output_dir,
+                            val_x_recon,
+                            transform=True
+                        )
+
+
+                    # Save the model checkpoint
+                    # model_save_path = os.path.join(output_dir, f'{exp_name}_model_checkpoint_epoch{epoch}.pth')
+                    # torch.save(model.state_dict(), model_save_path)
+                    # print(f'Model saved to {model_save_path}')
+                    train_curves = dict(
+                        train_mc_losses=train_mc_losses,
+                        train_ei_losses=train_ei_losses,
+                        weighted_train_mc_losses=weighted_train_mc_losses,
+                        weighted_train_ei_losses=weighted_train_ei_losses,
+                    )
+                    val_curves = dict(
+                        val_mc_losses=val_mc_losses,
+                        val_ei_losses=val_ei_losses,
+                    )
+                    model_save_path = os.path.join(output_dir, f'{exp_name}_model.pth')
+                    save_checkpoint(model, optimizer, epoch + 1, train_curves, val_curves, model_save_path)
+                    print(f'Model saved to {model_save_path}')
+
+
+            # Calculate and store average validation losses
+            epoch_val_mc_loss = val_running_mc_loss / len(val_loader)
+            val_mc_losses.append(epoch_val_mc_loss)
+            if use_ei_loss:
+                epoch_val_ei_loss = val_running_ei_loss / len(val_loader)
+                val_ei_losses.append(epoch_val_ei_loss)
+            else:
+                val_ei_losses.append(0.0)
+
+            # --- Plotting and Logging ---
+            if epoch % save_interval == 0:
+                # Plot MC Loss
+                plt.figure()
+                plt.plot(train_mc_losses, label="Training MC Loss")
+                plt.plot(val_mc_losses, label="Validation MC Loss")
+                plt.xlabel("Epoch")
+                plt.ylabel("MC Loss")
+                plt.title("Measurement Consistency Loss")
+                plt.legend()
+                plt.grid(True)
+                plt.savefig(os.path.join(output_dir, "mc_losses.png"))
+                plt.close()
+
+                if use_ei_loss:
+                    # Plot EI Loss
+                    plt.figure()
+                    plt.plot(train_ei_losses, label="Training EI Loss")
+                    plt.plot(val_ei_losses, label="Validation EI Loss")
+                    plt.xlabel("Epoch")
+                    plt.ylabel("EI Loss")
+                    plt.title("Equivariant Imaging Loss")
+                    plt.legend()
+                    plt.grid(True)
+                    plt.savefig(os.path.join(output_dir, "ei_losses.png"))
+                    plt.close()
+
+
+                    # Plot Weighted Losses
+                    plt.figure()
+                    plt.plot(weighted_train_mc_losses, label="MC Loss")
+                    plt.plot(weighted_train_ei_losses, label="EI Loss")
+                    plt.xlabel("Epoch")
+                    plt.ylabel("Loss")
+                    plt.title("Weighted Training Losses")
+                    plt.legend()
+                    plt.grid(True)
+                    plt.savefig(os.path.join(output_dir, "weighted_losses.png"))
+                    plt.close()
+
+
+            # Print epoch summary
+            print(
+                f"Epoch {epoch}: Training MC Loss: {epoch_train_mc_loss:.6f}, Validation MC Loss: {epoch_val_mc_loss:.6f}"
+            )
+            if use_ei_loss:
+                print(
+                    f"Epoch {epoch}: Training EI Loss: {epoch_train_ei_loss:.6f}, Validation EI Loss: {epoch_val_ei_loss:.6f}"
+                )
 
 
 # Save the model at the end of training
-model_save_path = os.path.join(output_dir, f'{exp_name}_model_checkpoint.pth')
-torch.save(model.state_dict(), model_save_path)
+# model_save_path = os.path.join(output_dir, f'{exp_name}_model_checkpoint.pth')
+# torch.save(model.state_dict(), model_save_path)
+# print(f'Model saved to {model_save_path}')
+train_curves = dict(
+    train_mc_losses=train_mc_losses,
+    train_ei_losses=train_ei_losses,
+    weighted_train_mc_losses=weighted_train_mc_losses,
+    weighted_train_ei_losses=weighted_train_ei_losses,
+)
+val_curves = dict(
+    val_mc_losses=val_mc_losses,
+    val_ei_losses=val_ei_losses,
+)
+model_save_path = os.path.join(output_dir, f'{exp_name}_model.pth')
+save_checkpoint(model, optimizer, epochs + 1, train_curves, val_curves, model_save_path)
 print(f'Model saved to {model_save_path}')
 
-
-# delete all other checkpoints for this run after the model is saved
 
 

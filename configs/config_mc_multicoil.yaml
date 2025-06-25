@@ -25,7 +25,7 @@ dataloader:
 
 # Model settings
 model:
-  name: "DDEI"
+  name: "CRNN"
   cascades: 2
   channels: 64
   optimizer:
@@ -52,7 +52,7 @@ model:
 
 # Training settings
 training:
-  epochs: 25
+  epochs: 50
   save_interval: 1
   plot_interval: 20
   device: "cuda"  # or "cpu"

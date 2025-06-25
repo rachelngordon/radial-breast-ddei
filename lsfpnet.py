@@ -180,8 +180,8 @@ class LSFPNet(nn.Module):
 
     def forward(self, M0, param_E, param_d):
 
-        M0 = M0[..., 0] + 1j * M0[..., 1]
-        param_d = param_d[..., 0] + 1j * param_d[..., 1]
+        # M0 = M0[..., 0] + 1j * M0[..., 1]
+        # param_d = param_d[..., 0] + 1j * param_d[..., 1]
 
         nx, ny, nt = M0.size()
         L = torch.zeros([nx * ny, nt], dtype=dtype).to(param_d.device)
@@ -242,24 +242,14 @@ class ArtifactRemovalLSFPNet(nn.Module):
         scale = zf.abs().max()                       # scalar, grads OK
         return zf / scale, data / scale, scale
 
-    def forward(self, y, physics, csmap, **kwargs):
+    def forward(self, y, E, csmap, **kwargs):
+
         # 1. Get the initial ZF recon. This defines our target energy/scale.
-        x_init = physics.A_adjoint(y, csmap)
+        x_init = E(inv=True, data=y)
 
         # 2. Permute and normalize the input for the network
         # x_init_permuted = rearrange(x_init, "b c t h w -> b h w t c")
         x_init_norm, y_norm, scale = self._normalise(x_init, y)
-
-        E  = EWrapper(physics, csmap)
-
-        # 3. Get the raw, high-magnitude output from the backbone
-        # NOTE: only works with batch size 1
-        if len(y_norm.shape) == 6:
-            y_norm = rearrange(y_norm[0], 'c t co sp sam -> t co sp sam c')
-        elif len(y_norm.shape) == 5:
-            y_norm = rearrange(y_norm[0], 'c t sp sam -> t sp sam c')
-
-        x_init_norm = rearrange(x_init_norm[0], 'c t h w -> t h w c')
 
         L, S, *_ = self.backbone_net(x_init_norm, E, y_norm)
 

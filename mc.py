@@ -4,6 +4,7 @@ import torch
 from deepinv.loss.loss import Loss
 from deepinv.loss.metric.metric import Metric
 from deepinv.transform.base import Transform
+from radial import to_torch_complex
 
 
 class MCLoss(Loss):
@@ -30,8 +31,9 @@ class MCLoss(Loss):
         super(MCLoss, self).__init__()
         self.name = "mc"
         self.metric = metric
+        self.device = torch.device("cuda")
 
-    def forward(self, y, x_net, physics, csmap, **kwargs):
+    def forward(self, y, x_net, physics, csmap, model, **kwargs):
         r"""
         Computes the measurement splitting loss
 
@@ -40,4 +42,14 @@ class MCLoss(Loss):
         :param deepinv.physics.Physics physics: forward operator associated with the measurements.
         :return: (:class:`torch.Tensor`) loss.
         """
-        return self.metric(physics.A(x_net, csmap), y)
+        if model == "CRNN":
+            return self.metric(physics.A(x_net, csmap), y)
+        else:
+            x_net = to_torch_complex(x_net)
+
+            y_hat = physics(inv=False, data=x_net).to(self.device)
+
+            y_hat = torch.stack([y_hat.real, y_hat.imag], dim=-1)
+            y = torch.stack([y.real, y.imag], dim=-1)
+
+            return self.metric(y_hat, y)

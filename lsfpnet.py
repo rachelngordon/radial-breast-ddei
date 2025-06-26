@@ -54,15 +54,15 @@ class BasicBlock(nn.Module):
         self.conv2_backward_s = nn.Parameter(init.xavier_normal_(torch.Tensor(self.channels, self.channels, 3, 3, 3)))
         self.conv3_backward_s = nn.Parameter(init.xavier_normal_(torch.Tensor(1, self.channels, 3, 3, 3)))
 
-    def forward(self, M0, param_E, param_d, L, S, pt_L, pt_S, p_L, p_S):
+    def forward(self, M0, param_E, param_d, L, S, pt_L, pt_S, p_L, p_S, csmaps):
 
         c = self.lambda_step / self.gamma
         nx, ny, nt = M0.size()
 
         # gradient
         temp_data = torch.reshape(L + S, [nx, ny, nt])
-        temp_data = param_E(inv=False, data=temp_data).to(param_d.device)
-        gradient = param_E(inv=True, data=temp_data - param_d)
+        temp_data = param_E(inv=False, data=temp_data, smaps=csmaps).to(param_d.device)
+        gradient = param_E(inv=True, data=temp_data - param_d, smaps=csmaps)
         gradient = torch.reshape(gradient, [nx * ny, nt]).to(param_d.device)
 
         # pb_L
@@ -178,7 +178,7 @@ class LSFPNet(nn.Module):
         self.fcs = nn.ModuleList(onelayer)
 
 
-    def forward(self, M0, param_E, param_d):
+    def forward(self, M0, param_E, param_d, csmap):
 
         # M0 = M0[..., 0] + 1j * M0[..., 1]
         # param_d = param_d[..., 0] + 1j * param_d[..., 1]
@@ -195,7 +195,7 @@ class LSFPNet(nn.Module):
         layers_adj_S = []
 
         for ii in range(self.LayerNo):
-            [L, S, layer_adj_L, layer_adj_S, pt_L, pt_S, p_L, p_S] = self.fcs[ii](M0, param_E, param_d, L, S, pt_L, pt_S, p_L, p_S)
+            [L, S, layer_adj_L, layer_adj_S, pt_L, pt_S, p_L, p_S] = self.fcs[ii](M0, param_E, param_d, L, S, pt_L, pt_S, p_L, p_S, csmap)
             layers_adj_L.append(layer_adj_L)
             layers_adj_S.append(layer_adj_S)
 
@@ -245,13 +245,13 @@ class ArtifactRemovalLSFPNet(nn.Module):
     def forward(self, y, E, csmap, **kwargs):
 
         # 1. Get the initial ZF recon. This defines our target energy/scale.
-        x_init = E(inv=True, data=y)
+        x_init = E(inv=True, data=y, smaps=csmap)
 
         # 2. Permute and normalize the input for the network
         # x_init_permuted = rearrange(x_init, "b c t h w -> b h w t c")
         x_init_norm, y_norm, scale = self._normalise(x_init, y)
 
-        L, S, *_ = self.backbone_net(x_init_norm, E, y_norm)
+        L, S, *_ = self.backbone_net(x_init_norm, E, y_norm, csmap)
 
         recon = (L + S) * scale                  # rescale to original units
 

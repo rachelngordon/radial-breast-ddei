@@ -5,6 +5,8 @@ import torch.nn as nn
 from deepinv.loss.loss import Loss
 from deepinv.loss.metric.metric import Metric
 from deepinv.transform.base import Transform
+from einops import rearrange
+from radial import to_torch_complex
 
 
 class EILoss(Loss):
@@ -43,6 +45,7 @@ class EILoss(Loss):
     def __init__(
         self,
         transform: Transform,
+        model_type: str,
         metric: Union[Metric, nn.Module] = torch.nn.MSELoss(),
         apply_noise=True,
         weight=1.0,
@@ -57,6 +60,7 @@ class EILoss(Loss):
         self.T = transform
         self.noise = apply_noise
         self.no_grad = no_grad
+        self.model_type = model_type
 
     def forward(self, x_net, physics, model, csmap, **kwargs):
         r"""
@@ -78,13 +82,21 @@ class EILoss(Loss):
         else:
             x2 = self.T(x_net)
 
-        if self.noise:
-            # NOTE: need to pass csmap for multi coil imp
-            y = physics(x2, csmap)
-        else:
-            y = physics.A(x2, csmap)
+        if self.model_type == "CRNN":
+            if self.noise:
+                # NOTE: need to pass csmap for multi coil imp
+                y = physics(x2, csmap)
+            else:
+                y = physics.A(x2, csmap)
 
-        x3 = model(y, physics, csmap)
+            x3 = model(y, physics, csmap)
+
+        elif self.model_type == "LSFPNet":
+
+            x2_complex = to_torch_complex(x2)
+            y = physics(inv=False, data=x2_complex, smaps=csmap).to(csmap.device)
+        
+            x3 = model(y, physics, csmap)
 
         loss_ei = self.weight * self.metric(x3, x2)
         return loss_ei, x2

@@ -27,13 +27,14 @@ class MCLoss(Loss):
     :param Metric, torch.nn.Module metric: metric used for computing data consistency, which is set as the mean squared error by default.
     """
 
-    def __init__(self, metric: Union[Metric, torch.nn.Module] = torch.nn.MSELoss()):
+    def __init__(self, model_type, metric: Union[Metric, torch.nn.Module] = torch.nn.MSELoss()):
         super(MCLoss, self).__init__()
         self.name = "mc"
         self.metric = metric
         self.device = torch.device("cuda")
+        self.model_type = model_type
 
-    def forward(self, y, x_net, physics, csmap, model, **kwargs):
+    def forward(self, y, x_net, physics, csmap, **kwargs):
         r"""
         Computes the measurement splitting loss
 
@@ -42,12 +43,12 @@ class MCLoss(Loss):
         :param deepinv.physics.Physics physics: forward operator associated with the measurements.
         :return: (:class:`torch.Tensor`) loss.
         """
-        if model == "CRNN":
+        if self.model_type == "CRNN":
             return self.metric(physics.A(x_net, csmap), y)
-        else:
+        elif self.model_type == "LSFPNet":
             x_net = to_torch_complex(x_net)
 
-            y_hat = physics(inv=False, data=x_net).to(self.device)
+            y_hat = physics(inv=False, data=x_net, smaps=csmap).to(self.device)
 
             y_hat = torch.stack([y_hat.real, y_hat.imag], dim=-1)
             y = torch.stack([y.real, y.imag], dim=-1)

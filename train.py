@@ -126,6 +126,7 @@ def plot_enhancement_curve(
         output_filename (str, optional): If provided, saves the plot to this file path.
                                          Defaults to None (displays plot).
     """
+
     # --- 1. Input Validation ---
     if not 0 < percentile < 100:
         raise ValueError("Percentile must be between 0 and 100.")
@@ -228,6 +229,8 @@ def plot_reconstruction_sample(x_recon, title, filename, output_dir, grasp_img=N
 
     if x_recon.shape[1] == 2:
         x_recon_mag = torch.sqrt(x_recon[:, 0, ...] ** 2 + x_recon[:, 1, ...] ** 2)
+    else:
+        x_recon_mag = x_recon
 
     grasp_img_mag = torch.sqrt(grasp_img[:, 0, ...] ** 2 + grasp_img[:, 1, ...] ** 2)
 
@@ -256,6 +259,7 @@ def plot_reconstruction_sample(x_recon, title, filename, output_dir, grasp_img=N
             img = x_recon_mag[batch_idx, t, :, :].cpu().detach().numpy()
         else:
             img = x_recon_mag[batch_idx, ..., t].cpu().detach().numpy()
+
 
         grasp_img = grasp_img_mag[batch_idx, t, :, :].cpu().detach().numpy()
 
@@ -402,6 +406,8 @@ plot_interval = config["training"]["plot_interval"]
 device = torch.device(config["training"]["device"])
 start_epoch = 1
 
+model_type = config["model"]["name"]
+
 H, W = config["data"]["height"], config["data"]["width"]
 N_time, N_samples, N_coils = (
     config["data"]["timeframes"],
@@ -464,18 +470,16 @@ val_loader = DataLoader(
 )
 
 
-# define physics operator
-physics = DynamicRadialPhysics(
+if model_type == "CRNN":
+    physics = DynamicRadialPhysics(
     im_size=(H, W, N_time),
     N_spokes=N_spokes,
     N_samples=N_samples,
     N_time=N_time,
     N_coils=N_coils,
-)
+    )
 
-datalayer = RadialDCLayer(physics=physics)
-
-if config["model"]["name"] == "CRNN":
+    datalayer = RadialDCLayer(physics=physics)
     backbone = CRNN(
         num_cascades=config["model"]["cascades"],
         chans=config["model"]["channels"],
@@ -483,9 +487,8 @@ if config["model"]["name"] == "CRNN":
     ).to(device)
 
     model = ArtifactRemovalCRNN(backbone_net=backbone).to(device)
-elif config["model"]["name"] == "LSFPNet":
-    lsfp_backbone = LSFPNet(LayerNo=config["model"]["num_layers"], channels=config['model']['channels'])
-    model = ArtifactRemovalLSFPNet(lsfp_backbone).to(device)
+
+elif model_type == "LSFPNet":
 
     # NOTE: currently processing all 8 timeframes as one group, can be changed later
     ktraj, dcomp, nufft_ob, adjnufft_ob = prep_nufft(N_samples, N_spokes, N_time)
@@ -493,6 +496,11 @@ elif config["model"]["name"] == "LSFPNet":
     dcomp = dcomp.to(device)
     nufft_ob = nufft_ob.to(device)
     adjnufft_ob = adjnufft_ob.to(device)
+
+    physics = MCNUFFT(nufft_ob, adjnufft_ob, ktraj, dcomp)
+
+    lsfp_backbone = LSFPNet(LayerNo=config["model"]["num_layers"], channels=config['model']['channels'])
+    model = ArtifactRemovalLSFPNet(lsfp_backbone).to(device)
 
 else:
     raise(ValueError("Unsupported model."))
@@ -515,7 +523,7 @@ else:
 
 
 # define transformations and loss functions
-mc_loss_fn = MCLoss()
+mc_loss_fn = MCLoss(model_type=model_type)
 
 if use_ei_loss:
     # rotate = VideoRotate(n_trans=1, interpolation_mode=InterpolationMode.BILINEAR)
@@ -529,15 +537,15 @@ if use_ei_loss:
 
     # NOTE: set apply_noise = FALSE for now multi coil implementation
     if config['model']['losses']['ei_loss']['temporal_transform'] == "subsample":
-        ei_loss_fn = EILoss(subsample | (diffeo | rotate))
+        ei_loss_fn = EILoss(subsample | (diffeo | rotate), model_type=model_type)
     elif config['model']['losses']['ei_loss']['temporal_transform'] == "monophasic":
-        ei_loss_fn = EILoss(monophasic_warp | (diffeo | rotate))
+        ei_loss_fn = EILoss(monophasic_warp | (diffeo | rotate), model_type=model_type)
     elif config['model']['losses']['ei_loss']['temporal_transform'] == "noise":
-        ei_loss_fn = EILoss(temp_noise | (diffeo | rotate))
+        ei_loss_fn = EILoss(temp_noise | (diffeo | rotate), model_type=model_type)
     elif config['model']['losses']['ei_loss']['temporal_transform'] == "reverse":
-        ei_loss_fn = EILoss(time_reverse | (diffeo | rotate))
+        ei_loss_fn = EILoss(time_reverse | (diffeo | rotate), model_type=model_type)
     elif config['model']['losses']['ei_loss']['temporal_transform'] == "all":
-        ei_loss_fn = EILoss((subsample | monophasic_warp | temp_noise | time_reverse) | (diffeo | rotate))
+        ei_loss_fn = EILoss((subsample | monophasic_warp | temp_noise | time_reverse) | (diffeo | rotate), model_type=model_type)
     else:
         raise(ValueError, "Unsupported Temporal Transform.")
 
@@ -553,7 +561,16 @@ with torch.no_grad():
 
     # Perform the simplest reconstruction: A_adjoint(y)
     # This is the "zero-filled" image (or more accurately, the gridded image)
-    x_zf = physics.A_adjoint(val_kspace_sample, csmap)
+    if model_type == "CRNN":
+        x_zf = physics.A_adjoint(val_kspace_sample, csmap)
+    elif model_type == "LSFPNet":
+        val_kspace_sample = to_torch_complex(val_kspace_sample).squeeze()
+        val_kspace_sample = rearrange(val_kspace_sample, 't co sp sam -> co (sp sam) t')
+        
+        x_zf = physics(inv=True, data=val_kspace_sample, smaps=csmap.to(device))
+
+        # compute magnitude and add batch dimx
+        x_zf = torch.abs(x_zf).unsqueeze(0)
 
     # Plot and save the image using your existing function
     plot_reconstruction_sample(
@@ -595,12 +612,12 @@ if args.from_checkpoint == False:
         # Evaluate on training data
         for measured_kspace, csmap, grasp_img in tqdm(train_loader, desc="Step 0 Training Evaluation"):
 
-            if config['model']['name'] == "LSFPNet":
+            if model_type == "LSFPNet":
 
                 measured_kspace = to_torch_complex(measured_kspace).squeeze()
                 measured_kspace = rearrange(measured_kspace, 't co sp sam -> co (sp sam) t')
 
-                physics = MCNUFFT(nufft_ob, adjnufft_ob, ktraj, dcomp, csmap.to(device))
+                csmap = csmap.to(device).to(measured_kspace.dtype)
 
                 x_recon = model(
                     measured_kspace.to(device), physics, csmap
@@ -612,7 +629,7 @@ if args.from_checkpoint == False:
                     measured_kspace.to(device), physics, csmap
                 )  # model output shape: (B, C, T, H, W)
 
-            mc_loss = mc_loss_fn(measured_kspace.to(device), x_recon, physics, csmap, model=config['model']['name'])
+            mc_loss = mc_loss_fn(measured_kspace.to(device), x_recon, physics, csmap)
             initial_train_mc_loss += mc_loss.item()
 
             if use_ei_loss:
@@ -633,12 +650,12 @@ if args.from_checkpoint == False:
         # Evaluate on validation data
         for measured_kspace, csmap, grasp_img in tqdm(val_loader, desc="Step 0 Validation Evaluation"):
 
-            if config['model']['name'] == "LSFPNet":
+            if model_type == "LSFPNet":
 
                 measured_kspace = to_torch_complex(measured_kspace).squeeze()
                 measured_kspace = rearrange(measured_kspace, 't co sp sam -> co (sp sam) t')
 
-                physics = MCNUFFT(nufft_ob, adjnufft_ob, ktraj, dcomp, csmap.to(device))
+                csmap = csmap.to(device).to(measured_kspace.dtype)
 
                 x_recon = model(
                     measured_kspace.to(device), physics, csmap
@@ -650,7 +667,7 @@ if args.from_checkpoint == False:
                     measured_kspace.to(device), physics, csmap
                 )  # model output shape: (B, C, T, H, W)
 
-            mc_loss = mc_loss_fn(measured_kspace.to(device), x_recon, physics, csmap, model=config['model']['name'])
+            mc_loss = mc_loss_fn(measured_kspace.to(device), x_recon, physics, csmap)
             initial_val_mc_loss += mc_loss.item()
 
             if use_ei_loss:
@@ -688,12 +705,12 @@ else:
                 iteration_count += 1
                 optimizer.zero_grad()
 
-                if config['model']['name'] == "LSFPNet":
+                if model_type == "LSFPNet":
 
                     measured_kspace = to_torch_complex(measured_kspace).squeeze()
                     measured_kspace = rearrange(measured_kspace, 't co sp sam -> co (sp sam) t')
 
-                    physics = MCNUFFT(nufft_ob, adjnufft_ob, ktraj, dcomp, csmap.to(device))
+                    csmap = csmap.to(device).to(measured_kspace.dtype)
 
                     x_recon = model(
                         measured_kspace.to(device), physics, csmap
@@ -704,7 +721,7 @@ else:
                         measured_kspace.to(device), physics, csmap
                     )  # model output shape: (B, C, T, H, W)
 
-                mc_loss = mc_loss_fn(measured_kspace.to(device), x_recon, physics, csmap, model=config['model']['name'])
+                mc_loss = mc_loss_fn(measured_kspace.to(device), x_recon, physics, csmap)
                 running_mc_loss += mc_loss.item()
 
                 if use_ei_loss:
@@ -751,8 +768,10 @@ else:
                         grasp_img
                     )
 
+                    x_recon_reshaped = rearrange(x_recon, 'b c h w t -> b c t h w')
+
                     plot_enhancement_curve(
-                        x_recon,
+                        x_recon_reshaped,
                         output_filename = os.path.join(output_dir, 'enhancement_curves', f'train_sample_enhancement_curve_epoch_{epoch}.png'))
                     
                     plot_enhancement_curve(
@@ -796,12 +815,12 @@ else:
             with torch.no_grad():
                 for val_kspace_batch, val_csmap, val_grasp_img in val_loader_tqdm:
 
-                    if config['model']['name'] == "LSFPNet":
+                    if model_type == "LSFPNet":
 
                         val_kspace_batch = to_torch_complex(val_kspace_batch).squeeze()
                         val_kspace_batch = rearrange(val_kspace_batch, 't co sp sam -> co (sp sam) t')
 
-                        physics = MCNUFFT(nufft_ob, adjnufft_ob, ktraj, dcomp, val_csmap.to(device))
+                        val_csmap = val_csmap.to(device).to(val_kspace_batch.dtype)
 
                         val_x_recon = model(
                             val_kspace_batch.to(device), physics, val_csmap
@@ -813,7 +832,7 @@ else:
 
                     # For MCLoss, compare the physics model's output with the measured k-space.
                     val_y_meas = val_kspace_batch
-                    val_mc_loss = mc_loss_fn(val_y_meas.to(device), val_x_recon, physics, val_csmap, model=config['model']['name'])
+                    val_mc_loss = mc_loss_fn(val_y_meas.to(device), val_x_recon, physics, val_csmap)
                     val_running_mc_loss += val_mc_loss.item()
 
                     if use_ei_loss:
@@ -837,8 +856,10 @@ else:
                         val_grasp_img
                     )
 
+                    val_x_recon_reshaped = rearrange(val_x_recon, 'b c h w t -> b c t h w')
+
                     plot_enhancement_curve(
-                        val_x_recon,
+                        val_x_recon_reshaped,
                         output_filename = os.path.join(output_dir, 'enhancement_curves', f'val_sample_enhancement_curve_epoch_{epoch}.png'))
                     
                     plot_enhancement_curve(

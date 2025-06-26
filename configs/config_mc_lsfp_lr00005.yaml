@@ -28,23 +28,23 @@ model:
   name: "LSFPNet"
   num_layers: 8
   cascades: 2
-  channels: 8
+  channels: 16
   optimizer:
     name: "Adam"
-    lr: 0.000005
+    lr: 0.00005
     weight_decay: 0.0
     b1: 0.9
     b2: 0.999
     eps: 0.000000001
   losses:
-    use_ei_loss: true
+    use_ei_loss: false
     mc_loss:
       weight: 1
     ei_loss:
       temporal_transform: "subsample"
       weight: 0.0003
-      warmup: 10
-      duration: 100
+      warmup: 3
+      duration: 5
       subsample_ratio_min: 0.7
       subsample_ratio_max: 0.95
       warp_ratio_min: 0.6
@@ -53,7 +53,7 @@ model:
 
 # Training settings
 training:
-  epochs: 100
+  epochs: 50
   save_interval: 1
   plot_interval: 20
   device: "cuda"  # or "cpu"

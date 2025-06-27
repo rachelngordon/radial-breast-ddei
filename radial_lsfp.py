@@ -14,6 +14,7 @@ class MCNUFFT(nn.Module):
         self.dcomp = torch.squeeze(dcomp)
 
     def forward(self, inv, data, smaps):
+
         data = torch.squeeze(data)  # delete redundant dimension
         Nx = smaps.shape[2]
         Ny = smaps.shape[3]

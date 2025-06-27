@@ -12,7 +12,7 @@ from dataloader import SliceDataset
 # from deepinv.loss import MCLoss#, EILoss
 from deepinv.transform import Transform
 from einops import rearrange
-from radial import DynamicRadialPhysics, RadialDCLayer, to_torch_complex
+from radial import DynamicRadialPhysics, RadialDCLayer, to_torch_complex, MCNUFFT_CRNN
 from torch.utils.data import DataLoader
 from torchvision.transforms import InterpolationMode
 from tqdm import tqdm
@@ -262,7 +262,6 @@ def plot_reconstruction_sample(x_recon, title, filename, output_dir, grasp_img=N
 
 
         grasp_img = grasp_img_mag[batch_idx, t, :, :].cpu().detach().numpy()
-
         ax1 = axes[0, t]
         ax1.imshow(np.rot90(img, 2), cmap="gray")
         ax1.set_title(f"t = {t}")
@@ -470,14 +469,24 @@ val_loader = DataLoader(
 )
 
 
+# NOTE: currently processing all 8 timeframes as one group, can be changed later
+ktraj, dcomp, nufft_ob, adjnufft_ob = prep_nufft(N_samples, N_spokes, N_time)
+ktraj = ktraj.to(device)
+dcomp = dcomp.to(device)
+nufft_ob = nufft_ob.to(device)
+adjnufft_ob = adjnufft_ob.to(device)
+
+
 if model_type == "CRNN":
-    physics = DynamicRadialPhysics(
-    im_size=(H, W, N_time),
-    N_spokes=N_spokes,
-    N_samples=N_samples,
-    N_time=N_time,
-    N_coils=N_coils,
-    )
+    # physics = DynamicRadialPhysics(
+    # im_size=(H, W, N_time),
+    # N_spokes=N_spokes,
+    # N_samples=N_samples,
+    # N_time=N_time,
+    # N_coils=N_coils,
+    # )
+
+    physics = MCNUFFT_CRNN(nufft_ob, adjnufft_ob, ktraj, dcomp, N_time, N_spokes, N_samples, N_coils)
 
     datalayer = RadialDCLayer(physics=physics)
     backbone = CRNN(
@@ -489,13 +498,6 @@ if model_type == "CRNN":
     model = ArtifactRemovalCRNN(backbone_net=backbone).to(device)
 
 elif model_type == "LSFPNet":
-
-    # NOTE: currently processing all 8 timeframes as one group, can be changed later
-    ktraj, dcomp, nufft_ob, adjnufft_ob = prep_nufft(N_samples, N_spokes, N_time)
-    ktraj = ktraj.to(device)
-    dcomp = dcomp.to(device)
-    nufft_ob = nufft_ob.to(device)
-    adjnufft_ob = adjnufft_ob.to(device)
 
     physics = MCNUFFT(nufft_ob, adjnufft_ob, ktraj, dcomp)
 

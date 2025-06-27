@@ -2,11 +2,11 @@
 
 # Parameters
 #SBATCH --cpus-per-task=4
-#SBATCH --error=logs/mc_multicoil.err
-#SBATCH --output=logs/mc_multicoil.out
+#SBATCH --error=logs/mc_crnn_new_physics.err
+#SBATCH --output=logs/mc_crnn_new_physics.out
 #SBATCH --exclude=''
 #SBATCH --gpus-per-node=1
-#SBATCH --job-name=mc_multicoil
+#SBATCH --job-name=mc_crnn_new_physics
 #SBATCH --mem-per-gpu=80000
 #SBATCH --nodes=1
 #SBATCH --ntasks-per-node=1
@@ -21,4 +21,4 @@ source /gpfs/data/karczmar-lab/workspaces/rachelgordon/micromamba/etc/profile.d/
 micromamba activate recon_mri
 
 # Run the training script with srun
-python3 train.py --config configs/config_mc_multicoil.yaml --exp_name mc_multicoil
+python3 train.py --config configs/config_mc_multicoil.yaml --exp_name mc_crnn_new_physics

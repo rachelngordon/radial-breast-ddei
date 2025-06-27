@@ -9,6 +9,7 @@ from torchkbnufft import KbNufft, KbNufftAdjoint
 from noise import ZeroNoise
 import warnings
 from torch import Tensor
+from time import time
 
 
 def to_torch_complex(x: torch.Tensor):
@@ -555,3 +556,113 @@ class RadialDCLayer(nn.Module):
         x_dc_permuted = rearrange(x_dc_img, "b c t h w -> b h w t c")
 
         return x_dc_permuted
+
+
+
+dtype = torch.complex64
+
+class MCNUFFT_CRNN(nn.Module):
+    def __init__(self, nufft_ob, adjnufft_ob, ktraj, dcomp, N_time, N_spokes, N_samples, N_coils):
+        super(MCNUFFT_CRNN, self).__init__()
+        self.nufft_ob = nufft_ob
+        self.adjnufft_ob = adjnufft_ob
+        self.ktraj = torch.squeeze(ktraj)
+        self.dcomp = torch.squeeze(dcomp)
+        self.N_time = N_time
+        self.N_spokes = N_spokes
+        self.N_samples = N_samples
+        self.N_coils = N_coils
+        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+        if self.N_coils == 1:
+            self.mask = torch.ones(1, 2, self.N_time, self.N_spokes, self.N_samples).to(
+                self.device
+            )
+        else:
+            self.mask = torch.ones(1, 2, self.N_time, self.N_coils, self.N_spokes, self.N_samples).to(
+                self.device
+            )
+
+    def A(self, data, smaps):
+
+        data = to_torch_complex(data).squeeze()
+        data = rearrange(data, 't h w -> h w t')
+
+        smaps = smaps.to(data.dtype).to(data.device)
+
+        data = torch.squeeze(data)  # delete redundant dimension
+        Nx = smaps.shape[2]
+        Ny = smaps.shape[3]
+
+        if len(data.shape) > 2:  # multi-frame
+
+            x = torch.zeros([smaps.shape[1], self.ktraj.shape[1], data.shape[-1]], dtype=dtype)
+
+            for ii in range(0, data.shape[-1]):
+                image = data[:, :, ii]
+                k = self.ktraj[:, :, ii]
+
+                image = image.unsqueeze(0).unsqueeze(0)
+                x_temp = self.nufft_ob(image, k, smaps=smaps)
+                x[:, :, ii] = torch.squeeze(x_temp) / np.sqrt(Nx * Ny)
+
+        else:  # single frame
+
+            image = data.unsqueeze(0).unsqueeze(0)
+            x = self.nufft_ob(image, self.ktraj, smaps=smaps)
+            x = torch.squeeze(x) / np.sqrt(Nx * Ny)
+
+        x = rearrange(x, 'co (sp sam) t -> t co sp sam', sp=self.N_spokes).unsqueeze(0)
+        x = from_torch_complex(x)
+
+        return x.to(self.device)
+
+
+    def A_adjoint(self, data, smaps):
+
+        data = to_torch_complex(data).squeeze()
+        data = rearrange(data, 't co sp sam -> co (sp sam) t')
+
+        smaps = smaps.to(data.device)
+
+        data = torch.squeeze(data)  # delete redundant dimension
+        Nx = smaps.shape[2]
+        Ny = smaps.shape[3]
+
+        smaps = smaps.to(dtype)
+
+        if len(data.shape) > 2:  # multi-frame
+
+            x = torch.zeros([Nx, Ny, data.shape[2]], dtype=dtype)
+
+            for ii in range(0, data.shape[2]):
+                kd = data[:, :, ii]
+                k = self.ktraj[:, :, ii]
+                d = self.dcomp[:, ii]
+
+                kd = kd.unsqueeze(0)
+                d = d.unsqueeze(0).unsqueeze(0)
+
+                tt1 = time()
+
+                x_temp = self.adjnufft_ob(kd * d, k, smaps=smaps)
+
+                x[:, :, ii] = torch.squeeze(x_temp) / np.sqrt(Nx * Ny)
+                tt2 = time()
+                # print('adjnufft time is %.6f' % (tt2 - tt1))
+
+                # plt.figure()
+                # plt.imshow(np.abs(x_temp.numpy()), 'gray')
+                # plt.show()
+
+        else:  # single frame
+
+            kd = data.unsqueeze(0)
+            d = self.dcomp.unsqueeze(0).unsqueeze(0)
+            x = self.adjnufft_ob(kd * d, self.ktraj, smaps=smaps)
+            x = torch.squeeze(x) / np.sqrt(Nx * Ny)
+
+        x = from_torch_complex(x.unsqueeze(0))
+        x = rearrange(x, 'b c h w t -> b c t h w')
+
+        return x.to(self.device)

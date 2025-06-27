@@ -11,7 +11,7 @@ from crnn import CRNN, ArtifactRemovalCRNN
 from dataloader import SliceDataset
 from deepinv.transform import Transform
 from einops import rearrange
-from radial import DynamicRadialPhysics, RadialDCLayer, to_torch_complex
+from radial import DynamicRadialPhysics, RadialDCLayer, to_torch_complex, MCNUFFT_CRNN
 from torch.utils.data import DataLoader
 from torchvision.transforms import InterpolationMode
 from tqdm import tqdm
@@ -158,6 +158,8 @@ def plot_reconstruction_sample(x_recon, title, filename, output_dir, grasp_img=N
     os.makedirs(output_dir, exist_ok=True)
     if x_recon.shape[1] == 2:
         x_recon_mag = torch.sqrt(x_recon[:, 0, ...] ** 2 + x_recon[:, 1, ...] ** 2)
+    else:
+        x_recon_mag = x_recon
     grasp_img_mag = torch.sqrt(grasp_img[:, 0, ...] ** 2 + grasp_img[:, 1, ...] ** 2)
     n_timeframes = grasp_img_mag.shape[1]
     fig, axes = plt.subplots(
@@ -169,15 +171,15 @@ def plot_reconstruction_sample(x_recon, title, filename, output_dir, grasp_img=N
     if transform:
         axes[0, 0].set_ylabel("Transformed Image", fontsize=14, labelpad=10)
         axes[1, 0].set_ylabel("Model Output", fontsize=14, labelpad=10)
-    if transform:
-        axes[0, 0].set_ylabel("Transformed Image", fontsize=14, labelpad=10)
-        axes[1, 0].set_ylabel("Model Output", fontsize=14, labelpad=10)
         os.makedirs(os.path.join(output_dir, "transforms"), exist_ok=True)
     else:
         axes[0, 0].set_ylabel("Model Output", fontsize=14, labelpad=10)
         axes[1, 0].set_ylabel("GRASP Benchmark", fontsize=14, labelpad=10)
     for t in range(n_timeframes):
-        img = x_recon_mag[batch_idx, t, :, :].cpu().detach().numpy()
+        if x_recon_mag.shape[1] == n_timeframes:
+            img = x_recon_mag[batch_idx, t, :, :].cpu().detach().numpy()
+        else:
+            img = x_recon_mag[batch_idx, ..., t].cpu().detach().numpy()
         grasp_img = grasp_img_mag[batch_idx, t, :, :].cpu().detach().numpy()
         ax1 = axes[0, t]
         ax1.imshow(np.rot90(img, 2), cmap="gray")
@@ -286,6 +288,7 @@ save_interval = config["training"]["save_interval"]
 plot_interval = config["training"]["plot_interval"]
 device = torch.device(config["training"]["device"])
 start_epoch = 1
+model_type = config["model"]["name"]
 H, W = config["data"]["height"], config["data"]["width"]
 N_time, N_samples, N_coils = (
     config["data"]["timeframes"],
@@ -332,29 +335,24 @@ val_loader = DataLoader(
     shuffle=config["dataloader"]["shuffle"],
     num_workers=config["dataloader"]["num_workers"],
 )
-physics = DynamicRadialPhysics(
-    im_size=(H, W, N_time),
-    N_spokes=N_spokes,
-    N_samples=N_samples,
-    N_time=N_time,
-    N_coils=N_coils,
-)
-datalayer = RadialDCLayer(physics=physics)
-if config["model"]["name"] == "CRNN":
+ktraj, dcomp, nufft_ob, adjnufft_ob = prep_nufft(N_samples, N_spokes, N_time)
+ktraj = ktraj.to(device)
+dcomp = dcomp.to(device)
+nufft_ob = nufft_ob.to(device)
+adjnufft_ob = adjnufft_ob.to(device)
+if model_type == "CRNN":
+    physics = MCNUFFT_CRNN(nufft_ob, adjnufft_ob, ktraj, dcomp, N_time, N_spokes, N_samples, N_coils)
+    datalayer = RadialDCLayer(physics=physics)
     backbone = CRNN(
         num_cascades=config["model"]["cascades"],
         chans=config["model"]["channels"],
         datalayer=datalayer,
     ).to(device)
     model = ArtifactRemovalCRNN(backbone_net=backbone).to(device)
-elif config["model"]["name"] == "LSFPNet":
+elif model_type == "LSFPNet":
+    physics = MCNUFFT(nufft_ob, adjnufft_ob, ktraj, dcomp)
     lsfp_backbone = LSFPNet(LayerNo=config["model"]["num_layers"], channels=config['model']['channels'])
     model = ArtifactRemovalLSFPNet(lsfp_backbone).to(device)
-    ktraj, dcomp, nufft_ob, adjnufft_ob = prep_nufft(N_samples, N_spokes, N_time)
-    ktraj = ktraj.to(device)
-    dcomp = dcomp.to(device)
-    nufft_ob = nufft_ob.to(device)
-    adjnufft_ob = adjnufft_ob.to(device)
 else:
     raise(ValueError("Unsupported model."))
 optimizer = torch.optim.Adam(
@@ -370,7 +368,7 @@ if args.from_checkpoint == True:
     print("start epoch: ", start_epoch)
 else:
     start_epoch = 1
-mc_loss_fn = MCLoss()
+mc_loss_fn = MCLoss(model_type=model_type)
 if use_ei_loss:
     rotate = VideoRotate(n_trans=1, interpolation_mode="bilinear")
     diffeo = VideoDiffeo(n_trans=1, device=device)
@@ -379,15 +377,15 @@ if use_ei_loss:
     temp_noise = TemporalNoise(n_trans=1)
     time_reverse = TimeReverse(n_trans=1)
     if config['model']['losses']['ei_loss']['temporal_transform'] == "subsample":
-        ei_loss_fn = EILoss(subsample | (diffeo | rotate))
+        ei_loss_fn = EILoss(subsample | (diffeo | rotate), model_type=model_type)
     elif config['model']['losses']['ei_loss']['temporal_transform'] == "monophasic":
-        ei_loss_fn = EILoss(monophasic_warp | (diffeo | rotate))
+        ei_loss_fn = EILoss(monophasic_warp | (diffeo | rotate), model_type=model_type)
     elif config['model']['losses']['ei_loss']['temporal_transform'] == "noise":
-        ei_loss_fn = EILoss(temp_noise | (diffeo | rotate))
+        ei_loss_fn = EILoss(temp_noise | (diffeo | rotate), model_type=model_type)
     elif config['model']['losses']['ei_loss']['temporal_transform'] == "reverse":
-        ei_loss_fn = EILoss(time_reverse | (diffeo | rotate))
+        ei_loss_fn = EILoss(time_reverse | (diffeo | rotate), model_type=model_type)
     elif config['model']['losses']['ei_loss']['temporal_transform'] == "all":
-        ei_loss_fn = EILoss((subsample | monophasic_warp | temp_noise | time_reverse) | (diffeo | rotate))
+        ei_loss_fn = EILoss((subsample | monophasic_warp | temp_noise | time_reverse) | (diffeo | rotate), model_type=model_type)
     else:
         raise(ValueError, "Unsupported Temporal Transform.")
 print(
@@ -396,7 +394,13 @@ print(
 with torch.no_grad():
     val_kspace_sample, csmap, grasp_img = next(iter(val_loader))
     val_kspace_sample = val_kspace_sample.to(device)
-    x_zf = physics.A_adjoint(val_kspace_sample, csmap)
+    if model_type == "CRNN":
+        x_zf = physics.A_adjoint(val_kspace_sample, csmap)
+    elif model_type == "LSFPNet":
+        val_kspace_sample = to_torch_complex(val_kspace_sample).squeeze()
+        val_kspace_sample = rearrange(val_kspace_sample, 't co sp sam -> co (sp sam) t')
+        x_zf = physics(inv=True, data=val_kspace_sample, smaps=csmap.to(device))
+        x_zf = torch.abs(x_zf).unsqueeze(0)
     plot_reconstruction_sample(
         x_zf,
         "Zero-Filled (ZF) Reconstruction (Before Training)",
@@ -420,6 +424,59 @@ else:
     weighted_train_mc_losses = []
     weighted_train_ei_losses = []
 iteration_count = 0
+if args.from_checkpoint == False:
+    model.eval()
+    initial_train_mc_loss = 0.0
+    initial_val_mc_loss = 0.0
+    initial_train_ei_loss = 0.0
+    initial_val_ei_loss = 0.0
+    with torch.no_grad():
+        for measured_kspace, csmap, grasp_img in tqdm(train_loader, desc="Step 0 Training Evaluation"):
+            if model_type == "LSFPNet":
+                measured_kspace = to_torch_complex(measured_kspace).squeeze()
+                measured_kspace = rearrange(measured_kspace, 't co sp sam -> co (sp sam) t')
+                csmap = csmap.to(device).to(measured_kspace.dtype)
+                x_recon = model(
+                    measured_kspace.to(device), physics, csmap
+                )
+            else:
+                x_recon = model(
+                    measured_kspace.to(device), physics, csmap
+                )  # model output shape: (B, C, T, H, W)
+            mc_loss = mc_loss_fn(measured_kspace.to(device), x_recon, physics, csmap)
+            initial_train_mc_loss += mc_loss.item()
+            if use_ei_loss:
+                ei_loss, t_img = ei_loss_fn(
+                    x_recon, physics, model, csmap
+                )
+                initial_train_ei_loss += ei_loss.item()
+        step0_train_mc_loss = initial_train_mc_loss / len(train_loader)
+        train_mc_losses.append(step0_train_mc_loss)
+        step0_train_ei_loss = initial_train_ei_loss / len(train_loader)
+        train_ei_losses.append(step0_train_ei_loss)
+        for measured_kspace, csmap, grasp_img in tqdm(val_loader, desc="Step 0 Validation Evaluation"):
+            if model_type == "LSFPNet":
+                measured_kspace = to_torch_complex(measured_kspace).squeeze()
+                measured_kspace = rearrange(measured_kspace, 't co sp sam -> co (sp sam) t')
+                csmap = csmap.to(device).to(measured_kspace.dtype)
+                x_recon = model(
+                    measured_kspace.to(device), physics, csmap
+                )
+            else:
+                x_recon = model(
+                    measured_kspace.to(device), physics, csmap
+                )  # model output shape: (B, C, T, H, W)
+            mc_loss = mc_loss_fn(measured_kspace.to(device), x_recon, physics, csmap)
+            initial_val_mc_loss += mc_loss.item()
+            if use_ei_loss:
+                ei_loss, t_img = ei_loss_fn(
+                    x_recon, physics, model, csmap
+                )
+                initial_val_ei_loss += ei_loss.item()
+        step0_val_mc_loss = initial_val_mc_loss / len(val_loader)
+        val_mc_losses.append(step0_val_mc_loss)
+        step0_val_ei_loss = initial_val_ei_loss / len(val_loader)
+        val_ei_losses.append(step0_val_ei_loss)
 if (epochs + 1) == start_epoch:
     raise(ValueError("Full training epochs already complete."))
 else: 
@@ -434,10 +491,10 @@ else:
             for measured_kspace, csmap, grasp_img in train_loader_tqdm:  # measured_kspace shape: (B, C, I, S, T)
                 iteration_count += 1
                 optimizer.zero_grad()
-                if config['model']['name'] == "LSFPNet":
+                if model_type == "LSFPNet":
                     measured_kspace = to_torch_complex(measured_kspace).squeeze()
                     measured_kspace = rearrange(measured_kspace, 't co sp sam -> co (sp sam) t')
-                    physics = MCNUFFT(nufft_ob, adjnufft_ob, ktraj, dcomp, csmap.to(device))
+                    csmap = csmap.to(device).to(measured_kspace.dtype)
                     x_recon = model(
                         measured_kspace.to(device), physics, csmap
                     )
@@ -445,7 +502,7 @@ else:
                     x_recon = model(
                         measured_kspace.to(device), physics, csmap
                     )  # model output shape: (B, C, T, H, W)
-                mc_loss = mc_loss_fn(measured_kspace.to(device), x_recon, physics, csmap, model=config['model']['name'])
+                mc_loss = mc_loss_fn(measured_kspace.to(device), x_recon, physics, csmap)
                 running_mc_loss += mc_loss.item()
                 if use_ei_loss:
                     ei_loss, t_img = ei_loss_fn(
@@ -481,8 +538,9 @@ else:
                         output_dir,
                         grasp_img
                     )
+                    x_recon_reshaped = rearrange(x_recon, 'b c h w t -> b c t h w')
                     plot_enhancement_curve(
-                        x_recon,
+                        x_recon_reshaped,
                         output_filename = os.path.join(output_dir, 'enhancement_curves', f'train_sample_enhancement_curve_epoch_{epoch}.png'))
                     plot_enhancement_curve(
                         grasp_img,
@@ -517,7 +575,15 @@ else:
             )
             with torch.no_grad():
                 for val_kspace_batch, val_csmap, val_grasp_img in val_loader_tqdm:
-                    val_x_recon = model(val_kspace_batch.to(device), physics, val_csmap)
+                    if model_type == "LSFPNet":
+                        val_kspace_batch = to_torch_complex(val_kspace_batch).squeeze()
+                        val_kspace_batch = rearrange(val_kspace_batch, 't co sp sam -> co (sp sam) t')
+                        val_csmap = val_csmap.to(device).to(val_kspace_batch.dtype)
+                        val_x_recon = model(
+                            val_kspace_batch.to(device), physics, val_csmap
+                        )
+                    else:
+                        val_x_recon = model(val_kspace_batch.to(device), physics, val_csmap)
                     val_y_meas = val_kspace_batch
                     val_mc_loss = mc_loss_fn(val_y_meas.to(device), val_x_recon, physics, val_csmap)
                     val_running_mc_loss += val_mc_loss.item()
@@ -539,8 +605,9 @@ else:
                         output_dir,
                         val_grasp_img
                     )
+                    val_x_recon_reshaped = rearrange(val_x_recon, 'b c h w t -> b c t h w')
                     plot_enhancement_curve(
-                        val_x_recon,
+                        val_x_recon_reshaped,
                         output_filename = os.path.join(output_dir, 'enhancement_curves', f'val_sample_enhancement_curve_epoch_{epoch}.png'))
                     plot_enhancement_curve(
                         val_grasp_img,
@@ -627,6 +694,249 @@ model_save_path = os.path.join(output_dir, f'{exp_name}_model.pth')
 save_checkpoint(model, optimizer, epochs + 1, train_curves, val_curves, model_save_path)
 print(f'Model saved to {model_save_path}')
 
+=== lsp.py ===
+import torch
+import numpy as np
+from time import time
+dtype=torch.complex64
+def Project_inf(x, c):
+    x_max = torch.maximum((abs(x) / c), torch.tensor(1))
+    x_max = x_max.to(dtype)
+    s = torch.div(x, x_max)
+    return s
+def Wxs(x):
+    temp_x = torch.zeros_like(x, dtype=dtype)
+    temp_x[:, 0:x.shape[1]-2] = x[:, 1:x.shape[1]-1]
+    temp_x[:, x.shape[1]-1] = temp_x[:, x.shape[1]-1]
+    res = temp_x - x
+    return res
+def Wtxs(x):
+    temp_x = torch.zeros_like(x, dtype=dtype)
+    temp_x[:, 0] = temp_x[:, 0]
+    temp_x[:, 1:x.shape[1]-1] = x[:, 0:x.shape[1]-2]
+    res = temp_x - x
+    res[:, 0] = -x[:, 0]
+    res[:, x.shape[1]-1] = x[:, x.shape[1]-2]
+    return res
+def LSP(param_E, param_d, param_lambda_L, param_lambda_S, param_nite, param_tol):
+    '''
+    :param param_E:
+    :param param_d:
+    :param param_lambda_L:
+    :param param_lambda_S:
+    :param param_nite:
+    :param param_tol:
+    :return:
+    '''
+    M = param_E(inv=True, data=param_d)
+    nx, ny, nt = M.size()
+    L = torch.zeros([nx * ny, nt], dtype=dtype)
+    S = torch.zeros([nx * ny, nt], dtype=dtype)
+    p_L = torch.zeros([nx * ny, nt], dtype=dtype)
+    p_S = torch.zeros([nx * ny, nt], dtype=dtype)
+    gamma = 0.5
+    lambda_step = 1/10
+    c = lambda_step/gamma
+    loss = torch.zeros(param_nite, dtype=float)
+    for itr in range(0, param_nite):
+        temp_data = torch.reshape(L+S, [nx, ny, nt])
+        gradient = param_E(inv=True, data=param_E(inv=False, data=temp_data) - param_d)
+        gradient = torch.reshape(gradient, [nx * ny, nt])
+        y_L = L - gamma * gradient - gamma * p_L
+        Par_L = c * y_L + p_L
+        Ut, St, Vt = torch.svd(Par_L)
+        temp_St = torch.diag(Project_inf(St, param_lambda_L))
+        p_L = Ut.mm(temp_St).mm(Vt.T)
+        L = L - gamma * gradient - gamma * p_L
+        y_S = S - gamma * gradient - gamma * Wtxs(p_S)
+        Par_S = c * Wxs(y_S) + p_S
+        p_S = Project_inf(Par_S, param_lambda_S)
+        S = S - gamma * gradient - gamma * Wtxs(p_S)
+        loss[itr] = 0
+        print(' iteration: %d/%d, Loss: %f' % (itr+1, param_nite, loss[itr]))
+    Ut, St, Vt = torch.svd(L)
+    L = torch.matmul((Ut[:, 0]*St[0]).unsqueeze(1), Vt[:, 0].unsqueeze(0))
+    L = torch.reshape(L, [nx, ny, nt])
+    S = torch.reshape(S, [nx, ny, nt])
+    return L, S, loss
+
+=== lsfpnet.py ===
+import os
+os.environ['KMP_DUPLICATE_LIB_OK']='True'
+import torch
+import torch.nn as nn
+from torch.nn import init
+import torch.nn.functional as F
+from lsp import Project_inf, Wxs, Wtxs
+from time import time
+from einops import rearrange
+dtype = torch.complex64
+def to_torch_complex(x: torch.Tensor):
+    """(B, 2, ...) real -> (B, ...) complex"""
+    assert x.shape[1] == 2, (
+        f"Input tensor must have 2 channels (real, imag), but got shape {x.shape}"
+    )
+    return torch.view_as_complex(rearrange(x, "b c ... -> b ... c").contiguous())
+def from_torch_complex(x: torch.Tensor):
+    """(B, ...) complex -> (B, 2, ...) real"""
+    return rearrange(torch.view_as_real(x), "b ... c -> b c ...").contiguous()
+class BasicBlock(nn.Module):
+    def __init__(self, channels=32):
+        super(BasicBlock, self).__init__()
+        self.channels = channels
+        self.lambda_L = nn.Parameter(torch.tensor([0.0025]))
+        self.lambda_S = nn.Parameter(torch.tensor([0.05]))
+        self.lambda_spatial_L = nn.Parameter(torch.tensor([5e-2]))
+        self.lambda_spatial_S = nn.Parameter(torch.tensor([5e-2]))
+        self.gamma = nn.Parameter(torch.tensor([0.5]))
+        self.lambda_step = nn.Parameter(torch.tensor([1/10]))
+        self.conv1_forward_l = nn.Parameter(init.xavier_normal_(torch.Tensor(self.channels, 1, 3, 3, 3)))
+        self.conv2_forward_l = nn.Parameter(init.xavier_normal_(torch.Tensor(self.channels, self.channels, 3, 3, 3)))
+        self.conv3_forward_l = nn.Parameter(init.xavier_normal_(torch.Tensor(self.channels, self.channels, 3, 3, 3)))
+        self.conv1_backward_l = nn.Parameter(init.xavier_normal_(torch.Tensor(self.channels, self.channels, 3, 3, 3)))
+        self.conv2_backward_l = nn.Parameter(init.xavier_normal_(torch.Tensor(self.channels, self.channels, 3, 3, 3)))
+        self.conv3_backward_l = nn.Parameter(init.xavier_normal_(torch.Tensor(1, self.channels, 3, 3, 3)))
+        self.conv1_forward_s = nn.Parameter(init.xavier_normal_(torch.Tensor(self.channels, 1, 3, 3, 3)))
+        self.conv2_forward_s = nn.Parameter(init.xavier_normal_(torch.Tensor(self.channels, self.channels, 3, 3, 3)))
+        self.conv3_forward_s = nn.Parameter(init.xavier_normal_(torch.Tensor(self.channels, self.channels, 3, 3, 3)))
+        self.conv1_backward_s = nn.Parameter(init.xavier_normal_(torch.Tensor(self.channels, self.channels, 3, 3, 3)))
+        self.conv2_backward_s = nn.Parameter(init.xavier_normal_(torch.Tensor(self.channels, self.channels, 3, 3, 3)))
+        self.conv3_backward_s = nn.Parameter(init.xavier_normal_(torch.Tensor(1, self.channels, 3, 3, 3)))
+    def forward(self, M0, param_E, param_d, L, S, pt_L, pt_S, p_L, p_S, csmaps):
+        c = self.lambda_step / self.gamma
+        nx, ny, nt = M0.size()
+        temp_data = torch.reshape(L + S, [nx, ny, nt])
+        temp_data = param_E(inv=False, data=temp_data, smaps=csmaps).to(param_d.device)
+        gradient = param_E(inv=True, data=temp_data - param_d, smaps=csmaps)
+        gradient = torch.reshape(gradient, [nx * ny, nt]).to(param_d.device)
+        pb_L = F.conv3d(p_L, self.conv1_backward_l, padding=1)
+        pb_L = F.relu(pb_L)
+        pb_L = F.conv3d(pb_L, self.conv2_backward_l, padding=1)
+        pb_L = F.relu(pb_L)
+        pb_L = F.conv3d(pb_L, self.conv3_backward_l, padding=1)
+        pb_L = torch.reshape(torch.squeeze(pb_L), [2, nx * ny, nt])
+        pb_L = pb_L[0, :, :] + 1j * pb_L[1, :, :]
+        y_L = L - self.gamma * gradient - self.gamma * pt_L - self.gamma * pb_L
+        Ut, St, Vt = torch.linalg.svd((c * y_L + pt_L), full_matrices=False)
+        temp_St = torch.diag(Project_inf(St, self.lambda_L))
+        pt_L = Ut.mm(temp_St).mm(Vt)
+        temp_y_L_input = torch.cat((torch.real(y_L), torch.imag(y_L)), 0).to(torch.float32)
+        temp_y_L_input = torch.reshape(temp_y_L_input, [2, nx, ny, nt]).unsqueeze(1)
+        temp_y_L = F.conv3d(temp_y_L_input, self.conv1_forward_l, padding=1)
+        temp_y_L = F.relu(temp_y_L)
+        temp_y_L = F.conv3d(temp_y_L, self.conv2_forward_l, padding=1)
+        temp_y_L = F.relu(temp_y_L)
+        temp_y_L_output = F.conv3d(temp_y_L, self.conv3_forward_l, padding=1)
+        temp_y_L = temp_y_L_output + p_L
+        temp_y_L = temp_y_L[0, :, :, :, :] + 1j * temp_y_L[1, :, :, :, :]
+        p_L = Project_inf(c * temp_y_L, self.lambda_spatial_L)
+        p_L = torch.cat((torch.real(p_L), torch.imag(p_L)), 0).to(torch.float32)
+        p_L = torch.reshape(p_L, [2, self.channels, nx, ny, nt])
+        pb_L = F.conv3d(p_L, self.conv1_backward_l, padding=1)
+        pb_L = F.relu(pb_L)
+        pb_L = F.conv3d(pb_L, self.conv2_backward_l, padding=1)
+        pb_L = F.relu(pb_L)
+        pb_L_output = F.conv3d(pb_L, self.conv3_backward_l, padding=1)
+        pb_L = torch.reshape(pb_L_output, [2, nx * ny, nt])
+        pb_L = pb_L[0, :, :] + 1j * pb_L[1, :, :]
+        L = L - self.gamma * gradient - self.gamma * pt_L - self.gamma * pb_L
+        adjloss_L = temp_y_L_output * p_L - pb_L_output * temp_y_L_input
+        pb_S = F.conv3d(p_S, self.conv1_backward_s, padding=1)
+        pb_S = F.relu(pb_S)
+        pb_S = F.conv3d(pb_S, self.conv2_backward_s, padding=1)
+        pb_S = F.relu(pb_S)
+        pb_S = F.conv3d(pb_S, self.conv3_backward_s, padding=1)
+        pb_S = torch.reshape(pb_S, [2, nx * ny, nt])
+        pb_S = pb_S[0, :, :] + 1j * pb_S[1, :, :]
+        y_S = S - self.gamma * gradient - self.gamma * Wtxs(pt_S) - self.gamma * pb_S
+        pt_S = Project_inf(c * Wxs(y_S) + pt_S, self.lambda_S)
+        temp_y_S_input = torch.cat((torch.real(y_S), torch.imag(y_S)), 0).to(torch.float32)
+        temp_y_S_input = torch.reshape(temp_y_S_input, [2, nx, ny, nt]).unsqueeze(1)
+        temp_y_S = F.conv3d(temp_y_S_input, self.conv1_forward_s, padding=1)
+        temp_y_S = F.relu(temp_y_S)
+        temp_y_S = F.conv3d(temp_y_S, self.conv2_forward_s, padding=1)
+        temp_y_S = F.relu(temp_y_S)
+        temp_y_S_output = F.conv3d(temp_y_S, self.conv3_forward_s, padding=1)
+        temp_y_Sp = temp_y_S_output + p_S
+        temp_y_Sp = temp_y_Sp[0, :, :, :, :] + 1j * temp_y_Sp[1, :, :, :, :]
+        p_S = Project_inf(c * temp_y_Sp, self.lambda_spatial_S)
+        p_S = torch.cat((torch.real(p_S), torch.imag(p_S)), 0).to(torch.float32)
+        p_S = torch.reshape(p_S, [2, self.channels, nx, ny, nt])
+        pb_S = F.conv3d(p_S, self.conv1_backward_s, padding=1)
+        pb_S = F.relu(pb_S)
+        pb_S = F.conv3d(pb_S, self.conv2_backward_s, padding=1)
+        pb_S = F.relu(pb_S)
+        pb_S_output = F.conv3d(pb_S, self.conv3_backward_s, padding=1)
+        pb_S = torch.reshape(pb_S_output, [2, nx * ny, nt])
+        pb_S = pb_S[0, :, :] + 1j * pb_S[1, :, :]
+        S = S - self.gamma * gradient - self.gamma * Wtxs(pt_S) - self.gamma * pb_S
+        adjloss_S = temp_y_S_output * p_S - pb_S_output * temp_y_S_input
+        return [L, S, adjloss_L, adjloss_S, pt_L, pt_S, p_L, p_S]
+class LSFPNet(nn.Module):
+    def __init__(self, LayerNo, channels=32):
+        super(LSFPNet, self).__init__()
+        onelayer = []
+        self.LayerNo = LayerNo
+        self.channels = channels
+        for ii in range(LayerNo):
+            onelayer.append(BasicBlock(channels=self.channels))
+        self.fcs = nn.ModuleList(onelayer)
+    def forward(self, M0, param_E, param_d, csmap):
+        nx, ny, nt = M0.size()
+        L = torch.zeros([nx * ny, nt], dtype=dtype).to(param_d.device)
+        S = torch.zeros([nx * ny, nt], dtype=dtype).to(param_d.device)
+        pt_L = torch.zeros([nx * ny, nt], dtype=dtype).to(param_d.device)
+        pt_S = torch.zeros([nx * ny, nt], dtype=dtype).to(param_d.device)
+        p_L = torch.zeros([2, self.channels, nx, ny, nt], dtype=torch.float32).to(param_d.device)
+        p_S = torch.zeros([2, self.channels, nx, ny, nt], dtype=torch.float32).to(param_d.device)
+        layers_adj_L = []
+        layers_adj_S = []
+        for ii in range(self.LayerNo):
+            [L, S, layer_adj_L, layer_adj_S, pt_L, pt_S, p_L, p_S] = self.fcs[ii](M0, param_E, param_d, L, S, pt_L, pt_S, p_L, p_S, csmap)
+            layers_adj_L.append(layer_adj_L)
+            layers_adj_S.append(layer_adj_S)
+        L = torch.reshape(L, [nx, ny, nt])
+        S = torch.reshape(S, [nx, ny, nt])
+        return [L, S, layers_adj_L, layers_adj_S]
+class EWrapper:
+    """
+    Make `physics` look like the callable interface expected by LSFP-Net:
+        E(inv=False, data=image)  -> k-space
+        E(inv=True , data=data )  -> image
+    Scaling is handled *outside*, so we just delegate.
+    """
+    def __init__(self, physics, csmap):
+        self.physics, self.csmap = physics, csmap
+    def __call__(self, *, inv: bool, data: torch.Tensor) -> torch.Tensor:
+        if inv:   # adjoint
+            data = from_torch_complex(data.unsqueeze(0))
+            data = self.physics.A_adjoint(data, self.csmap)
+            data = to_torch_complex(data).squeeze(0)
+            return rearrange(data, 't h w -> h w t')
+        else:     # forward
+            data = from_torch_complex(data.unsqueeze(0))
+            data = self.physics.A(data, self.csmap)
+            return to_torch_complex(data).squeeze(0)
+class ArtifactRemovalLSFPNet(nn.Module):
+    def __init__(self, backbone_net, **kwargs):
+        super(ArtifactRemovalLSFPNet, self).__init__()
+        self.backbone_net = backbone_net
+    @staticmethod
+    def _normalise(zf: torch.Tensor, data: torch.Tensor):
+        """
+        Per-dynamic-series max-magnitude scaling (paper default).
+        Both `zf` (image) and `data` (k-space) share the SAME scalar.
+        """
+        scale = zf.abs().max()                       # scalar, grads OK
+        return zf / scale, data / scale, scale
+    def forward(self, y, E, csmap, **kwargs):
+        x_init = E(inv=True, data=y, smaps=csmap)
+        x_init_norm, y_norm, scale = self._normalise(x_init, y)
+        L, S, *_ = self.backbone_net(x_init_norm, E, y_norm, csmap)
+        recon = (L + S) * scale                  # rescale to original units
+        x_hat = torch.stack((recon.real, recon.imag), dim=0).unsqueeze(0)  # (B,2,H,W,T)
+        return x_hat
+
 === radial_lsfp.py ===
 import torch
 import torch.nn as nn
@@ -634,19 +944,18 @@ import numpy as np
 from time import time
 dtype = torch.complex64
 class MCNUFFT(nn.Module):
-    def __init__(self, nufft_ob, adjnufft_ob, ktraj, dcomp, smaps):
+    def __init__(self, nufft_ob, adjnufft_ob, ktraj, dcomp):
         super(MCNUFFT, self).__init__()
         self.nufft_ob = nufft_ob
         self.adjnufft_ob = adjnufft_ob
         self.ktraj = torch.squeeze(ktraj)
         self.dcomp = torch.squeeze(dcomp)
-        self.smaps = smaps
-    def forward(self, inv, data):
+    def forward(self, inv, data, smaps):
         data = torch.squeeze(data)  # delete redundant dimension
-        Nx = self.smaps.shape[2]
-        Ny = self.smaps.shape[3]
+        Nx = smaps.shape[2]
+        Ny = smaps.shape[3]
         if inv:  # adjoint nufft
-            self.smaps = self.smaps.to(dtype)
+            smaps = smaps.to(dtype)
             if len(data.shape) > 2:  # multi-frame
                 x = torch.zeros([Nx, Ny, data.shape[2]], dtype=dtype)
                 for ii in range(0, data.shape[2]):
@@ -656,28 +965,337 @@ class MCNUFFT(nn.Module):
                     kd = kd.unsqueeze(0)
                     d = d.unsqueeze(0).unsqueeze(0)
                     tt1 = time()
-                    x_temp = self.adjnufft_ob(kd * d, k, smaps=self.smaps)
+                    x_temp = self.adjnufft_ob(kd * d, k, smaps=smaps)
                     x[:, :, ii] = torch.squeeze(x_temp) / np.sqrt(Nx * Ny)
                     tt2 = time()
             else:  # single frame
                 kd = data.unsqueeze(0)
                 d = self.dcomp.unsqueeze(0).unsqueeze(0)
-                x = self.adjnufft_ob(kd * d, self.ktraj, smaps=self.smaps)
+                x = self.adjnufft_ob(kd * d, self.ktraj, smaps=smaps)
                 x = torch.squeeze(x) / np.sqrt(Nx * Ny)
         else:  # forward nufft
             if len(data.shape) > 2:  # multi-frame
-                x = torch.zeros([self.smaps.shape[1], self.ktraj.shape[1], data.shape[-1]], dtype=dtype)
+                x = torch.zeros([smaps.shape[1], self.ktraj.shape[1], data.shape[-1]], dtype=dtype)
                 for ii in range(0, data.shape[-1]):
                     image = data[:, :, ii]
                     k = self.ktraj[:, :, ii]
                     image = image.unsqueeze(0).unsqueeze(0)
-                    x_temp = self.nufft_ob(image, k, smaps=self.smaps)
+                    x_temp = self.nufft_ob(image, k, smaps=smaps)
                     x[:, :, ii] = torch.squeeze(x_temp) / np.sqrt(Nx * Ny)
             else:  # single frame
                 image = data.unsqueeze(0).unsqueeze(0)
-                x = self.nufft_ob(image, self.ktraj, smaps=self.smaps)
+                x = self.nufft_ob(image, self.ktraj, smaps=smaps)
                 x = torch.squeeze(x) / np.sqrt(Nx * Ny)
         return x
+
+=== transform.py ===
+import deepinv as dinv
+import torch
+from deepinv.transform import Transform
+from einops import rearrange
+import torch.nn.functional as F
+from torchvision.transforms.functional import rotate
+from typing import Union
+class VideoRotate(Transform):
+    r"""
+    CORRECTED 2D Rotation for Videos (Handles deepinv composition).
+    This class correctly applies a single, consistent random rotation to all frames of a video.
+    It samples angles uniformly from a continuous range and is robust to being called
+    from a deepinv composition operator that pre-flattens the video tensor.
+    :param tuple[float, float] or float degrees: Range of degrees to select from.
+        If degrees is a number instead of sequence like (min, max), the range of degrees
+        will be (-degrees, +degrees).
+    :param str interpolation_mode: "bilinear" or "nearest".
+    :param bool constant_shape: if True, output has the same shape as the input.
+    """
+    def __init__(
+        self,
+        *args,
+        degrees: Union[float, tuple[float, float]] = 180.0,
+        interpolation_mode: str = "bilinear",
+        **kwargs,
+    ):
+        super().__init__(*args, **kwargs)
+        if isinstance(degrees, (int, float)):
+            if degrees < 0:
+                raise ValueError("If degrees is a single number, it must be non-negative.")
+            self.degrees = (-degrees, degrees)
+        else:
+            if len(degrees) != 2:
+                raise ValueError("If degrees is a sequence, it must be of length 2.")
+            self.degrees = degrees
+        self.interpolation_mode = interpolation_mode
+        self.flatten_video_input = False
+    def _get_params(self, x: torch.Tensor) -> dict:
+        """
+        Uniformly samples `n_trans` random angles from the specified continuous range.
+        """
+        angles = [
+            torch.empty(1).uniform_(self.degrees[0], self.degrees[1]).item()
+            for _ in range(self.n_trans)
+        ]
+        return {"theta": angles}
+    def _transform(
+        self,
+        x: torch.Tensor,
+        theta: Union[torch.Tensor, list] = [],
+        **kwargs,
+    ) -> torch.Tensor:
+        """
+        Applies the rotation transformations. This method now explicitly handles 5D video tensors.
+        """
+        if not self._check_x_5D(x):
+             raise ValueError("VideoRotate is designed for 5D video tensors (B, C, T, H, W).")
+        B, C, T, H, W = x.shape
+        if not theta:
+            params = self._get_params(x)
+            theta = params["theta"]
+        if not theta:
+            raise ValueError("Rotation angle 'theta' not provided.")
+        angle_for_video = theta[0]
+        angle_rad = -torch.tensor(angle_for_video) * (torch.pi / 180.0)
+        cos_a, sin_a = torch.cos(angle_rad), torch.sin(angle_rad)
+        matrix = torch.tensor(
+            [[cos_a, -sin_a, 0], [sin_a, cos_a, 0]], 
+            dtype=torch.float32, device=x.device
+        ).unsqueeze(0)
+        matrix = matrix.repeat(B, 1, 1)
+        grid_single = F.affine_grid(matrix, (B, C, H, W), align_corners=False)
+        grid_expanded = grid_single.repeat_interleave(T, dim=0)
+        x_flat = dinv.physics.TimeMixin.flatten(x)
+        transformed_flat = F.grid_sample(x_flat, grid_expanded, mode=self.interpolation_mode, padding_mode='zeros', align_corners=False)
+        return dinv.physics.TimeMixin.unflatten(transformed_flat, batch_size=B)
+class VideoDiffeo(dinv.transform.CPABDiffeomorphism):
+    """A Diffeomorphism transform that correctly handles 5D video tensors."""
+    def _transform(self, x: torch.Tensor, **params) -> torch.Tensor:
+        if not self._check_x_5D(x):
+            return super()._transform(x, **params)
+        B = x.shape[0]
+        x_flat = dinv.physics.TimeMixin.flatten(x)
+        flat_params = self.get_params(x_flat)
+        transformed_flat = super()._transform(x_flat, **flat_params)
+        return dinv.physics.TimeMixin.unflatten(transformed_flat, batch_size=B)
+class SubsampleTime(Transform):
+    r"""
+    Augments a video by taking a random contiguous temporal sub-sequence of a
+    RANDOM length, and then interpolating it back to the original length.
+    :param int n_trans: Number of transformed versions to generate per input image.
+    :param tuple[float, float] subsample_ratio_range: The min and max ratio of the
+                                                     total time frames to keep (e.g., (0.7, 0.95)).
+    :param torch.Generator rng: Random number generator.
+    """
+    def __init__(self, *args, subsample_ratio_range: tuple[float, float] = (0.7, 0.95), **kwargs):
+        super().__init__(*args, **kwargs)
+        self.flatten_video_input = False  # Operate on 5D tensor
+        min_r, max_r = subsample_ratio_range
+        assert 0.0 < min_r <= max_r <= 1.0, "subsample_ratio_range must be a valid range (min, max) between 0 and 1."
+        self.subsample_ratio_range = subsample_ratio_range
+    def _get_params(self, x: torch.Tensor) -> dict:
+        """
+        Generates a random ratio and a random start index for each transform.
+        """
+        total_time_frames = x.shape[2]  # Shape is (B, C, T, H, W)
+        min_r, max_r = self.subsample_ratio_range
+        ratios = min_r + (max_r - min_r) * torch.rand(self.n_trans, generator=self.rng)
+        start_indices = []
+        for ratio in ratios:
+            subsample_length = int(total_time_frames * ratio.item())
+            if subsample_length >= total_time_frames:
+                start_indices.append(0)
+                continue
+            max_start_index = total_time_frames - subsample_length
+            start_idx = torch.randint(
+                low=0, high=max_start_index + 1, size=(1,), generator=self.rng
+            ).item()
+            start_indices.append(start_idx)
+        return {"ratios": ratios, "start_indices": torch.tensor(start_indices, dtype=torch.long)}
+    def _transform(
+        self, x: torch.Tensor, ratios: torch.Tensor, start_indices: torch.Tensor, **kwargs
+    ) -> torch.Tensor:
+        """Performs the temporal subsampling and resizing for each requested transform."""
+        B, C, total_time_frames, H, W = x.shape
+        assert B == 1, "This transform implementation assumes a batch size of 1 for simplicity."
+        output_list = []
+        for i in range(self.n_trans):
+            ratio = ratios[i]
+            start_idx = start_indices[i]
+            subsample_length = int(total_time_frames * ratio.item())
+            if subsample_length >= total_time_frames:
+                output_list.append(x.clone()) # Use clone to avoid issues
+                continue
+            sub_sequence = x[:, :, start_idx : start_idx + subsample_length, :, :]
+            flat_for_interp = rearrange(sub_sequence, "b c t h w -> b (c h w) t")
+            resized_flat = torch.nn.functional.interpolate(
+                flat_for_interp,
+                size=total_time_frames,
+                mode="linear",
+                align_corners=False,
+            )
+            resized_sequence = rearrange(
+                resized_flat, "b (c h w) t -> b c t h w", c=C, h=H, w=W
+            )
+            output_list.append(resized_sequence)
+        return torch.cat(output_list, dim=0)
+class PeakAwareBiPhasicWarp(Transform):
+    r"""
+    An enhancement-peak-aware temporal augmentation that warps BOTH the wash-in
+    and wash-out phases independently with different random ratios.
+    It finds the time of peak enhancement, splits the video, and then
+    time-warps (compresses/stretches) both phases before reassembling them.
+    :param tuple[float, float] warp_ratio_range: The min/max ratio for
+                                                 compressing a phase. e.g., (0.6, 0.95).
+    """
+    def __init__(self, *args, warp_ratio_range: tuple[float, float] = (0.6, 0.95), **kwargs):
+        super().__init__(*args, **kwargs)
+        self.flatten_video_input = False
+        min_r, max_r = warp_ratio_range
+        assert 0.0 < min_r <= max_r <= 1.0, "warp_ratio_range must be valid."
+        self.warp_ratio_range = warp_ratio_range
+    def _get_params(self, x: torch.Tensor) -> dict:
+        """
+        Generate two independent warp ratios for each requested transform:
+        one for wash-in and one for wash-out.
+        """
+        params_list = []
+        min_r, max_r = self.warp_ratio_range
+        for _ in range(self.n_trans):
+            washin_ratio = min_r + (max_r - min_r) * torch.rand(1, generator=self.rng).item()
+            washout_ratio = min_r + (max_r - min_r) * torch.rand(1, generator=self.rng).item()
+            params_list.append({
+                "washin_ratio": washin_ratio,
+                "washout_ratio": washout_ratio
+            })
+        return {"params_list": params_list}
+    def _transform(self, x: torch.Tensor, params_list: list[dict], **kwargs) -> torch.Tensor:
+        """Applies the independent, bi-phasic warp."""
+        assert x.shape[0] == 1, "This transform assumes a batch size of 1 for the input."
+        mean_signal_curve = torch.mean(x, dim=(0, 1, 3, 4)) # Avg over B, C, H, W
+        peak_idx = torch.argmax(mean_signal_curve)
+        if peak_idx <= 0 or peak_idx >= x.shape[2] - 1:
+            return x.repeat(self.n_trans, 1, 1, 1, 1)
+        output_list = []
+        for params in params_list:
+            wash_in_phase = x[:, :, :peak_idx, :, :]
+            peak_frame = x[:, :, peak_idx:peak_idx+1, :, :]
+            wash_out_phase = x[:, :, peak_idx+1:, :, :]
+            warped_wash_in = self._warp_phase(wash_in_phase, params["washin_ratio"])
+            warped_wash_out = self._warp_phase(wash_out_phase, params["washout_ratio"])
+            new_x = torch.cat([warped_wash_in, peak_frame, warped_wash_out], dim=2)
+            output_list.append(new_x)
+        return torch.cat(output_list, dim=0)
+    def _warp_phase(self, phase_tensor: torch.Tensor, ratio: float) -> torch.Tensor:
+        """Helper function to subsample and interpolate a video phase."""
+        B, C, T_phase, H, W = phase_tensor.shape
+        if T_phase <= 1: # Cannot warp a single frame or empty tensor
+            return phase_tensor
+        subsample_len = max(1, int(T_phase * ratio)) # Ensure at least 1 frame
+        flat_for_interp = rearrange(phase_tensor, "b c t h w -> b (c h w) t")
+        subsampled_flat = F.interpolate(flat_for_interp, size=subsample_len, mode='linear', align_corners=False)
+        resized_flat = F.interpolate(subsampled_flat, size=T_phase, mode='linear', align_corners=False)
+        warped_phase = rearrange(resized_flat, "b (c h w) t -> b c t h w", c=C, h=H, w=W)
+        return warped_phase
+class MonophasicTimeWarp(Transform):
+    r"""
+    A temporal augmentation specifically designed for monophasic enhancement curves
+    (e.g., persistent or plateau types) where there is no wash-out phase.
+    This transform keeps the first (pre-contrast) frame fixed and applies a
+    single, smooth time-warp to the entire subsequent enhancement phase.
+    :param tuple[float, float] warp_ratio_range: The min/max ratio for
+        compressing/stretching the enhancement phase. e.g., (0.7, 1.3).
+        Values < 1 compress time, values > 1 stretch time.
+    """
+    def __init__(self, *args, warp_ratio_range: tuple[float, float] = (0.7, 1.3), **kwargs):
+        super().__init__(*args, **kwargs)
+        self.flatten_video_input = False
+        min_r, max_r = warp_ratio_range
+        assert 0.0 < min_r <= max_r, "warp_ratio_range must be a valid positive range."
+        self.warp_ratio_range = warp_ratio_range
+    def _get_params(self, x: torch.Tensor) -> dict:
+        """
+        Generates a single random warp ratio for the entire enhancement phase.
+        """
+        min_r, max_r = self.warp_ratio_range
+        ratios = [min_r + (max_r - min_r) * torch.rand(1, generator=self.rng) for _ in range(self.n_trans)]
+        return {"ratios": ratios}
+    def _transform(self, x: torch.Tensor, ratios: list[float], **kwargs) -> torch.Tensor:
+        """Applies the monophasic time warp."""
+        assert x.shape[0] == 1, "This transform assumes a batch size of 1 for the input."
+        if x.shape[2] <= 1: # Cannot warp if there's only one frame
+             return x.repeat(self.n_trans, 1, 1, 1, 1)
+        output_list = []
+        for ratio in ratios:
+            pre_contrast_frame = x[:, :, :1, :, :]
+            enhancement_phase = x[:, :, 1:, :, :]
+            warped_enhancement_phase = self._warp_phase(enhancement_phase, ratio)
+            new_x = torch.cat([pre_contrast_frame, warped_enhancement_phase], dim=2)
+            output_list.append(new_x)
+        return torch.cat(output_list, dim=0)
+    def _warp_phase(self, phase_tensor: torch.Tensor, ratio: float) -> torch.Tensor:
+        """Helper function to interpolate a video phase to a new length."""
+        B, C, T_phase, H, W = phase_tensor.shape
+        if T_phase == 0:
+            return phase_tensor
+        ratio = ratio.item()
+        new_length = int(round(T_phase * ratio))
+        if new_length == 0: new_length = 1 # Ensure at least one frame
+        flat_for_interp = rearrange(phase_tensor, "b c t h w -> b (c h w) t")
+        resized_flat = F.interpolate(flat_for_interp, size=new_length, mode='linear', align_corners=False)
+        if new_length != T_phase:
+            resized_flat = F.interpolate(resized_flat, size=T_phase, mode='linear', align_corners=False)
+        warped_phase = rearrange(resized_flat, "b (c h w) t -> b c t h w", c=C, h=H, w=W)
+        return warped_phase
+class TemporalNoise(Transform):
+    """ 
+    Adds low-frequency random noise to the temporal signal of a video.
+    This simulates smooth, slowly varying noise sources over time.
+    """
+    def __init__(self, *args, noise_strength: float = 0.5, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.flatten_video_input = False
+        self.noise_strength = noise_strength
+    def _get_params(self, x: torch.Tensor) -> dict:
+        """
+        Generates a single low-frequency noise vector for the transformation.
+        """
+        B, C, T, H, W = x.shape
+        low_res_T = max(1, T // 4) 
+        noise_low_res = torch.randn(B, 1, low_res_T, device=x.device)
+        noise_high_res = F.interpolate(noise_low_res, size=T, mode='linear', align_corners=False)
+        noise_norm = (noise_high_res - noise_high_res.mean(dim=-1, keepdim=True)) / (noise_high_res.std(dim=-1, keepdim=True) + 1e-8)
+        final_noise = noise_norm * self.noise_strength
+        return {'noise': final_noise}
+    def _transform(self, x: torch.Tensor, noise: torch.Tensor, **kwargs) -> torch.Tensor:
+        """
+        Applies the pre-generated noise to the image tensor.
+        """
+        B, C, T, H, W = x.shape
+        x_noisy = x + noise.view(B, 1, T, 1, 1)
+        return x_noisy
+class TimeReverse(Transform):
+    r"""
+    Reverses the temporal order of frames in a video tensor.
+    This transform flips the video along the time axis, effectively playing it
+    backwards. This is a deterministic transformation.
+    :param int n_trans: Number of transformed versions to generate per input image.
+                        Since this is deterministic, it will just repeat the same
+                        output if n_trans > 1.
+    """
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.flatten_video_input = False
+    def _get_params(self, x: torch.Tensor) -> dict:
+        """
+        No random parameters are needed for time reversal as it's a
+        deterministic operation.
+        """
+        return {}
+    def _transform(self, x: torch.Tensor, **kwargs) -> torch.Tensor:
+        """
+        Applies the time reversal transformation using torch.flip().
+        """
+        if len(x.shape) != 5:
+            raise ValueError(f"TimeReverse expects a 5D tensor (B, C, T, H, W), but got shape {x.shape}.")
+        return torch.flip(x, dims=[2])
 
 === mc.py ===
 from typing import Union
@@ -698,12 +1316,13 @@ class MCLoss(Loss):
     can be used as well.
     :param Metric, torch.nn.Module metric: metric used for computing data consistency, which is set as the mean squared error by default.
     """
-    def __init__(self, metric: Union[Metric, torch.nn.Module] = torch.nn.MSELoss()):
+    def __init__(self, model_type, metric: Union[Metric, torch.nn.Module] = torch.nn.MSELoss()):
         super(MCLoss, self).__init__()
         self.name = "mc"
         self.metric = metric
         self.device = torch.device("cuda")
-    def forward(self, y, x_net, physics, csmap, model, **kwargs):
+        self.model_type = model_type
+    def forward(self, y, x_net, physics, csmap, **kwargs):
         r"""
         Computes the measurement splitting loss
         :param torch.Tensor y: measurements.
@@ -711,14 +1330,93 @@ class MCLoss(Loss):
         :param deepinv.physics.Physics physics: forward operator associated with the measurements.
         :return: (:class:`torch.Tensor`) loss.
         """
-        if model == "CRNN":
+        if self.model_type == "CRNN":
             return self.metric(physics.A(x_net, csmap), y)
-        else:
+        elif self.model_type == "LSFPNet":
             x_net = to_torch_complex(x_net)
-            y_hat = physics(inv=False, data=x_net).to(self.device)
+            y_hat = physics(inv=False, data=x_net, smaps=csmap).to(self.device)
             y_hat = torch.stack([y_hat.real, y_hat.imag], dim=-1)
             y = torch.stack([y.real, y.imag], dim=-1)
             return self.metric(y_hat, y)
+
+=== ei.py ===
+from typing import Union
+import torch
+import torch.nn as nn
+from deepinv.loss.loss import Loss
+from deepinv.loss.metric.metric import Metric
+from deepinv.transform.base import Transform
+from einops import rearrange
+from radial import to_torch_complex
+class EILoss(Loss):
+    r"""
+    Equivariant imaging self-supervised loss.
+    Assumes that the set of signals is invariant to a group of transformations (rotations, translations, etc.)
+    in order to learn from incomplete measurement data alone https://https://arxiv.org/pdf/2103.14756.pdf.
+    The EI loss is defined as
+    .. math::
+        \| T_g \hat{x} - \inverse{\forw{T_g \hat{x}}}\|^2
+    where :math:`\hat{x}=\inverse{y}` is a reconstructed signal and
+    :math:`T_g` is a transformation sampled at random from a group :math:`g\sim\group`.
+    By default, the error is computed using the MSE metric, however any other metric (e.g., :math:`\ell_1`)
+    can be used as well.
+    :param deepinv.transform.Transform transform: Transform to generate the virtually augmented measurement.
+        It can be any torch-differentiable function (e.g., a :class:`torch.nn.Module`)
+        including `torchvision transforms <https://pytorch.org/vision/stable/transforms.html>`_.
+    :param Metric, torch.nn.Module metric: Metric used to compute the error between the reconstructed augmented measurement and the reference
+        image.
+    :param bool apply_noise: if ``True``, the augmented measurement is computed with the full sensing model
+        :math:`\sensor{\noise{\forw{\hat{x}}}}` (i.e., noise and sensor model),
+        otherwise is generated as :math:`\forw{\hat{x}}`.
+    :param float weight: Weight of the loss.
+    :param bool no_grad: if ``True``, the gradient does not propagate through :math:`T_g`. Default: ``False``.
+        This option is useful for super-resolution problems, see https://arxiv.org/abs/2312.11232.
+    """
+    def __init__(
+        self,
+        transform: Transform,
+        model_type: str,
+        metric: Union[Metric, nn.Module] = torch.nn.MSELoss(),
+        apply_noise=True,
+        weight=1.0,
+        no_grad=False,
+        *args,
+        **kwargs,
+    ):
+        super(EILoss, self).__init__(*args, **kwargs)
+        self.name = "ei"
+        self.metric = metric
+        self.weight = weight
+        self.T = transform
+        self.noise = apply_noise
+        self.no_grad = no_grad
+        self.model_type = model_type
+    def forward(self, x_net, physics, model, csmap, **kwargs):
+        r"""
+        Computes the EI loss
+        :param torch.Tensor x_net: Reconstructed image :math:`\inverse{y}`.
+        :param deepinv.physics.Physics physics: Forward operator associated with the measurements.
+        :param torch.nn.Module model: Reconstruction function.
+        :return: (:class:`torch.Tensor`) loss.
+        """
+        if self.no_grad:
+            with torch.no_grad():
+                x2 = self.T(x_net)
+                x2 = x2.detach()
+        else:
+            x2 = self.T(x_net)
+        if self.model_type == "CRNN":
+            if self.noise:
+                y = physics(x2, csmap)
+            else:
+                y = physics.A(x2, csmap)
+            x3 = model(y, physics, csmap)
+        elif self.model_type == "LSFPNet":
+            x2_complex = to_torch_complex(x2)
+            y = physics(inv=False, data=x2_complex, smaps=csmap).to(csmap.device)
+            x3 = model(y, physics, csmap)
+        loss_ei = self.weight * self.metric(x3, x2)
+        return loss_ei, x2
 
 === dataloader.py ===
 import glob
@@ -836,247 +1534,4 @@ if __name__ == "__main__":
             f"Batch {batch_idx}: k-space batch shape = {kspace_batch.shape}, dtype = {kspace_batch.dtype}"
         )
         break
-
-=== lsp.py ===
-import torch
-import numpy as np
-from time import time
-dtype=torch.complex64
-def Project_inf(x, c):
-    x_max = torch.maximum((abs(x) / c), torch.tensor(1))
-    x_max = x_max.to(dtype)
-    s = torch.div(x, x_max)
-    return s
-def Wxs(x):
-    temp_x = torch.zeros_like(x, dtype=dtype)
-    temp_x[:, 0:x.shape[1]-2] = x[:, 1:x.shape[1]-1]
-    temp_x[:, x.shape[1]-1] = temp_x[:, x.shape[1]-1]
-    res = temp_x - x
-    return res
-def Wtxs(x):
-    temp_x = torch.zeros_like(x, dtype=dtype)
-    temp_x[:, 0] = temp_x[:, 0]
-    temp_x[:, 1:x.shape[1]-1] = x[:, 0:x.shape[1]-2]
-    res = temp_x - x
-    res[:, 0] = -x[:, 0]
-    res[:, x.shape[1]-1] = x[:, x.shape[1]-2]
-    return res
-def LSP(param_E, param_d, param_lambda_L, param_lambda_S, param_nite, param_tol):
-    '''
-    :param param_E:
-    :param param_d:
-    :param param_lambda_L:
-    :param param_lambda_S:
-    :param param_nite:
-    :param param_tol:
-    :return:
-    '''
-    M = param_E(inv=True, data=param_d)
-    nx, ny, nt = M.size()
-    L = torch.zeros([nx * ny, nt], dtype=dtype)
-    S = torch.zeros([nx * ny, nt], dtype=dtype)
-    p_L = torch.zeros([nx * ny, nt], dtype=dtype)
-    p_S = torch.zeros([nx * ny, nt], dtype=dtype)
-    gamma = 0.5
-    lambda_step = 1/10
-    c = lambda_step/gamma
-    loss = torch.zeros(param_nite, dtype=float)
-    for itr in range(0, param_nite):
-        temp_data = torch.reshape(L+S, [nx, ny, nt])
-        gradient = param_E(inv=True, data=param_E(inv=False, data=temp_data) - param_d)
-        gradient = torch.reshape(gradient, [nx * ny, nt])
-        y_L = L - gamma * gradient - gamma * p_L
-        Par_L = c * y_L + p_L
-        Ut, St, Vt = torch.svd(Par_L)
-        temp_St = torch.diag(Project_inf(St, param_lambda_L))
-        p_L = Ut.mm(temp_St).mm(Vt.T)
-        L = L - gamma * gradient - gamma * p_L
-        y_S = S - gamma * gradient - gamma * Wtxs(p_S)
-        Par_S = c * Wxs(y_S) + p_S
-        p_S = Project_inf(Par_S, param_lambda_S)
-        S = S - gamma * gradient - gamma * Wtxs(p_S)
-        loss[itr] = 0
-        print(' iteration: %d/%d, Loss: %f' % (itr+1, param_nite, loss[itr]))
-    Ut, St, Vt = torch.svd(L)
-    L = torch.matmul((Ut[:, 0]*St[0]).unsqueeze(1), Vt[:, 0].unsqueeze(0))
-    L = torch.reshape(L, [nx, ny, nt])
-    S = torch.reshape(S, [nx, ny, nt])
-    return L, S, loss
-
-=== lsfpnet.py ===
-import os
-os.environ['KMP_DUPLICATE_LIB_OK']='True'
-import torch
-import torch.nn as nn
-from torch.nn import init
-import torch.nn.functional as F
-from lsp import Project_inf, Wxs, Wtxs
-from time import time
-from einops import rearrange
-dtype = torch.complex64
-def to_torch_complex(x: torch.Tensor):
-    """(B, 2, ...) real -> (B, ...) complex"""
-    assert x.shape[1] == 2, (
-        f"Input tensor must have 2 channels (real, imag), but got shape {x.shape}"
-    )
-    return torch.view_as_complex(rearrange(x, "b c ... -> b ... c").contiguous())
-def from_torch_complex(x: torch.Tensor):
-    """(B, ...) complex -> (B, 2, ...) real"""
-    return rearrange(torch.view_as_real(x), "b ... c -> b c ...").contiguous()
-class BasicBlock(nn.Module):
-    def __init__(self, channels=32):
-        super(BasicBlock, self).__init__()
-        self.channels = channels
-        self.lambda_L = nn.Parameter(torch.tensor([0.0025]))
-        self.lambda_S = nn.Parameter(torch.tensor([0.05]))
-        self.lambda_spatial_L = nn.Parameter(torch.tensor([5e-2]))
-        self.lambda_spatial_S = nn.Parameter(torch.tensor([5e-2]))
-        self.gamma = nn.Parameter(torch.tensor([0.5]))
-        self.lambda_step = nn.Parameter(torch.tensor([1/10]))
-        self.conv1_forward_l = nn.Parameter(init.xavier_normal_(torch.Tensor(self.channels, 1, 3, 3, 3)))
-        self.conv2_forward_l = nn.Parameter(init.xavier_normal_(torch.Tensor(self.channels, self.channels, 3, 3, 3)))
-        self.conv3_forward_l = nn.Parameter(init.xavier_normal_(torch.Tensor(self.channels, self.channels, 3, 3, 3)))
-        self.conv1_backward_l = nn.Parameter(init.xavier_normal_(torch.Tensor(self.channels, self.channels, 3, 3, 3)))
-        self.conv2_backward_l = nn.Parameter(init.xavier_normal_(torch.Tensor(self.channels, self.channels, 3, 3, 3)))
-        self.conv3_backward_l = nn.Parameter(init.xavier_normal_(torch.Tensor(1, self.channels, 3, 3, 3)))
-        self.conv1_forward_s = nn.Parameter(init.xavier_normal_(torch.Tensor(self.channels, 1, 3, 3, 3)))
-        self.conv2_forward_s = nn.Parameter(init.xavier_normal_(torch.Tensor(self.channels, self.channels, 3, 3, 3)))
-        self.conv3_forward_s = nn.Parameter(init.xavier_normal_(torch.Tensor(self.channels, self.channels, 3, 3, 3)))
-        self.conv1_backward_s = nn.Parameter(init.xavier_normal_(torch.Tensor(self.channels, self.channels, 3, 3, 3)))
-        self.conv2_backward_s = nn.Parameter(init.xavier_normal_(torch.Tensor(self.channels, self.channels, 3, 3, 3)))
-        self.conv3_backward_s = nn.Parameter(init.xavier_normal_(torch.Tensor(1, self.channels, 3, 3, 3)))
-    def forward(self, M0, param_E, param_d, L, S, pt_L, pt_S, p_L, p_S):
-        c = self.lambda_step / self.gamma
-        nx, ny, nt = M0.size()
-        temp_data = torch.reshape(L + S, [nx, ny, nt])
-        temp_data = param_E(inv=False, data=temp_data).to(param_d.device)
-        gradient = param_E(inv=True, data=temp_data - param_d)
-        gradient = torch.reshape(gradient, [nx * ny, nt]).to(param_d.device)
-        pb_L = F.conv3d(p_L, self.conv1_backward_l, padding=1)
-        pb_L = F.relu(pb_L)
-        pb_L = F.conv3d(pb_L, self.conv2_backward_l, padding=1)
-        pb_L = F.relu(pb_L)
-        pb_L = F.conv3d(pb_L, self.conv3_backward_l, padding=1)
-        pb_L = torch.reshape(torch.squeeze(pb_L), [2, nx * ny, nt])
-        pb_L = pb_L[0, :, :] + 1j * pb_L[1, :, :]
-        y_L = L - self.gamma * gradient - self.gamma * pt_L - self.gamma * pb_L
-        Ut, St, Vt = torch.linalg.svd((c * y_L + pt_L), full_matrices=False)
-        temp_St = torch.diag(Project_inf(St, self.lambda_L))
-        pt_L = Ut.mm(temp_St).mm(Vt)
-        temp_y_L_input = torch.cat((torch.real(y_L), torch.imag(y_L)), 0).to(torch.float32)
-        temp_y_L_input = torch.reshape(temp_y_L_input, [2, nx, ny, nt]).unsqueeze(1)
-        temp_y_L = F.conv3d(temp_y_L_input, self.conv1_forward_l, padding=1)
-        temp_y_L = F.relu(temp_y_L)
-        temp_y_L = F.conv3d(temp_y_L, self.conv2_forward_l, padding=1)
-        temp_y_L = F.relu(temp_y_L)
-        temp_y_L_output = F.conv3d(temp_y_L, self.conv3_forward_l, padding=1)
-        temp_y_L = temp_y_L_output + p_L
-        temp_y_L = temp_y_L[0, :, :, :, :] + 1j * temp_y_L[1, :, :, :, :]
-        p_L = Project_inf(c * temp_y_L, self.lambda_spatial_L)
-        p_L = torch.cat((torch.real(p_L), torch.imag(p_L)), 0).to(torch.float32)
-        p_L = torch.reshape(p_L, [2, self.channels, nx, ny, nt])
-        pb_L = F.conv3d(p_L, self.conv1_backward_l, padding=1)
-        pb_L = F.relu(pb_L)
-        pb_L = F.conv3d(pb_L, self.conv2_backward_l, padding=1)
-        pb_L = F.relu(pb_L)
-        pb_L_output = F.conv3d(pb_L, self.conv3_backward_l, padding=1)
-        pb_L = torch.reshape(pb_L_output, [2, nx * ny, nt])
-        pb_L = pb_L[0, :, :] + 1j * pb_L[1, :, :]
-        L = L - self.gamma * gradient - self.gamma * pt_L - self.gamma * pb_L
-        adjloss_L = temp_y_L_output * p_L - pb_L_output * temp_y_L_input
-        pb_S = F.conv3d(p_S, self.conv1_backward_s, padding=1)
-        pb_S = F.relu(pb_S)
-        pb_S = F.conv3d(pb_S, self.conv2_backward_s, padding=1)
-        pb_S = F.relu(pb_S)
-        pb_S = F.conv3d(pb_S, self.conv3_backward_s, padding=1)
-        pb_S = torch.reshape(pb_S, [2, nx * ny, nt])
-        pb_S = pb_S[0, :, :] + 1j * pb_S[1, :, :]
-        y_S = S - self.gamma * gradient - self.gamma * Wtxs(pt_S) - self.gamma * pb_S
-        pt_S = Project_inf(c * Wxs(y_S) + pt_S, self.lambda_S)
-        temp_y_S_input = torch.cat((torch.real(y_S), torch.imag(y_S)), 0).to(torch.float32)
-        temp_y_S_input = torch.reshape(temp_y_S_input, [2, nx, ny, nt]).unsqueeze(1)
-        temp_y_S = F.conv3d(temp_y_S_input, self.conv1_forward_s, padding=1)
-        temp_y_S = F.relu(temp_y_S)
-        temp_y_S = F.conv3d(temp_y_S, self.conv2_forward_s, padding=1)
-        temp_y_S = F.relu(temp_y_S)
-        temp_y_S_output = F.conv3d(temp_y_S, self.conv3_forward_s, padding=1)
-        temp_y_Sp = temp_y_S_output + p_S
-        temp_y_Sp = temp_y_Sp[0, :, :, :, :] + 1j * temp_y_Sp[1, :, :, :, :]
-        p_S = Project_inf(c * temp_y_Sp, self.lambda_spatial_S)
-        p_S = torch.cat((torch.real(p_S), torch.imag(p_S)), 0).to(torch.float32)
-        p_S = torch.reshape(p_S, [2, self.channels, nx, ny, nt])
-        pb_S = F.conv3d(p_S, self.conv1_backward_s, padding=1)
-        pb_S = F.relu(pb_S)
-        pb_S = F.conv3d(pb_S, self.conv2_backward_s, padding=1)
-        pb_S = F.relu(pb_S)
-        pb_S_output = F.conv3d(pb_S, self.conv3_backward_s, padding=1)
-        pb_S = torch.reshape(pb_S_output, [2, nx * ny, nt])
-        pb_S = pb_S[0, :, :] + 1j * pb_S[1, :, :]
-        S = S - self.gamma * gradient - self.gamma * Wtxs(pt_S) - self.gamma * pb_S
-        adjloss_S = temp_y_S_output * p_S - pb_S_output * temp_y_S_input
-        return [L, S, adjloss_L, adjloss_S, pt_L, pt_S, p_L, p_S]
-class LSFPNet(nn.Module):
-    def __init__(self, LayerNo, channels=32):
-        super(LSFPNet, self).__init__()
-        onelayer = []
-        self.LayerNo = LayerNo
-        self.channels = channels
-        for ii in range(LayerNo):
-            onelayer.append(BasicBlock(channels=self.channels))
-        self.fcs = nn.ModuleList(onelayer)
-    def forward(self, M0, param_E, param_d):
-        nx, ny, nt = M0.size()
-        L = torch.zeros([nx * ny, nt], dtype=dtype).to(param_d.device)
-        S = torch.zeros([nx * ny, nt], dtype=dtype).to(param_d.device)
-        pt_L = torch.zeros([nx * ny, nt], dtype=dtype).to(param_d.device)
-        pt_S = torch.zeros([nx * ny, nt], dtype=dtype).to(param_d.device)
-        p_L = torch.zeros([2, self.channels, nx, ny, nt], dtype=torch.float32).to(param_d.device)
-        p_S = torch.zeros([2, self.channels, nx, ny, nt], dtype=torch.float32).to(param_d.device)
-        layers_adj_L = []
-        layers_adj_S = []
-        for ii in range(self.LayerNo):
-            [L, S, layer_adj_L, layer_adj_S, pt_L, pt_S, p_L, p_S] = self.fcs[ii](M0, param_E, param_d, L, S, pt_L, pt_S, p_L, p_S)
-            layers_adj_L.append(layer_adj_L)
-            layers_adj_S.append(layer_adj_S)
-        L = torch.reshape(L, [nx, ny, nt])
-        S = torch.reshape(S, [nx, ny, nt])
-        return [L, S, layers_adj_L, layers_adj_S]
-class EWrapper:
-    """
-    Make `physics` look like the callable interface expected by LSFP-Net:
-        E(inv=False, data=image)  -> k-space
-        E(inv=True , data=data )  -> image
-    Scaling is handled *outside*, so we just delegate.
-    """
-    def __init__(self, physics, csmap):
-        self.physics, self.csmap = physics, csmap
-    def __call__(self, *, inv: bool, data: torch.Tensor) -> torch.Tensor:
-        if inv:   # adjoint
-            data = from_torch_complex(data.unsqueeze(0))
-            data = self.physics.A_adjoint(data, self.csmap)
-            data = to_torch_complex(data).squeeze(0)
-            return rearrange(data, 't h w -> h w t')
-        else:     # forward
-            data = from_torch_complex(data.unsqueeze(0))
-            data = self.physics.A(data, self.csmap)
-            return to_torch_complex(data).squeeze(0)
-class ArtifactRemovalLSFPNet(nn.Module):
-    def __init__(self, backbone_net, **kwargs):
-        super(ArtifactRemovalLSFPNet, self).__init__()
-        self.backbone_net = backbone_net
-    @staticmethod
-    def _normalise(zf: torch.Tensor, data: torch.Tensor):
-        """
-        Per-dynamic-series max-magnitude scaling (paper default).
-        Both `zf` (image) and `data` (k-space) share the SAME scalar.
-        """
-        scale = zf.abs().max()                       # scalar, grads OK
-        return zf / scale, data / scale, scale
-    def forward(self, y, E, csmap, **kwargs):
-        x_init = E(inv=True, data=y)
-        x_init_norm, y_norm, scale = self._normalise(x_init, y)
-        L, S, *_ = self.backbone_net(x_init_norm, E, y_norm)
-        recon = (L + S) * scale                  # rescale to original units
-        x_hat = torch.stack((recon.real, recon.imag), dim=0).unsqueeze(0)  # (B,2,H,W,T)
-        return x_hat
 

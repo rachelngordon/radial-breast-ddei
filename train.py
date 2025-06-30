@@ -227,7 +227,6 @@ def plot_reconstruction_sample(x_recon, title, filename, output_dir, grasp_img=N
     os.makedirs(output_dir, exist_ok=True)
 
     # compute magnitude from complex reconstruction
-
     if x_recon.shape[1] == 2:
         x_recon_mag = torch.sqrt(x_recon[:, 0, ...] ** 2 + x_recon[:, 1, ...] ** 2)
     else:
@@ -235,7 +234,12 @@ def plot_reconstruction_sample(x_recon, title, filename, output_dir, grasp_img=N
 
     grasp_img_mag = torch.sqrt(grasp_img[:, 0, ...] ** 2 + grasp_img[:, 1, ...] ** 2)
 
-    n_timeframes = grasp_img_mag.shape[1]
+    print("grasp img mag: ", grasp_img_mag.shape)
+
+    if grasp_img_mag.shape[1] == 320:
+        n_timeframes = grasp_img_mag.shape[-1]
+    else:
+        n_timeframes = grasp_img_mag.shape[1]
 
     fig, axes = plt.subplots(
         nrows=2,
@@ -705,104 +709,104 @@ else:
         running_mc_loss = 0.0
         running_ei_loss = 0.0
         # turn on anomaly detection for debugging but slows down training
-        with torch.autograd.set_detect_anomaly(False):
-            train_loader_tqdm = tqdm(
-                train_loader, desc=f"Epoch {epoch}/{epochs}  Training", unit="batch"
-            )
-            # measured_kspace shape: (B, C, I, S, T) = 1, 1, 2, 23040, 8
-            for measured_kspace, csmap, grasp_img in train_loader_tqdm:  # measured_kspace shape: (B, C, I, S, T)
+        # with torch.autograd.set_detect_anomaly(False):
+        train_loader_tqdm = tqdm(
+            train_loader, desc=f"Epoch {epoch}/{epochs}  Training", unit="batch"
+        )
+        # measured_kspace shape: (B, C, I, S, T) = 1, 1, 2, 23040, 8
+        for measured_kspace, csmap, grasp_img in train_loader_tqdm:  # measured_kspace shape: (B, C, I, S, T)
 
-                with autocast(config["training"]["device"]):
+            with autocast(config["training"]["device"]):
 
-                    iteration_count += 1
-                    optimizer.zero_grad()
+                iteration_count += 1
+                optimizer.zero_grad()
 
-                    if model_type == "LSFPNet":
+                if model_type == "LSFPNet":
 
-                        measured_kspace = to_torch_complex(measured_kspace).squeeze()
-                        measured_kspace = rearrange(measured_kspace, 't co sp sam -> co (sp sam) t')
+                    measured_kspace = to_torch_complex(measured_kspace).squeeze()
+                    measured_kspace = rearrange(measured_kspace, 't co sp sam -> co (sp sam) t')
 
-                        csmap = csmap.to(device).to(measured_kspace.dtype)
+                    csmap = csmap.to(device).to(measured_kspace.dtype)
 
-                        x_recon = model(
-                            measured_kspace.to(device), physics, csmap
-                        )
-
-                    else:
-                        x_recon = model(
-                            measured_kspace.to(device), physics, csmap
-                        )  # model output shape: (B, C, T, H, W)
-
-                    mc_loss = mc_loss_fn(measured_kspace.to(device), x_recon, physics, csmap)
-                    running_mc_loss += mc_loss.item()
-
-                if use_ei_loss:
-                    # x_recon: reconstructed image
-                    ei_loss, t_img = ei_loss_fn(
-                        x_recon, physics, model, csmap
-                    )
-
-                    ei_loss_weight = get_cosine_ei_weight(
-                        current_epoch=epoch,
-                        warmup_epochs=warmup,
-                        schedule_duration=duration,
-                        target_weight=target_weight
-                    )
-
-                    # print(f"Epoch {epoch:2d}: EI Weight = {ei_loss_weight:.8f}")
-                    
-                    running_ei_loss += ei_loss.item()
-                    total_loss = mc_loss * mc_loss_weight + ei_loss * ei_loss_weight
-                    train_loader_tqdm.set_postfix(
-                        mc_loss=mc_loss.item(), ei_loss=ei_loss.item()
+                    x_recon = model(
+                        measured_kspace.to(device), physics, csmap
                     )
 
                 else:
-                    total_loss = mc_loss
-                    train_loader_tqdm.set_postfix(mc_loss=mc_loss.item())
+                    x_recon = model(
+                        measured_kspace.to(device), physics, csmap
+                    )  # model output shape: (B, C, T, H, W)
 
-                if torch.isnan(total_loss):
-                    print(
-                        "!!! ERROR: total_loss is NaN before backward pass. Aborting. !!!"
-                    )
-                    raise RuntimeError("total_loss is NaN")
+                mc_loss = mc_loss_fn(measured_kspace.to(device), x_recon, physics, csmap)
+                running_mc_loss += mc_loss.item()
 
-                scaler.scale(total_loss).backward()
-                torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
-                # optimizer.step()
-                scaler.step(optimizer)
+            if use_ei_loss:
+                # x_recon: reconstructed image
+                ei_loss, t_img = ei_loss_fn(
+                    x_recon, physics, model, csmap
+                )
 
-                scaler.update()
+                ei_loss_weight = get_cosine_ei_weight(
+                    current_epoch=epoch,
+                    warmup_epochs=warmup,
+                    schedule_duration=duration,
+                    target_weight=target_weight
+                )
 
-                if epoch % save_interval == 0:
+                # print(f"Epoch {epoch:2d}: EI Weight = {ei_loss_weight:.8f}")
+                
+                running_ei_loss += ei_loss.item()
+                total_loss = mc_loss * mc_loss_weight + ei_loss * ei_loss_weight
+                train_loader_tqdm.set_postfix(
+                    mc_loss=mc_loss.item(), ei_loss=ei_loss.item()
+                )
+
+            else:
+                total_loss = mc_loss
+                train_loader_tqdm.set_postfix(mc_loss=mc_loss.item())
+
+            if torch.isnan(total_loss):
+                print(
+                    "!!! ERROR: total_loss is NaN before backward pass. Aborting. !!!"
+                )
+                raise RuntimeError("total_loss is NaN")
+
+            scaler.scale(total_loss).backward()
+            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+            # optimizer.step()
+            scaler.step(optimizer)
+
+            scaler.update()
+
+            if epoch % save_interval == 0:
+                plot_reconstruction_sample(
+                    x_recon,
+                    f"Training Sample - Epoch {epoch}",
+                    f"train_sample_epoch_{epoch}",
+                    output_dir,
+                    grasp_img
+                )
+
+                x_recon_reshaped = rearrange(x_recon, 'b c h w t -> b c t h w')
+
+                plot_enhancement_curve(
+                    x_recon_reshaped,
+                    output_filename = os.path.join(output_dir, 'enhancement_curves', f'train_sample_enhancement_curve_epoch_{epoch}.png'))
+                
+                plot_enhancement_curve(
+                    grasp_img,
+                    output_filename = os.path.join(output_dir, 'enhancement_curves', f'grasp_sample_enhancement_curve_epoch_{epoch}.png'))
+
+                if use_ei_loss:
+
                     plot_reconstruction_sample(
-                        x_recon,
-                        f"Training Sample - Epoch {epoch}",
-                        f"train_sample_epoch_{epoch}",
+                        t_img,
+                        f"Transformed Train Sample - Epoch {epoch}",
+                        f"transforms/transform_train_sample_epoch_{epoch}",
                         output_dir,
-                        grasp_img
+                        x_recon,
+                        transform=True
                     )
-
-                    x_recon_reshaped = rearrange(x_recon, 'b c h w t -> b c t h w')
-
-                    plot_enhancement_curve(
-                        x_recon_reshaped,
-                        output_filename = os.path.join(output_dir, 'enhancement_curves', f'train_sample_enhancement_curve_epoch_{epoch}.png'))
-                    
-                    plot_enhancement_curve(
-                        grasp_img,
-                        output_filename = os.path.join(output_dir, 'enhancement_curves', f'grasp_sample_enhancement_curve_epoch_{epoch}.png'))
-
-                    if use_ei_loss:
-
-                        plot_reconstruction_sample(
-                            t_img,
-                            f"Transformed Train Sample - Epoch {epoch}",
-                            f"transforms/transform_train_sample_epoch_{epoch}",
-                            output_dir,
-                            x_recon,
-                            transform=True
-                        )
 
             # Calculate and store average epoch losses
             epoch_train_mc_loss = running_mc_loss / len(train_loader)

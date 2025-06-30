@@ -21,4 +21,4 @@ source /gpfs/data/karczmar-lab/workspaces/rachelgordon/micromamba/etc/profile.d/
 micromamba activate recon_mri
 
 # Run the training script with srun
-python3 train.py --config configs/config_mc_multicoil.yaml --exp_name mc_crnn_new_physics
+python3 train.py --config configs/config_mc_multicoil.yaml --exp_name mc_crnn_new_physics --from_checkpoint True

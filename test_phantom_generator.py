@@ -105,7 +105,7 @@ if __name__ == "__main__":
     sim_device = 'cuda' if torch.cuda.is_available() else 'cpu'
 
     generator = DigitalPhantomGenerator(
-        # phantom_acceleration = [1.0, 1.0, 2.0], # ax, ay, az
+        phantom_acceleration = [1.0, 1.0, 2.0], # ax, ay, az
         phantom_dims = [64, 64, 64, 8, 16], # phantom_dims=[320, 320, 40, 8, 16],  # [nx, ny, nz, nt, nc]
         phantom_lambda_drift = 1.5,
         phantom_source_strength = 16.0,

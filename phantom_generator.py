@@ -2,7 +2,7 @@
 import logging
 import math
 import time
-from typing import List, Dict
+from typing import List, Dict, Tuple
 
 import numpy as np
 import torch
@@ -52,6 +52,7 @@ class DigitalPhantomGenerator:
     def __init__(
         self,
         phantom_dims: List[int] = [64, 64, 32, 16, 8],  # [nx, ny, nz, nt, nc]
+        phantom_acceleration: List[float] = [1.0, 1.0, 1.0],  # [ax, ay, az]
         phantom_vx: float = 0.0,
         phantom_vy: float = 0.0,
         phantom_vz: float = 1.5,
@@ -71,8 +72,12 @@ class DigitalPhantomGenerator:
         """Initializes the phantom generator with all necessary parameters."""
         if not phantom_dims or len(phantom_dims) != 5:
             raise ValueError("`phantom_dims` must be a list of 5 integers: [nx, ny, nz, nt, nc]")
+        
+        if not phantom_acceleration or len(phantom_acceleration) != 3:
+            raise ValueError("`phantom_acceleration` must be a list of 3 floats: [ax, ay, az]")
 
         self.dims = phantom_dims
+        self.acceleration = phantom_acceleration
         self.device = torch.device(device)
         self.phys_params = {
             "vx": phantom_vx, "vy": phantom_vy, "vz": phantom_vz,
@@ -83,6 +88,7 @@ class DigitalPhantomGenerator:
             "dt_ratio": phantom_dt_ratio, "K_phase": phantom_K_phase, "T_total": phantom_T_total,
         }
         logger.info(f"DigitalPhantomGenerator initialized with parameters: {self.phys_params}")
+        logger.info(f"Acceleration factors set to: {self.acceleration}")
 
 
     def generate(self) -> Dict[str, torch.Tensor]:
@@ -134,6 +140,110 @@ class DigitalPhantomGenerator:
             "coil_images": coil_images_dense_CTXYZ,
             "kspace_cartesian_dense": kspace_cartesian_dense_CTKXYZ,
         }
+    
+    def generate_accelerated(self) -> Dict[str, torch.Tensor]:
+        """
+        Generates phantom data and simulates an accelerated k-space acquisition.
+
+        Returns:
+            A dictionary containing key data for reconstruction:
+            - 'k_trajectories': The sparse k-space sampling locations.
+            - 'k_integer_indices': Integer indices for the sparse locations.
+            - 'kspace_sampled': The complex k-space values at the sparse locations.
+            - 'sensitivity_maps': The ground truth coil sensitivity maps.
+            - 'gt_coilless_image': The ground truth coilless image (for validation).
+        """
+        # Step 1: Generate the perfect, fully-sampled data first
+        full_data = self.generate()
+        coil_images = full_data['coil_images']
+        nx, ny, nz, nt, nc = self.dims
+
+        # Step 2: Generate the undersampled k-space trajectory
+        k_trajectories, k_integer_indices = self._generate_phantom_cartesian_trajectory(
+            img_dims_xyz=[nx, ny, nz],
+            num_time_points=nt,
+            acceleration_factors=self.acceleration
+        )
+        
+        # Step 3: Simulate the "measurement" using a forward NUFFT operation
+        logger.info(
+            f"Sampling phantom k-space at accelerated trajectory points using NUFFT."
+        )
+        # Initialize KbNufft with (nz, ny, nx) to match (Z, Y, X) trajectory order
+        nufft_op_phantom = torchkbnufft.KbNufft(im_size=(nz, ny, nx), device=self.device)
+        
+        # Reshape images for NUFFT: [T, C, X, Y, Z] -> [T, C, Z, Y, X]
+        img_for_nufft_T_C_ZYX = coil_images.permute(1, 0, 4, 3, 2).contiguous()
+        
+        # Reshape trajectory for NUFFT: [T, N_k, 3] -> [T, 3, N_k]
+        traj_for_nufft = k_trajectories.permute(0, 2, 1).contiguous()
+        
+        # Perform the forward NUFFT to get the sampled k-space data
+        kspace_sampled_T_C_Nk = nufft_op_phantom(img_for_nufft_T_C_ZYX, traj_for_nufft)
+        
+        # Reshape k-space back to a more standard [C, T, N_k]
+        kspace_sampled_final = kspace_sampled_T_C_Nk.permute(1, 0, 2)
+        
+        logger.info(f"Phantom k-space sampled via NUFFT: {kspace_sampled_final.shape}")
+        
+        return {
+            "k_trajectories": k_trajectories,
+            "k_integer_indices": k_integer_indices,
+            "kspace_sampled": kspace_sampled_final,
+            "sensitivity_maps": full_data["sensitivity_maps"],
+            "gt_coilless_image": full_data["gt_coilless_image"],
+        }
+        
+
+    def _generate_phantom_cartesian_trajectory(
+        self,
+        img_dims_xyz: List[int],
+        num_time_points: int,
+        acceleration_factors: List[float],
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        """
+        Generates a synthetic Cartesian k-space trajectory and corresponding integer indices for the phantom.
+        (Copied from the original DCEMRIDataset class)
+        """
+        nx_img, ny_img, nz_img = img_dims_xyz
+        ax, ay, az = [int(a) for a in acceleration_factors]
+        logger.info(
+            f"Generating phantom Cartesian trajectory: ImgDims={img_dims_xyz}, Accel=({ax},{ay},{az}), T={num_time_points}"
+        )
+        kx_indices_full = torch.arange(nx_img) - nx_img // 2
+        ky_indices_full = torch.arange(ny_img) - ny_img // 2
+        kz_indices_full = torch.arange(nz_img) - nz_img // 2
+        
+        kx_indices_sampled_int = kx_indices_full[::ax]
+        ky_indices_sampled_int = ky_indices_full[::ay]
+        kz_indices_sampled_int = kz_indices_full[::az]
+        
+        # Scale coordinates to [-pi, pi] range for NUFFT
+        kx_scaled = (kx_indices_sampled_int.float() / nx_img) * 2 * np.pi
+        ky_scaled = (ky_indices_sampled_int.float() / ny_img) * 2 * np.pi
+        kz_scaled = (kz_indices_sampled_int.float() / nz_img) * 2 * np.pi
+        
+        grid_kx_scaled, grid_ky_scaled, grid_kz_scaled = torch.meshgrid(
+            kx_scaled, ky_scaled, kz_scaled, indexing="ij"
+        )
+        grid_kx_int, grid_ky_int, grid_kz_int = torch.meshgrid(
+            kx_indices_sampled_int, ky_indices_sampled_int, kz_indices_sampled_int, indexing="ij"
+        )
+        
+        # Reorder to (kz, ky, kx) for torchkbnufft compatibility
+        k_coords_frame_scaled = torch.stack(
+            [grid_kz_scaled.flatten(), grid_ky_scaled.flatten(), grid_kx_scaled.flatten()], dim=1
+        )
+        k_integer_indices_frame = torch.stack(
+            [grid_kz_int.flatten(), grid_ky_int.flatten(), grid_kx_int.flatten()], dim=1
+        ).to(dtype=torch.long)
+        
+        # Repeat the same sampling pattern for every time point
+        k_trajectories_all_t = k_coords_frame_scaled.unsqueeze(0).repeat(num_time_points, 1, 1)
+        k_integer_indices_all_t = k_integer_indices_frame.unsqueeze(0).repeat(num_time_points, 1, 1)
+        
+        return k_trajectories_all_t.to(self.device), k_integer_indices_all_t.to(self.device)
+    
 
     def _solve_pdes_finite_difference(self, nx, ny, nz, nt_out, params, static_mask_cpu):
         """Solves the coupled artery (C) and drift (B) PDEs using FTCS finite differences."""

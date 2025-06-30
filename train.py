@@ -23,6 +23,7 @@ from mc import MCLoss
 from lsfpnet import LSFPNet, ArtifactRemovalLSFPNet
 from radial_lsfp import MCNUFFT
 import torchkbnufft as tkbn
+from torch.amp import GradScaler, autocast
 
 
 def trajGR(Nkx, Nspokes):
@@ -601,6 +602,9 @@ else:
 
 iteration_count = 0
 
+scaler = GradScaler()
+
+
 # Step 0: Evaluate the untrained model
 if args.from_checkpoint == False:
     model.eval()
@@ -614,25 +618,27 @@ if args.from_checkpoint == False:
         # Evaluate on training data
         for measured_kspace, csmap, grasp_img in tqdm(train_loader, desc="Step 0 Training Evaluation"):
 
-            if model_type == "LSFPNet":
+            with autocast(config["training"]["device"]):
 
-                measured_kspace = to_torch_complex(measured_kspace).squeeze()
-                measured_kspace = rearrange(measured_kspace, 't co sp sam -> co (sp sam) t')
+                if model_type == "LSFPNet":
 
-                csmap = csmap.to(device).to(measured_kspace.dtype)
+                    measured_kspace = to_torch_complex(measured_kspace).squeeze()
+                    measured_kspace = rearrange(measured_kspace, 't co sp sam -> co (sp sam) t')
 
-                x_recon = model(
-                    measured_kspace.to(device), physics, csmap
-                )
+                    csmap = csmap.to(device).to(measured_kspace.dtype)
 
-            else:
+                    x_recon = model(
+                        measured_kspace.to(device), physics, csmap
+                    )
 
-                x_recon = model(
-                    measured_kspace.to(device), physics, csmap
-                )  # model output shape: (B, C, T, H, W)
+                else:
 
-            mc_loss = mc_loss_fn(measured_kspace.to(device), x_recon, physics, csmap)
-            initial_train_mc_loss += mc_loss.item()
+                    x_recon = model(
+                        measured_kspace.to(device), physics, csmap
+                    )  # model output shape: (B, C, T, H, W)
+
+                mc_loss = mc_loss_fn(measured_kspace.to(device), x_recon, physics, csmap)
+                initial_train_mc_loss += mc_loss.item()
 
             if use_ei_loss:
                 # x_recon: reconstructed image
@@ -652,25 +658,27 @@ if args.from_checkpoint == False:
         # Evaluate on validation data
         for measured_kspace, csmap, grasp_img in tqdm(val_loader, desc="Step 0 Validation Evaluation"):
 
-            if model_type == "LSFPNet":
+            with autocast(config["training"]["device"]):
 
-                measured_kspace = to_torch_complex(measured_kspace).squeeze()
-                measured_kspace = rearrange(measured_kspace, 't co sp sam -> co (sp sam) t')
+                if model_type == "LSFPNet":
 
-                csmap = csmap.to(device).to(measured_kspace.dtype)
+                    measured_kspace = to_torch_complex(measured_kspace).squeeze()
+                    measured_kspace = rearrange(measured_kspace, 't co sp sam -> co (sp sam) t')
 
-                x_recon = model(
-                    measured_kspace.to(device), physics, csmap
-                )
-            
-            else:
+                    csmap = csmap.to(device).to(measured_kspace.dtype)
 
-                x_recon = model(
-                    measured_kspace.to(device), physics, csmap
-                )  # model output shape: (B, C, T, H, W)
+                    x_recon = model(
+                        measured_kspace.to(device), physics, csmap
+                    )
+                
+                else:
 
-            mc_loss = mc_loss_fn(measured_kspace.to(device), x_recon, physics, csmap)
-            initial_val_mc_loss += mc_loss.item()
+                    x_recon = model(
+                        measured_kspace.to(device), physics, csmap
+                    )  # model output shape: (B, C, T, H, W)
+
+                mc_loss = mc_loss_fn(measured_kspace.to(device), x_recon, physics, csmap)
+                initial_val_mc_loss += mc_loss.item()
 
             if use_ei_loss:
                 # x_recon: reconstructed image
@@ -704,27 +712,29 @@ else:
             # measured_kspace shape: (B, C, I, S, T) = 1, 1, 2, 23040, 8
             for measured_kspace, csmap, grasp_img in train_loader_tqdm:  # measured_kspace shape: (B, C, I, S, T)
 
-                iteration_count += 1
-                optimizer.zero_grad()
+                with autocast(config["training"]["device"]):
 
-                if model_type == "LSFPNet":
+                    iteration_count += 1
+                    optimizer.zero_grad()
 
-                    measured_kspace = to_torch_complex(measured_kspace).squeeze()
-                    measured_kspace = rearrange(measured_kspace, 't co sp sam -> co (sp sam) t')
+                    if model_type == "LSFPNet":
 
-                    csmap = csmap.to(device).to(measured_kspace.dtype)
+                        measured_kspace = to_torch_complex(measured_kspace).squeeze()
+                        measured_kspace = rearrange(measured_kspace, 't co sp sam -> co (sp sam) t')
 
-                    x_recon = model(
-                        measured_kspace.to(device), physics, csmap
-                    )
+                        csmap = csmap.to(device).to(measured_kspace.dtype)
 
-                else:
-                    x_recon = model(
-                        measured_kspace.to(device), physics, csmap
-                    )  # model output shape: (B, C, T, H, W)
+                        x_recon = model(
+                            measured_kspace.to(device), physics, csmap
+                        )
 
-                mc_loss = mc_loss_fn(measured_kspace.to(device), x_recon, physics, csmap)
-                running_mc_loss += mc_loss.item()
+                    else:
+                        x_recon = model(
+                            measured_kspace.to(device), physics, csmap
+                        )  # model output shape: (B, C, T, H, W)
+
+                    mc_loss = mc_loss_fn(measured_kspace.to(device), x_recon, physics, csmap)
+                    running_mc_loss += mc_loss.item()
 
                 if use_ei_loss:
                     # x_recon: reconstructed image
@@ -757,9 +767,12 @@ else:
                     )
                     raise RuntimeError("total_loss is NaN")
 
-                total_loss.backward()
+                scaler.scale(total_loss).backward()
                 torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
-                optimizer.step()
+                # optimizer.step()
+                scaler.step(optimizer)
+
+                scaler.update()
 
                 if epoch % save_interval == 0:
                     plot_reconstruction_sample(
@@ -817,25 +830,27 @@ else:
             with torch.no_grad():
                 for val_kspace_batch, val_csmap, val_grasp_img in val_loader_tqdm:
 
-                    if model_type == "LSFPNet":
+                    with autocast(config["training"]["device"]):
 
-                        val_kspace_batch = to_torch_complex(val_kspace_batch).squeeze()
-                        val_kspace_batch = rearrange(val_kspace_batch, 't co sp sam -> co (sp sam) t')
+                        if model_type == "LSFPNet":
 
-                        val_csmap = val_csmap.to(device).to(val_kspace_batch.dtype)
+                            val_kspace_batch = to_torch_complex(val_kspace_batch).squeeze()
+                            val_kspace_batch = rearrange(val_kspace_batch, 't co sp sam -> co (sp sam) t')
 
-                        val_x_recon = model(
-                            val_kspace_batch.to(device), physics, val_csmap
-                        )
+                            val_csmap = val_csmap.to(device).to(val_kspace_batch.dtype)
 
-                    else:
-                        # The model takes the raw k-space and physics operator
-                        val_x_recon = model(val_kspace_batch.to(device), physics, val_csmap)
+                            val_x_recon = model(
+                                val_kspace_batch.to(device), physics, val_csmap
+                            )
 
-                    # For MCLoss, compare the physics model's output with the measured k-space.
-                    val_y_meas = val_kspace_batch
-                    val_mc_loss = mc_loss_fn(val_y_meas.to(device), val_x_recon, physics, val_csmap)
-                    val_running_mc_loss += val_mc_loss.item()
+                        else:
+                            # The model takes the raw k-space and physics operator
+                            val_x_recon = model(val_kspace_batch.to(device), physics, val_csmap)
+
+                        # For MCLoss, compare the physics model's output with the measured k-space.
+                        val_y_meas = val_kspace_batch
+                        val_mc_loss = mc_loss_fn(val_y_meas.to(device), val_x_recon, physics, val_csmap)
+                        val_running_mc_loss += val_mc_loss.item()
 
                     if use_ei_loss:
                         val_ei_loss, val_t_img = ei_loss_fn(

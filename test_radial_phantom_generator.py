@@ -124,12 +124,15 @@ if __name__ == "__main__":
         radial_num_spokes_per_frame=32, 
         phantom_dims = [64, 64, 64, 8, 16], # phantom_dims=[320, 320, 40, 8, 16],  # [nx, ny, nz, nt, nc]
         phantom_lambda_drift = 1.5,
-        phantom_source_strength = 25.0, #16.0,
+        phantom_source_strength = 18.0,#25.0, #16.0,
 
-        phantom_source_t_end=0.3,      # Keep the source "on" for longer
-        phantom_vz=2.0,                # Make the agent flow faster
-        phantom_lambda_decay=0.3,      # Make the agent wash out a bit slower
+        phantom_source_t_end=0.9,      # Keep the source "on" for longer
+        phantom_vz=1.0,#2.0,                # Make the agent flow faster
+        phantom_lambda_decay=0.3, #0.05, #0.3,      # Make the agent wash out a bit slower
         phantom_source_xyz_center=[0.5, 0.0, -0.8],
+        
+        phantom_D=0.005,
+        phantom_S_infty=0.5,
 
         device=sim_device
     )

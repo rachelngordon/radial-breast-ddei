@@ -28,7 +28,7 @@ model:
   name: "LSFPNet"
   num_layers: 8
   cascades: 2
-  channels: 16
+  channels: 8
   optimizer:
     name: "Adam"
     lr: 0.000005

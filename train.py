@@ -606,7 +606,7 @@ else:
 
 iteration_count = 0
 
-scaler = GradScaler()
+# scaler = GradScaler()
 
 
 # Step 0: Evaluate the untrained model
@@ -622,27 +622,27 @@ if args.from_checkpoint == False:
         # Evaluate on training data
         for measured_kspace, csmap, grasp_img in tqdm(train_loader, desc="Step 0 Training Evaluation"):
 
-            with autocast(config["training"]["device"]):
+            # with autocast(config["training"]["device"]):
 
-                if model_type == "LSFPNet":
+            if model_type == "LSFPNet":
 
-                    measured_kspace = to_torch_complex(measured_kspace).squeeze()
-                    measured_kspace = rearrange(measured_kspace, 't co sp sam -> co (sp sam) t')
+                measured_kspace = to_torch_complex(measured_kspace).squeeze()
+                measured_kspace = rearrange(measured_kspace, 't co sp sam -> co (sp sam) t')
 
-                    csmap = csmap.to(device).to(measured_kspace.dtype)
+                csmap = csmap.to(device).to(measured_kspace.dtype)
 
-                    x_recon = model(
-                        measured_kspace.to(device), physics, csmap
-                    )
+                x_recon = model(
+                    measured_kspace.to(device), physics, csmap
+                )
 
-                else:
+            else:
 
-                    x_recon = model(
-                        measured_kspace.to(device), physics, csmap
-                    )  # model output shape: (B, C, T, H, W)
+                x_recon = model(
+                    measured_kspace.to(device), physics, csmap
+                )  # model output shape: (B, C, T, H, W)
 
-                mc_loss = mc_loss_fn(measured_kspace.to(device), x_recon, physics, csmap)
-                initial_train_mc_loss += mc_loss.item()
+            mc_loss = mc_loss_fn(measured_kspace.to(device), x_recon, physics, csmap)
+            initial_train_mc_loss += mc_loss.item()
 
             if use_ei_loss:
                 # x_recon: reconstructed image
@@ -662,27 +662,27 @@ if args.from_checkpoint == False:
         # Evaluate on validation data
         for measured_kspace, csmap, grasp_img in tqdm(val_loader, desc="Step 0 Validation Evaluation"):
 
-            with autocast(config["training"]["device"]):
+            # with autocast(config["training"]["device"]):
 
-                if model_type == "LSFPNet":
+            if model_type == "LSFPNet":
 
-                    measured_kspace = to_torch_complex(measured_kspace).squeeze()
-                    measured_kspace = rearrange(measured_kspace, 't co sp sam -> co (sp sam) t')
+                measured_kspace = to_torch_complex(measured_kspace).squeeze()
+                measured_kspace = rearrange(measured_kspace, 't co sp sam -> co (sp sam) t')
 
-                    csmap = csmap.to(device).to(measured_kspace.dtype)
+                csmap = csmap.to(device).to(measured_kspace.dtype)
 
-                    x_recon = model(
-                        measured_kspace.to(device), physics, csmap
-                    )
-                
-                else:
+                x_recon = model(
+                    measured_kspace.to(device), physics, csmap
+                )
+            
+            else:
 
-                    x_recon = model(
-                        measured_kspace.to(device), physics, csmap
-                    )  # model output shape: (B, C, T, H, W)
+                x_recon = model(
+                    measured_kspace.to(device), physics, csmap
+                )  # model output shape: (B, C, T, H, W)
 
-                mc_loss = mc_loss_fn(measured_kspace.to(device), x_recon, physics, csmap)
-                initial_val_mc_loss += mc_loss.item()
+            mc_loss = mc_loss_fn(measured_kspace.to(device), x_recon, physics, csmap)
+            initial_val_mc_loss += mc_loss.item()
 
             if use_ei_loss:
                 # x_recon: reconstructed image
@@ -716,29 +716,29 @@ else:
         # measured_kspace shape: (B, C, I, S, T) = 1, 1, 2, 23040, 8
         for measured_kspace, csmap, grasp_img in train_loader_tqdm:  # measured_kspace shape: (B, C, I, S, T)
 
-            with autocast(config["training"]["device"]):
+            # with autocast(config["training"]["device"]):
 
-                iteration_count += 1
-                optimizer.zero_grad()
+            iteration_count += 1
+            optimizer.zero_grad()
 
-                if model_type == "LSFPNet":
+            if model_type == "LSFPNet":
 
-                    measured_kspace = to_torch_complex(measured_kspace).squeeze()
-                    measured_kspace = rearrange(measured_kspace, 't co sp sam -> co (sp sam) t')
+                measured_kspace = to_torch_complex(measured_kspace).squeeze()
+                measured_kspace = rearrange(measured_kspace, 't co sp sam -> co (sp sam) t')
 
-                    csmap = csmap.to(device).to(measured_kspace.dtype)
+                csmap = csmap.to(device).to(measured_kspace.dtype)
 
-                    x_recon = model(
-                        measured_kspace.to(device), physics, csmap
-                    )
+                x_recon = model(
+                    measured_kspace.to(device), physics, csmap
+                )
 
-                else:
-                    x_recon = model(
-                        measured_kspace.to(device), physics, csmap
-                    )  # model output shape: (B, C, T, H, W)
+            else:
+                x_recon = model(
+                    measured_kspace.to(device), physics, csmap
+                )  # model output shape: (B, C, T, H, W)
 
-                mc_loss = mc_loss_fn(measured_kspace.to(device), x_recon, physics, csmap)
-                running_mc_loss += mc_loss.item()
+            mc_loss = mc_loss_fn(measured_kspace.to(device), x_recon, physics, csmap)
+            running_mc_loss += mc_loss.item()
 
             if use_ei_loss:
                 # x_recon: reconstructed image
@@ -771,210 +771,210 @@ else:
                 )
                 raise RuntimeError("total_loss is NaN")
 
-            scaler.scale(total_loss).backward()
+            # scaler.scale(total_loss).backward()
+            total_loss.backward()
             torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
-            # optimizer.step()
-            scaler.step(optimizer)
+            optimizer.step()
+            # scaler.step(optimizer)
+            # scaler.update()
 
-            scaler.update()
+        if epoch % save_interval == 0:
+            plot_reconstruction_sample(
+                x_recon,
+                f"Training Sample - Epoch {epoch}",
+                f"train_sample_epoch_{epoch}",
+                output_dir,
+                grasp_img
+            )
 
-            if epoch % save_interval == 0:
+            x_recon_reshaped = rearrange(x_recon, 'b c h w t -> b c t h w')
+
+            plot_enhancement_curve(
+                x_recon_reshaped,
+                output_filename = os.path.join(output_dir, 'enhancement_curves', f'train_sample_enhancement_curve_epoch_{epoch}.png'))
+            
+            plot_enhancement_curve(
+                grasp_img,
+                output_filename = os.path.join(output_dir, 'enhancement_curves', f'grasp_sample_enhancement_curve_epoch_{epoch}.png'))
+
+            if use_ei_loss:
+
                 plot_reconstruction_sample(
-                    x_recon,
-                    f"Training Sample - Epoch {epoch}",
-                    f"train_sample_epoch_{epoch}",
+                    t_img,
+                    f"Transformed Train Sample - Epoch {epoch}",
+                    f"transforms/transform_train_sample_epoch_{epoch}",
                     output_dir,
-                    grasp_img
+                    x_recon,
+                    transform=True
                 )
 
-                x_recon_reshaped = rearrange(x_recon, 'b c h w t -> b c t h w')
+        # Calculate and store average epoch losses
+        epoch_train_mc_loss = running_mc_loss / len(train_loader)
+        train_mc_losses.append(epoch_train_mc_loss)
+        weighted_train_mc_losses.append(epoch_train_mc_loss*mc_loss_weight)
+        if use_ei_loss:
+            epoch_train_ei_loss = running_ei_loss / len(train_loader)
+            train_ei_losses.append(epoch_train_ei_loss)
+            weighted_train_ei_losses.append(epoch_train_ei_loss*ei_loss_weight)
+        else:
+            # Append 0 if EI loss is not used to keep lists aligned
+            train_ei_losses.append(0.0)
+            weighted_train_ei_losses.append(0.0)
 
-                plot_enhancement_curve(
-                    x_recon_reshaped,
-                    output_filename = os.path.join(output_dir, 'enhancement_curves', f'train_sample_enhancement_curve_epoch_{epoch}.png'))
-                
-                plot_enhancement_curve(
-                    grasp_img,
-                    output_filename = os.path.join(output_dir, 'enhancement_curves', f'grasp_sample_enhancement_curve_epoch_{epoch}.png'))
+        # --- Validation Loop ---
+        model.eval()
+        val_running_mc_loss = 0.0
+        val_running_ei_loss = 0.0
+        val_loader_tqdm = tqdm(
+            val_loader,
+            desc=f"Epoch {epoch}/{epochs}  Validation",
+            unit="batch",
+            leave=False,
+        )
+        with torch.no_grad():
+            for val_kspace_batch, val_csmap, val_grasp_img in val_loader_tqdm:
+
+                # with autocast(config["training"]["device"]):
+
+                if model_type == "LSFPNet":
+
+                    val_kspace_batch = to_torch_complex(val_kspace_batch).squeeze()
+                    val_kspace_batch = rearrange(val_kspace_batch, 't co sp sam -> co (sp sam) t')
+
+                    val_csmap = val_csmap.to(device).to(val_kspace_batch.dtype)
+
+                    val_x_recon = model(
+                        val_kspace_batch.to(device), physics, val_csmap
+                    )
+
+                else:
+                    # The model takes the raw k-space and physics operator
+                    val_x_recon = model(val_kspace_batch.to(device), physics, val_csmap)
+
+                # For MCLoss, compare the physics model's output with the measured k-space.
+                val_y_meas = val_kspace_batch
+                val_mc_loss = mc_loss_fn(val_y_meas.to(device), val_x_recon, physics, val_csmap)
+                val_running_mc_loss += val_mc_loss.item()
 
                 if use_ei_loss:
-
-                    plot_reconstruction_sample(
-                        t_img,
-                        f"Transformed Train Sample - Epoch {epoch}",
-                        f"transforms/transform_train_sample_epoch_{epoch}",
-                        output_dir,
-                        x_recon,
-                        transform=True
+                    val_ei_loss, val_t_img = ei_loss_fn(
+                        val_x_recon, physics, model, val_csmap
                     )
+                    val_running_ei_loss += val_ei_loss.item()
+                    val_loader_tqdm.set_postfix(
+                        val_mc_loss=val_mc_loss.item(), val_ei_loss=val_ei_loss.item()
+                    )
+                else:
+                    val_loader_tqdm.set_postfix(val_mc_loss=val_mc_loss.item())
 
-            # Calculate and store average epoch losses
-            epoch_train_mc_loss = running_mc_loss / len(train_loader)
-            train_mc_losses.append(epoch_train_mc_loss)
-            weighted_train_mc_losses.append(epoch_train_mc_loss*mc_loss_weight)
-            if use_ei_loss:
-                epoch_train_ei_loss = running_ei_loss / len(train_loader)
-                train_ei_losses.append(epoch_train_ei_loss)
-                weighted_train_ei_losses.append(epoch_train_ei_loss*ei_loss_weight)
-            else:
-                # Append 0 if EI loss is not used to keep lists aligned
-                train_ei_losses.append(0.0)
-                weighted_train_ei_losses.append(0.0)
-
-            # --- Validation Loop ---
-            model.eval()
-            val_running_mc_loss = 0.0
-            val_running_ei_loss = 0.0
-            val_loader_tqdm = tqdm(
-                val_loader,
-                desc=f"Epoch {epoch}/{epochs}  Validation",
-                unit="batch",
-                leave=False,
+        # save a sample from the last validation batch of the epoch
+        if epoch % save_interval == 0:
+            plot_reconstruction_sample(
+                val_x_recon,
+                f"Validation Sample - Epoch {epoch}",
+                f"val_sample_epoch_{epoch}",
+                output_dir,
+                val_grasp_img
             )
-            with torch.no_grad():
-                for val_kspace_batch, val_csmap, val_grasp_img in val_loader_tqdm:
 
-                    with autocast(config["training"]["device"]):
+            val_x_recon_reshaped = rearrange(val_x_recon, 'b c h w t -> b c t h w')
 
-                        if model_type == "LSFPNet":
+            plot_enhancement_curve(
+                val_x_recon_reshaped,
+                output_filename = os.path.join(output_dir, 'enhancement_curves', f'val_sample_enhancement_curve_epoch_{epoch}.png'))
+            
+            plot_enhancement_curve(
+                val_grasp_img,
+                output_filename = os.path.join(output_dir, 'enhancement_curves', f'val_grasp_sample_enhancement_curve_epoch_{epoch}.png'))
 
-                            val_kspace_batch = to_torch_complex(val_kspace_batch).squeeze()
-                            val_kspace_batch = rearrange(val_kspace_batch, 't co sp sam -> co (sp sam) t')
-
-                            val_csmap = val_csmap.to(device).to(val_kspace_batch.dtype)
-
-                            val_x_recon = model(
-                                val_kspace_batch.to(device), physics, val_csmap
-                            )
-
-                        else:
-                            # The model takes the raw k-space and physics operator
-                            val_x_recon = model(val_kspace_batch.to(device), physics, val_csmap)
-
-                        # For MCLoss, compare the physics model's output with the measured k-space.
-                        val_y_meas = val_kspace_batch
-                        val_mc_loss = mc_loss_fn(val_y_meas.to(device), val_x_recon, physics, val_csmap)
-                        val_running_mc_loss += val_mc_loss.item()
-
-                    if use_ei_loss:
-                        val_ei_loss, val_t_img = ei_loss_fn(
-                            val_x_recon, physics, model, val_csmap
-                        )
-                        val_running_ei_loss += val_ei_loss.item()
-                        val_loader_tqdm.set_postfix(
-                            val_mc_loss=val_mc_loss.item(), val_ei_loss=val_ei_loss.item()
-                        )
-                    else:
-                        val_loader_tqdm.set_postfix(val_mc_loss=val_mc_loss.item())
-
-                # save a sample from the last validation batch of the epoch
-                if epoch % save_interval == 0:
-                    plot_reconstruction_sample(
-                        val_x_recon,
-                        f"Validation Sample - Epoch {epoch}",
-                        f"val_sample_epoch_{epoch}",
-                        output_dir,
-                        val_grasp_img
-                    )
-
-                    val_x_recon_reshaped = rearrange(val_x_recon, 'b c h w t -> b c t h w')
-
-                    plot_enhancement_curve(
-                        val_x_recon_reshaped,
-                        output_filename = os.path.join(output_dir, 'enhancement_curves', f'val_sample_enhancement_curve_epoch_{epoch}.png'))
-                    
-                    plot_enhancement_curve(
-                        val_grasp_img,
-                        output_filename = os.path.join(output_dir, 'enhancement_curves', f'val_grasp_sample_enhancement_curve_epoch_{epoch}.png'))
-
-                    if use_ei_loss:
-                        plot_reconstruction_sample(
-                            val_t_img,
-                            f"Transformed Validation Sample - Epoch {epoch}",
-                            f"transforms/transform_val_sample_epoch_{epoch}",
-                            output_dir,
-                            val_x_recon,
-                            transform=True
-                        )
-
-
-                    # Save the model checkpoint
-                    # model_save_path = os.path.join(output_dir, f'{exp_name}_model_checkpoint_epoch{epoch}.pth')
-                    # torch.save(model.state_dict(), model_save_path)
-                    # print(f'Model saved to {model_save_path}')
-                    train_curves = dict(
-                        train_mc_losses=train_mc_losses,
-                        train_ei_losses=train_ei_losses,
-                        weighted_train_mc_losses=weighted_train_mc_losses,
-                        weighted_train_ei_losses=weighted_train_ei_losses,
-                    )
-                    val_curves = dict(
-                        val_mc_losses=val_mc_losses,
-                        val_ei_losses=val_ei_losses,
-                    )
-                    model_save_path = os.path.join(output_dir, f'{exp_name}_model.pth')
-                    save_checkpoint(model, optimizer, epoch + 1, train_curves, val_curves, model_save_path)
-                    print(f'Model saved to {model_save_path}')
-
-
-            # Calculate and store average validation losses
-            epoch_val_mc_loss = val_running_mc_loss / len(val_loader)
-            val_mc_losses.append(epoch_val_mc_loss)
             if use_ei_loss:
-                epoch_val_ei_loss = val_running_ei_loss / len(val_loader)
-                val_ei_losses.append(epoch_val_ei_loss)
-            else:
-                val_ei_losses.append(0.0)
+                plot_reconstruction_sample(
+                    val_t_img,
+                    f"Transformed Validation Sample - Epoch {epoch}",
+                    f"transforms/transform_val_sample_epoch_{epoch}",
+                    output_dir,
+                    val_x_recon,
+                    transform=True
+                )
 
-            # --- Plotting and Logging ---
-            if epoch % save_interval == 0:
-                # Plot MC Loss
+
+            # Save the model checkpoint
+            # model_save_path = os.path.join(output_dir, f'{exp_name}_model_checkpoint_epoch{epoch}.pth')
+            # torch.save(model.state_dict(), model_save_path)
+            # print(f'Model saved to {model_save_path}')
+            train_curves = dict(
+                train_mc_losses=train_mc_losses,
+                train_ei_losses=train_ei_losses,
+                weighted_train_mc_losses=weighted_train_mc_losses,
+                weighted_train_ei_losses=weighted_train_ei_losses,
+            )
+            val_curves = dict(
+                val_mc_losses=val_mc_losses,
+                val_ei_losses=val_ei_losses,
+            )
+            model_save_path = os.path.join(output_dir, f'{exp_name}_model.pth')
+            save_checkpoint(model, optimizer, epoch + 1, train_curves, val_curves, model_save_path)
+            print(f'Model saved to {model_save_path}')
+
+
+        # Calculate and store average validation losses
+        epoch_val_mc_loss = val_running_mc_loss / len(val_loader)
+        val_mc_losses.append(epoch_val_mc_loss)
+        if use_ei_loss:
+            epoch_val_ei_loss = val_running_ei_loss / len(val_loader)
+            val_ei_losses.append(epoch_val_ei_loss)
+        else:
+            val_ei_losses.append(0.0)
+
+        # --- Plotting and Logging ---
+        if epoch % save_interval == 0:
+            # Plot MC Loss
+            plt.figure()
+            plt.plot(train_mc_losses, label="Training MC Loss")
+            plt.plot(val_mc_losses, label="Validation MC Loss")
+            plt.xlabel("Epoch")
+            plt.ylabel("MC Loss")
+            plt.title("Measurement Consistency Loss")
+            plt.legend()
+            plt.grid(True)
+            plt.savefig(os.path.join(output_dir, "mc_losses.png"))
+            plt.close()
+
+            if use_ei_loss:
+                # Plot EI Loss
                 plt.figure()
-                plt.plot(train_mc_losses, label="Training MC Loss")
-                plt.plot(val_mc_losses, label="Validation MC Loss")
+                plt.plot(train_ei_losses, label="Training EI Loss")
+                plt.plot(val_ei_losses, label="Validation EI Loss")
                 plt.xlabel("Epoch")
-                plt.ylabel("MC Loss")
-                plt.title("Measurement Consistency Loss")
+                plt.ylabel("EI Loss")
+                plt.title("Equivariant Imaging Loss")
                 plt.legend()
                 plt.grid(True)
-                plt.savefig(os.path.join(output_dir, "mc_losses.png"))
+                plt.savefig(os.path.join(output_dir, "ei_losses.png"))
                 plt.close()
 
-                if use_ei_loss:
-                    # Plot EI Loss
-                    plt.figure()
-                    plt.plot(train_ei_losses, label="Training EI Loss")
-                    plt.plot(val_ei_losses, label="Validation EI Loss")
-                    plt.xlabel("Epoch")
-                    plt.ylabel("EI Loss")
-                    plt.title("Equivariant Imaging Loss")
-                    plt.legend()
-                    plt.grid(True)
-                    plt.savefig(os.path.join(output_dir, "ei_losses.png"))
-                    plt.close()
+
+                # Plot Weighted Losses
+                plt.figure()
+                plt.plot(weighted_train_mc_losses, label="MC Loss")
+                plt.plot(weighted_train_ei_losses, label="EI Loss")
+                plt.xlabel("Epoch")
+                plt.ylabel("Loss")
+                plt.title("Weighted Training Losses")
+                plt.legend()
+                plt.grid(True)
+                plt.savefig(os.path.join(output_dir, "weighted_losses.png"))
+                plt.close()
 
 
-                    # Plot Weighted Losses
-                    plt.figure()
-                    plt.plot(weighted_train_mc_losses, label="MC Loss")
-                    plt.plot(weighted_train_ei_losses, label="EI Loss")
-                    plt.xlabel("Epoch")
-                    plt.ylabel("Loss")
-                    plt.title("Weighted Training Losses")
-                    plt.legend()
-                    plt.grid(True)
-                    plt.savefig(os.path.join(output_dir, "weighted_losses.png"))
-                    plt.close()
-
-
-            # Print epoch summary
+        # Print epoch summary
+        print(
+            f"Epoch {epoch}: Training MC Loss: {epoch_train_mc_loss:.6f}, Validation MC Loss: {epoch_val_mc_loss:.6f}"
+        )
+        if use_ei_loss:
             print(
-                f"Epoch {epoch}: Training MC Loss: {epoch_train_mc_loss:.6f}, Validation MC Loss: {epoch_val_mc_loss:.6f}"
+                f"Epoch {epoch}: Training EI Loss: {epoch_train_ei_loss:.6f}, Validation EI Loss: {epoch_val_ei_loss:.6f}"
             )
-            if use_ei_loss:
-                print(
-                    f"Epoch {epoch}: Training EI Loss: {epoch_train_ei_loss:.6f}, Validation EI Loss: {epoch_val_ei_loss:.6f}"
-                )
 
 
 # Save the model at the end of training

@@ -31,24 +31,30 @@ model:
   channels: 8
   optimizer:
     name: "Adam"
-    lr: 0.000005
+    lr: 0.0001
     weight_decay: 0.0
     b1: 0.9
     b2: 0.999
     eps: 0.000000001
+  scheduler:
+      enable: true
+      type: "cosine"
+      min_lr: 1.0e-6
   losses:
     use_ei_loss: true
     mc_loss:
-      weight: 1
+      weight: 10
     ei_loss:
       temporal_transform: "subsample"
-      weight: 0.0003
-      warmup: 10
+      weight: 1000 #0.0003
+      warmup: 5
       duration: 100
       subsample_ratio_min: 0.7
       subsample_ratio_max: 0.95
       warp_ratio_min: 0.6
       warp_ratio_max: 0.95
+    adj_loss:
+      weight: 0.0001
 
 
 # Training settings
@@ -57,3 +63,8 @@ training:
   save_interval: 1
   plot_interval: 20
   device: "cuda"  # or "cpu"
+
+debugging:
+  calc_step_0: true
+  enable_gradient_monitoring: true
+  monitoring_interval: 5

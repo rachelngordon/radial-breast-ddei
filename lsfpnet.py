@@ -79,6 +79,7 @@ class BasicBlock(nn.Module):
         y_L = L - self.gamma * gradient - self.gamma * pt_L - self.gamma * pb_L
 
         # pt_L
+        # with torch.no_grad():
         Ut, St, Vt = torch.linalg.svd((c * y_L + pt_L), full_matrices=False)
         temp_St = torch.diag(Project_inf(St, self.lambda_L))
         pt_L = Ut.mm(temp_St).mm(Vt)
@@ -239,23 +240,39 @@ class ArtifactRemovalLSFPNet(nn.Module):
         Per-dynamic-series max-magnitude scaling (paper default).
         Both `zf` (image) and `data` (k-space) share the SAME scalar.
         """
-        scale = zf.abs().max()                       # scalar, grads OK
+        with torch.no_grad():
+            scale = zf.abs().max()                       # scalar, grads OK
+
+        # Add a small epsilon to prevent division by zero
+        scale = scale + 1e-8
+
         return zf / scale, data / scale, scale
 
-    def forward(self, y, E, csmap, **kwargs):
+    def forward(self, y, E, csmap, dcf, **kwargs):
 
         # 1. Get the initial ZF recon. This defines our target energy/scale.
         x_init = E(inv=True, data=y, smaps=csmap)
 
         # 2. Permute and normalize the input for the network
         # x_init_permuted = rearrange(x_init, "b c t h w -> b h w t c")
-        x_init_norm, y_norm, scale = self._normalise(x_init, y)
+        #x_init_norm, y_norm, scale = self._normalise(x_init, y)
+        x_init_norm = x_init
+        y_norm = y
 
-        L, S, *_ = self.backbone_net(x_init_norm, E, y_norm, csmap)
+        L, S, adjoint_L, adjoint_S = self.backbone_net(x_init_norm, E, y_norm, csmap)
 
-        recon = (L + S) * scale                  # rescale to original units
+        total_adjoint_loss_scalar = 0
+        if adjoint_L: # Check if the list is not empty
+            for loss_tensor in adjoint_L:
+                # Use torch.mean(torch.abs(...)) to get a scalar value for each tensor
+                total_adjoint_loss_scalar += torch.mean(torch.abs(loss_tensor))
+        if adjoint_S:
+            for loss_tensor in adjoint_S:
+                total_adjoint_loss_scalar += torch.mean(torch.abs(loss_tensor))
+
+        recon = (L + S) #* scale                  # rescale to original units
 
         # 4) stack & convert back to (B,2,T,H,W) float32
         x_hat = torch.stack((recon.real, recon.imag), dim=0).unsqueeze(0)  # (B,2,H,W,T)
 
-        return x_hat
+        return x_hat, total_adjoint_loss_scalar

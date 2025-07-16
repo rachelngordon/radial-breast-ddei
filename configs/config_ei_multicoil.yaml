@@ -38,16 +38,18 @@ model:
   losses:
     use_ei_loss: true
     mc_loss:
-      weight: 1
+      weight: 10
     ei_loss:
       temporal_transform: "subsample"
-      weight: 0.0003
+      weight: 1 #0.0003
       warmup: 5
       duration: 50
       subsample_ratio_min: 0.7
       subsample_ratio_max: 0.95
       warp_ratio_min: 0.6
       warp_ratio_max: 0.95
+    adj_loss:
+      weight: 0.0001
 
 
 # Training settings

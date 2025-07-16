@@ -46,6 +46,7 @@ class EILoss(Loss):
         self,
         transform: Transform,
         model_type: str,
+        dcomp: torch.Tensor,
         metric: Union[Metric, nn.Module] = torch.nn.MSELoss(),
         apply_noise=True,
         weight=1.0,
@@ -61,6 +62,7 @@ class EILoss(Loss):
         self.noise = apply_noise
         self.no_grad = no_grad
         self.model_type = model_type
+        self.dcomp = dcomp
 
     def forward(self, x_net, physics, model, csmap, **kwargs):
         r"""
@@ -83,11 +85,11 @@ class EILoss(Loss):
             x2 = self.T(x_net)
 
         if self.model_type == "CRNN":
-            if self.noise:
-                # NOTE: need to pass csmap for multi coil imp
-                y = physics(x2, csmap)
-            else:
-                y = physics.A(x2, csmap)
+            # if self.noise:
+            #     # NOTE: need to pass csmap for multi coil imp
+            #     y = physics(x2, csmap)
+            # else:
+            y = physics.A(x2, csmap)
 
             x3 = model(y, physics, csmap)
 
@@ -96,7 +98,7 @@ class EILoss(Loss):
             x2_complex = to_torch_complex(x2)
             y = physics(inv=False, data=x2_complex, smaps=csmap).to(csmap.device)
         
-            x3 = model(y, physics, csmap)
+            x3, _ = model(y, physics, csmap, self.dcomp)
 
         loss_ei = self.weight * self.metric(x3, x2)
         return loss_ei, x2

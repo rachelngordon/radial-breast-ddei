@@ -2,11 +2,11 @@
 
 # Parameters
 #SBATCH --cpus-per-task=4
-#SBATCH --error=logs/ei_multicoil_subsample_duration50.err
-#SBATCH --output=logs/ei_multicoil_subsample_duration50.out
+#SBATCH --error=logs/crnn_ei_mcnufft.err
+#SBATCH --output=logs/crnn_ei_mcnufft.out
 #SBATCH --exclude=''
 #SBATCH --gpus-per-node=1
-#SBATCH --job-name=ei_multicoil_subsample_duration50
+#SBATCH --job-name=crnn_ei_mcnufft
 #SBATCH --mem-per-gpu=80000
 #SBATCH --nodes=1
 #SBATCH --ntasks-per-node=1
@@ -21,4 +21,4 @@ source /gpfs/data/karczmar-lab/workspaces/rachelgordon/micromamba/etc/profile.d/
 micromamba activate recon_mri
 
 # Run the training script with srun
-python3 train.py --config configs/config_ei_multicoil.yaml --exp_name ei_multicoil_subsample_duration50
+python3 train.py --config configs/config_ei_multicoil.yaml --exp_name crnn_ei_mcnufft

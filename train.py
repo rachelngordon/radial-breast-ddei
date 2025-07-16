@@ -8,7 +8,7 @@ import matplotlib.pyplot as plt
 import torch
 import yaml
 from crnn import CRNN, ArtifactRemovalCRNN
-from dataloader import SliceDataset
+from dataloader import SliceDataset, SimulatedDataset
 # from deepinv.loss import MCLoss#, EILoss
 from deepinv.transform import Transform
 from einops import rearrange
@@ -25,6 +25,143 @@ from radial_lsfp import MCNUFFT, MCNUFFT_pure
 import torchkbnufft as tkbn
 from torch.amp import GradScaler, autocast
 import csv
+import torchmetrics
+import time
+
+def evaluate_on_simulated_data(model, device, config, output_dir, physics_objects):
+    """
+    Performs inference on the simulated test set and computes SSIM and PSNR.
+    
+    Args:
+        model: The trained model.
+        device: The device to run inference on (e.g., 'cuda').
+        config: The experiment configuration dictionary.
+        output_dir: The main directory for saving results.
+        physics_objects (dict): A dictionary containing the necessary physics objects 
+                                like physics, physics_pure, etc.
+    """
+    print("\n" + "="*80)
+    print("--- Starting Final Evaluation on Simulated Dataset ---")
+    print("="*80)
+
+    # --- 1. Setup DataLoader for Simulated Data ---
+    simulated_data_path = config["evaluation"]["simulated_dataset_path"]
+    model_type = config["model"]["name"]
+
+    try:
+        eval_dataset = SimulatedDataset(root_dir=simulated_data_path, model_type=model_type)
+    except FileNotFoundError as e:
+        print(f"ERROR: {e}")
+        print("Skipping evaluation.")
+        return
+
+    # Use a batch size of 1 for evaluation to process one sample at a time
+    eval_loader = DataLoader(eval_dataset, batch_size=1, shuffle=False, num_workers=4)
+
+    # --- 2. Initialize Metrics ---
+    # We will compute metrics frame by frame. data_range is important for PSNR.
+    # We normalize images to [0, 1], so the data_range is 1.0.
+    ssim = torchmetrics.StructuralSimilarityIndexMeasure(data_range=1.0).to(device)
+    psnr = torchmetrics.PeakSignalNoiseRatio(data_range=1.0).to(device)
+    
+    # Store results
+    all_ssim_scores = []
+    all_psnr_scores = []
+    
+    # --- 3. Evaluation Loop ---
+    model.eval()
+    with torch.no_grad():
+        for i, (kspace, csmap, ground_truth) in enumerate(tqdm(eval_loader, desc="Evaluating on Simulated Data")):
+
+            start = time.time()
+            
+            kspace = kspace.to(device)
+            csmap = csmap.to(device)
+            ground_truth = ground_truth.to(device) # Shape: (1, 2, T, H, W)
+            
+            # --- Perform Inference (handle different model types) ---
+            if model_type == "LSFPNet":
+                # LSFPNet requires specific data handling
+                kspace_complex = kspace.squeeze(0) # Remove batch dim
+                csmap_complex = csmap.squeeze(0)   # Remove batch dim
+
+                with torch.no_grad():
+                    scale = torch.quantile(kspace_complex.abs(), 0.99) + 1e-8
+                kspace_norm = kspace_complex / scale
+
+                x_recon, _ = model(
+                    kspace_norm, 
+                    physics_objects['physics'], 
+                    csmap_complex, 
+                    physics_objects['dcomp']
+                ) # Output shape (C, H, W, T)
+                # Reshape to standard (B, 2, T, H, W) format
+                x_recon = x_recon.permute(0, 4, 1, 2, 3) # T, C, H, W
+            
+
+            elif model_type == "CRNN":
+                # CRNN model inference is more straightforward
+                x_recon = model(kspace, physics_objects['physics'], csmap)
+                x_recon = rearrange(x_recon, 'b c h w t -> b c t h w') # Ensure T is dim 2
+
+            end = time.time()
+
+            print(f"Time for Inference: {end-start}")
+
+            # --- 4. Prepare Tensors for Metric Calculation ---
+            # Convert complex images to magnitude
+            # x_recon shape: (1, 2, T, H, W) -> (1, T, H, W)
+            recon_mag = torch.sqrt(x_recon[:, 0, ...]**2 + x_recon[:, 1, ...]**2)
+            gt_mag = torch.sqrt(ground_truth[:, 0, ...]**2 + ground_truth[:, 1, ...]**2)
+
+            # Normalize each image in the time series to [0, 1] for fair comparison
+            for t in range(recon_mag.shape[1]): # Iterate over time frames
+                frame_recon = recon_mag[:, t, :, :]
+                frame_gt = gt_mag[:, t, :, :]
+
+                # Normalize by max value of each frame
+                if frame_recon.max() > 0:
+                    frame_recon = frame_recon / frame_recon.max()
+                if frame_gt.max() > 0:
+                    frame_gt = frame_gt / frame_gt.max()
+
+                # Add channel dimension for torchmetrics: (B, H, W) -> (B, 1, H, W)
+                frame_recon = frame_recon.unsqueeze(1)
+                frame_gt = frame_gt.unsqueeze(1)
+                
+                # Update metrics
+                batch_ssim = ssim(frame_recon, frame_gt)
+                batch_psnr = psnr(frame_recon, frame_gt)
+                all_ssim_scores.append(batch_ssim.item())
+                all_psnr_scores.append(batch_psnr.item())
+    
+    # --- 5. Compute and Report Final Results ---
+    avg_ssim = np.mean(all_ssim_scores)
+    std_ssim = np.std(all_ssim_scores)
+    avg_psnr = np.mean(all_psnr_scores)
+    std_psnr = np.std(all_psnr_scores)
+
+    print("\n--- Evaluation Complete ---")
+    print(f"  Average SSIM: {avg_ssim:.4f} ± {std_ssim:.4f}")
+    print(f"  Average PSNR: {avg_psnr:.4f} ± {std_psnr:.4f}")
+    print("-" * 27)
+
+    # Save results to a file
+    results_path = os.path.join(output_dir, "evaluation_metrics.txt")
+    with open(results_path, "w") as f:
+        f.write("Evaluation Metrics on Simulated Dataset\n")
+        f.write("="*40 + "\n")
+        f.write(f"Model: {model_type}\n")
+        f.write(f"Experiment: {os.path.basename(output_dir)}\n")
+        f.write(f"Number of evaluation samples: {len(eval_dataset)}\n")
+        f.write(f"Number of time frames per sample: {ground_truth.shape[2]}\n")
+        f.write("-" * 40 + "\n")
+        f.write(f"Average SSIM: {avg_ssim:.4f} (Std: {std_ssim:.4f})\n")
+        f.write(f"Average PSNR: {avg_psnr:.4f} (Std: {std_psnr:.4f})\n")
+    
+    print(f"Results saved to {results_path}")
+    print("="*80 + "\n")
+
 
 
 def trajGR(Nkx, Nspokes):
@@ -618,6 +755,12 @@ dcomp = dcomp.to(device)
 nufft_ob = nufft_ob.to(device)
 adjnufft_ob = adjnufft_ob.to(device)
 
+eval_ktraj, eval_dcomp, eval_nufft_ob, eval_adjnufft_ob = prep_nufft(N_samples, N_spokes, 22)
+eval_ktraj = eval_ktraj.to(device)
+eval_dcomp = eval_dcomp.to(device)
+eval_nufft_ob = eval_nufft_ob.to(device)
+eval_adjnufft_ob = eval_adjnufft_ob.to(device)
+
 
 if model_type == "CRNN":
     # physics = DynamicRadialPhysics(
@@ -642,7 +785,13 @@ if model_type == "CRNN":
 elif model_type == "LSFPNet":
 
     physics = MCNUFFT(nufft_ob, adjnufft_ob, ktraj, dcomp)
-    physics_pure = MCNUFFT_pure(nufft_ob, adjnufft_ob, ktraj)
+    if config['model']['two_physics']:
+        physics_pure = MCNUFFT_pure(nufft_ob, adjnufft_ob, ktraj)
+    else:
+        physics_pure = physics
+
+    eval_physics = MCNUFFT(eval_nufft_ob, eval_adjnufft_ob, eval_ktraj, eval_dcomp)
+    eval_physics_pure = MCNUFFT_pure(eval_nufft_ob, eval_adjnufft_ob, eval_ktraj)
 
     lsfp_backbone = LSFPNet(LayerNo=config["model"]["num_layers"], channels=config['model']['channels'])
     model = ArtifactRemovalLSFPNet(lsfp_backbone).to(device)
@@ -804,25 +953,29 @@ if config["debugging"]["calc_step_0"]:
 
                     csmap = csmap.to(device).to(measured_kspace.dtype)
 
-                    # 1. --- NEW NORMALIZATION STEP ---
-                    # Calculate a stable scaling factor from the k-space data itself.
-                    with torch.no_grad():
-                        # Use the 99th percentile for robustness against a single hot pixel/outlier
-                        scale = torch.quantile(measured_kspace.abs(), 0.99)
-                        # Add epsilon for safety
-                        scale = scale + 1e-8
-                    
-                    # Normalize the input k-space
-                    measured_kspace_norm = measured_kspace / scale
+                    if config["model"]["normalization"] == "kspace":
+                        # 1. --- NEW NORMALIZATION STEP ---
+                        # Calculate a stable scaling factor from the k-space data itself.
+                        with torch.no_grad():
+                            # Use the 99th percentile for robustness against a single hot pixel/outlier
+                            scale = torch.quantile(measured_kspace.abs(), 0.99)
+                            # Add epsilon for safety
+                            scale = scale + 1e-8
+                        
+                        # Normalize the input k-space
+                        measured_kspace = measured_kspace / scale
 
-                    x_recon, total_adj_loss = model(
-                        measured_kspace_norm.to(device), physics, csmap, dcomp
+
+                        x_recon, total_adj_loss = model(
+                            measured_kspace.to(device), physics, csmap, dcomp, norm=False
+                        )
+
+                    else:
+                        x_recon, total_adj_loss = model(
+                        measured_kspace.to(device), physics, csmap, dcomp
                     )
 
                     initial_train_adj_loss += total_adj_loss.item()
-
-                    mc_loss = mc_loss_fn(measured_kspace_norm.to(device), x_recon, physics_pure, csmap)
-                    initial_train_mc_loss += mc_loss.item()
 
                 else:
 
@@ -830,8 +983,8 @@ if config["debugging"]["calc_step_0"]:
                         measured_kspace.to(device), physics, csmap
                     )  # model output shape: (B, C, T, H, W)
 
-                    mc_loss = mc_loss_fn(measured_kspace.to(device), x_recon, physics_pure, csmap)
-                    initial_train_mc_loss += mc_loss.item()
+                mc_loss = mc_loss_fn(measured_kspace.to(device), x_recon, physics_pure, csmap)
+                initial_train_mc_loss += mc_loss.item()
 
                 if use_ei_loss:
                     # x_recon: reconstructed image
@@ -863,25 +1016,30 @@ if config["debugging"]["calc_step_0"]:
 
                     csmap = csmap.to(device).to(measured_kspace.dtype)
 
-                    # 1. --- NEW NORMALIZATION STEP ---
-                    # Calculate a stable scaling factor from the k-space data itself.
-                    with torch.no_grad():
-                        # Use the 99th percentile for robustness against a single hot pixel/outlier
-                        scale = torch.quantile(measured_kspace.abs(), 0.99)
-                        # Add epsilon for safety
-                        scale = scale + 1e-8
-                    
-                    # Normalize the input k-space
-                    measured_kspace_norm = measured_kspace / scale
+                    if config["model"]["normalization"] == "kspace":
 
-                    x_recon, total_adj_loss = model(
-                        measured_kspace_norm.to(device), physics, csmap, dcomp
-                    )
+                        # 1. --- NEW NORMALIZATION STEP ---
+                        # Calculate a stable scaling factor from the k-space data itself.
+                        with torch.no_grad():
+                            # Use the 99th percentile for robustness against a single hot pixel/outlier
+                            scale = torch.quantile(measured_kspace.abs(), 0.99)
+                            # Add epsilon for safety
+                            scale = scale + 1e-8
+                        
+                        # Normalize the input k-space
+                        measured_kspace = measured_kspace / scale
+
+                        x_recon, total_adj_loss = model(
+                            measured_kspace.to(device), physics, csmap, dcomp, norm=False
+                        )
+                    
+                    else:
+                        x_recon, total_adj_loss = model(
+                            measured_kspace.to(device), physics, csmap, dcomp
+                        )
 
                     initial_val_adj_loss += total_adj_loss.item()
 
-                    mc_loss = mc_loss_fn(measured_kspace_norm.to(device), x_recon, physics_pure, csmap)
-                    initial_val_mc_loss += mc_loss.item()
                 
                 else:
 
@@ -889,8 +1047,8 @@ if config["debugging"]["calc_step_0"]:
                         measured_kspace.to(device), physics, csmap
                     )  # model output shape: (B, C, T, H, W)
 
-                    mc_loss = mc_loss_fn(measured_kspace.to(device), x_recon, physics_pure, csmap)
-                    initial_val_mc_loss += mc_loss.item()
+                mc_loss = mc_loss_fn(measured_kspace.to(device), x_recon, physics_pure, csmap)
+                initial_val_mc_loss += mc_loss.item()
 
                 if use_ei_loss:
                     # x_recon: reconstructed image
@@ -948,26 +1106,28 @@ else:
 
                 csmap = csmap.to(device).to(measured_kspace.dtype)
 
+                if config["model"]["normalization"] == "kspace":
+                    # 1. --- NEW NORMALIZATION STEP ---
+                    # Calculate a stable scaling factor from the k-space data itself.
+                    with torch.no_grad():
+                        # Use the 99th percentile for robustness against a single hot pixel/outlier
+                        scale = torch.quantile(measured_kspace.abs(), 0.99)
+                        # Add epsilon for safety
+                        scale = scale + 1e-8
+                    
+                    # Normalize the input k-space
+                    measured_kspace = measured_kspace / scale
 
-                # 1. --- NEW NORMALIZATION STEP ---
-                # Calculate a stable scaling factor from the k-space data itself.
-                with torch.no_grad():
-                    # Use the 99th percentile for robustness against a single hot pixel/outlier
-                    scale = torch.quantile(measured_kspace.abs(), 0.99)
-                    # Add epsilon for safety
-                    scale = scale + 1e-8
-                
-                # Normalize the input k-space
-                measured_kspace_norm = measured_kspace / scale
+                    x_recon, total_adjoint_loss  = model(
+                        measured_kspace.to(device), physics, csmap, dcomp, norm=False
+                    )
 
-                x_recon, total_adjoint_loss  = model(
-                    measured_kspace_norm.to(device), physics, csmap, dcomp
-                )
+                else:
+                    x_recon, total_adjoint_loss = model(
+                            measured_kspace.to(device), physics, csmap, dcomp
+                        )
 
                 running_adj_loss += total_adjoint_loss.item()
-
-                mc_loss = mc_loss_fn(measured_kspace_norm.to(device), x_recon, physics_pure, csmap)
-                running_mc_loss += mc_loss.item()
 
             else:
 
@@ -975,8 +1135,10 @@ else:
                     measured_kspace.to(device), physics, csmap
                 )  # model output shape: (B, C, T, H, W)
 
-                mc_loss = mc_loss_fn(measured_kspace.to(device), x_recon, physics_pure, csmap)
-                running_mc_loss += mc_loss.item()
+
+            mc_loss = mc_loss_fn(measured_kspace.to(device), x_recon, physics_pure, csmap)
+            running_mc_loss += mc_loss.item()
+
 
             if use_ei_loss and epoch > warmup:
                 # x_recon: reconstructed image
@@ -1109,34 +1271,37 @@ else:
 
                     val_csmap = val_csmap.to(device).to(val_kspace_batch.dtype)
 
-                    # 1. --- NEW NORMALIZATION STEP ---
-                    # Calculate a stable scaling factor from the k-space data itself.
-                    with torch.no_grad():
-                        # Use the 99th percentile for robustness against a single hot pixel/outlier
-                        scale = torch.quantile(val_kspace_batch.abs(), 0.99)
-                        # Add epsilon for safety
-                        scale = scale + 1e-8
-                    
-                    # Normalize the input k-space
-                    val_kspace_batch_norm = val_kspace_batch / scale
+                    if config["model"]["normalization"] == "kspace":
 
-                    val_x_recon, val_adj_loss = model(
-                        val_kspace_batch_norm.to(device), physics, val_csmap, dcomp
-                    )
+                        # 1. --- NEW NORMALIZATION STEP ---
+                        # Calculate a stable scaling factor from the k-space data itself.
+                        with torch.no_grad():
+                            # Use the 99th percentile for robustness against a single hot pixel/outlier
+                            scale = torch.quantile(val_kspace_batch.abs(), 0.99)
+                            # Add epsilon for safety
+                            scale = scale + 1e-8
+                        
+                        # Normalize the input k-space
+                        val_kspace_batch = val_kspace_batch / scale
+
+                        val_x_recon, val_adj_loss = model(
+                            val_kspace_batch.to(device), physics, val_csmap, dcomp, norm=False
+                        )
+                    else:
+                        val_x_recon, val_adj_loss = model(
+                            val_kspace_batch.to(device), physics, val_csmap, dcomp
+                        )
 
                     val_running_adj_loss += val_adj_loss.item()
 
-                    # For MCLoss, compare the physics model's output with the measured k-space.
-                    val_mc_loss = mc_loss_fn(val_kspace_batch_norm.to(device), val_x_recon, physics_pure, val_csmap)
-                    val_running_mc_loss += val_mc_loss.item()
 
                 else:
                     # The model takes the raw k-space and physics operator
                     val_x_recon = model(val_kspace_batch.to(device), physics, val_csmap)
 
-                    # For MCLoss, compare the physics model's output with the measured k-space.
-                    val_mc_loss = mc_loss_fn(val_kspace_batch.to(device), val_x_recon, physics_pure, val_csmap)
-                    val_running_mc_loss += val_mc_loss.item()
+                # For MCLoss, compare the physics model's output with the measured k-space.
+                val_mc_loss = mc_loss_fn(val_kspace_batch.to(device), val_x_recon, physics_pure, val_csmap)
+                val_running_mc_loss += val_mc_loss.item()
 
                 if use_ei_loss and epoch > warmup:
                     val_ei_loss, val_t_img = ei_loss_fn(
@@ -1224,6 +1389,24 @@ else:
             current_lr = optimizer.param_groups[0]['lr']
             learning_rates.append(current_lr)
             print(f"Epoch {epoch}: Learning rate updated to {current_lr:.8f}")
+
+
+        # =====================================================================
+        # --- EVALUATION ON SIMULATED DATASET ---
+        # =====================================================================
+        # This code will run after training is complete.
+
+        # We need to pass the physics objects to the evaluation function,
+        # especially for the LSFPNet model.
+        if config['evaluation']['num_samples'] > 0:
+            with torch.no_grad():
+                physics_objects = {
+                    'physics': eval_physics,
+                    'physics_pure': eval_physics_pure if model_type == "LSFPNet" else None,
+                    'dcomp': eval_dcomp if model_type == "LSFPNet" else None,
+                }
+
+                evaluate_on_simulated_data(model, device, config, output_dir, physics_objects)
 
 
         # --- Plotting and Logging ---

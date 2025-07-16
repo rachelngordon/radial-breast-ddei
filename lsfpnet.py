@@ -248,16 +248,18 @@ class ArtifactRemovalLSFPNet(nn.Module):
 
         return zf / scale, data / scale, scale
 
-    def forward(self, y, E, csmap, dcf, **kwargs):
+    def forward(self, y, E, csmap, dcf, norm=True, **kwargs):
 
         # 1. Get the initial ZF recon. This defines our target energy/scale.
         x_init = E(inv=True, data=y, smaps=csmap)
 
         # 2. Permute and normalize the input for the network
         # x_init_permuted = rearrange(x_init, "b c t h w -> b h w t c")
-        #x_init_norm, y_norm, scale = self._normalise(x_init, y)
-        x_init_norm = x_init
-        y_norm = y
+        if norm:
+            x_init_norm, y_norm, scale = self._normalise(x_init, y)
+        else:
+            x_init_norm = x_init
+            y_norm = y
 
         L, S, adjoint_L, adjoint_S = self.backbone_net(x_init_norm, E, y_norm, csmap)
 

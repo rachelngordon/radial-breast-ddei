@@ -20,7 +20,7 @@ dataloader:
   batch_size: 1
   shuffle: false
   num_workers: 2
-  max_subjects: 100
+  max_subjects: 5
   slice_idx: 41
 
 # Model settings
@@ -63,6 +63,8 @@ training:
   save_interval: 1
   plot_interval: 20
   device: "cuda"  # or "cpu"
+evaluation:
+  simulated_dataset_path: "/ess/scratch/scratch1/rachelgordon/simulated_dataset/"
 
 debugging:
   calc_step_0: false

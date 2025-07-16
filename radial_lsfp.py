@@ -52,12 +52,13 @@ class MCNUFFT(nn.Module):
                 kd = data.unsqueeze(0)
                 d = self.dcomp.unsqueeze(0).unsqueeze(0)
                 x = self.adjnufft_ob(kd*d, self.ktraj, smaps=smaps)
+
                 x = torch.squeeze(x) / np.sqrt(Nx * Ny)
 
         else:  # forward nufft
 
             if len(data.shape) > 2:  # multi-frame
-
+                
                 x = torch.zeros([smaps.shape[1], self.ktraj.shape[1], data.shape[-1]], dtype=dtype)
 
                 for ii in range(0, data.shape[-1]):
@@ -106,7 +107,7 @@ class MCNUFFT_pure(nn.Module):
 
                     tt1 = time()
 
-                    x_temp = self.adjnufft_ob(kd*d, k, smaps=smaps)
+                    x_temp = self.adjnufft_ob(kd, k, smaps=smaps)
 
                     x[:, :, ii] = torch.squeeze(x_temp) / np.sqrt(Nx * Ny)
                     tt2 = time()

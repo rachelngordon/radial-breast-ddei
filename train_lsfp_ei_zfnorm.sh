@@ -2,12 +2,12 @@
 
 # Parameters
 #SBATCH --cpus-per-task=4
-#SBATCH --error=logs/lsfpnet_ei_warp_fix_grad_norm.err
-#SBATCH --output=logs/lsfpnet_ei_warp_fix_grad_norm.out
+#SBATCH --error=logs/lsfpnet_ei_zfnorm_single_physics.err
+#SBATCH --output=logs/lsfpnet_ei_zfnorm_single_physics.out
 #SBATCH --exclude=''
 #SBATCH --gpus-per-node=1
-#SBATCH --job-name=lsfpnet_ei_warp_fix_grad_norm
-#SBATCH --mem-per-gpu=490000
+#SBATCH --job-name=lsfpnet_ei_zfnorm_single_physics
+#SBATCH --mem-per-gpu=480000
 #SBATCH --nodes=1
 #SBATCH --ntasks-per-node=1
 #SBATCH --open-mode=append
@@ -21,4 +21,4 @@ source /gpfs/data/karczmar-lab/workspaces/rachelgordon/micromamba/etc/profile.d/
 micromamba activate recon_mri
 
 # Run the training script with srun
-python3 train.py --config configs/config_ei_lsfp_warp.yaml --exp_name lsfpnet_ei_warp_fix_grad_norm
+python3 train.py --config configs/config_ei_lsfp_zfnorm.yaml --exp_name lsfpnet_ei_zfnorm_single_physics

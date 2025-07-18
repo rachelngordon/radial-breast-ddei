@@ -150,14 +150,19 @@ class SimulatedDataset(Dataset):
     It loads the simulated k-space, coil sensitivity maps, and the
     ground truth dynamic image (DRO).
     """
-    def __init__(self, root_dir, model_type):
+    def __init__(self, root_dir, model_type, num_samples):
         self.model_type = model_type
         # Find all sample directories, e.g., 'sample_001_sub1', 'sample_002_sub2', etc.
-        self.sample_paths = sorted(glob.glob(os.path.join(root_dir, 'sample_*')))
+        self.sample_paths = sorted(glob.glob(os.path.join(root_dir, 'sample_*')))[:num_samples]
         if not self.sample_paths:
             raise FileNotFoundError(f"No sample directories found in {root_dir}. "
                                     "Please check the path to your simulated dataset.")
         print(f"Found {len(self.sample_paths)} simulated samples in {root_dir}.")
+
+        self.TISSUE_NAMES = [
+            'glandular', 'benign', 'malignant', 'muscle',
+            'skin', 'liver', 'heart', 'vascular'
+        ]
 
     def __len__(self):
         return len(self.sample_paths)
@@ -168,12 +173,39 @@ class SimulatedDataset(Dataset):
         # Load the data from .npy files
         kspace_complex = np.load(os.path.join(sample_dir, 'simulated_kspace.npy'))
         csmaps = np.load(os.path.join(sample_dir, 'csmaps.npy'))
-        ground_truth_complex = np.load(os.path.join(sample_dir, 'dro_ground_truth.npy'))
+        dro = np.load(os.path.join(sample_dir, 'dro_ground_truth.npz'))
+        grasp_recon = np.load(os.path.join(sample_dir, 'grasp_recon.npy'))
+
+        ground_truth_complex = dro['ground_truth_images']
+
+        parMap = dro['parMap']
+        aif = dro['aif']
+        S0 = dro['S0']
+        T10 = dro['T10']
+        # mask = dro['mask']
+
+        # ==========================================================
+        # --- RECONSTRUCT THE MASK DICTIONARY ---
+        # ==========================================================
+        mask_dictionary_rebuilt = {}
+        for tissue_name in self.TISSUE_NAMES:
+            # Check if the key for this tissue (e.g., 'malignant') exists in the file
+            if tissue_name in dro:
+                # Load the boolean array and add it to the dictionary
+                mask_dictionary_rebuilt[tissue_name] = dro[tissue_name]
+        
+        # 'mask' is now the dictionary of boolean arrays, just like your functions expect
+        mask = mask_dictionary_rebuilt
+
 
         # --- Convert to PyTorch Tensors ---
         # Ground truth: (H, W, T) -> (2, T, H, W) [real/imag, time, h, w]
         ground_truth_torch = torch.from_numpy(ground_truth_complex).permute(2, 0, 1) # T, H, W
         ground_truth_torch = torch.stack([ground_truth_torch.real, ground_truth_torch.imag], dim=0)
+
+        # GRASP Recon: (H, W, T) -> (2, T, H, W) [real/imag, time, h, w]
+        grasp_recon_torch = torch.from_numpy(grasp_recon).permute(2, 0, 1) # T, H, W
+        grasp_recon_torch = torch.stack([grasp_recon_torch.real, grasp_recon_torch.imag], dim=0)
 
         # CSMaps: (H, W, C) -> (1, C, H, W) [batch, coils, h, w]
         csmaps_torch = torch.from_numpy(csmaps).permute(2, 0, 1).unsqueeze(0)
@@ -195,4 +227,5 @@ class SimulatedDataset(Dataset):
         else:
             raise ValueError(f"Unsupported model_type for SimulatedDataset: {self.model_type}")
 
-        return kspace_torch.float(), csmaps_torch.cfloat(), ground_truth_torch.float()
+        # return kspace_torch.float(), csmaps_torch.cfloat(), ground_truth_torch.float(), grasp_recon_torch.float(), parMap, aif, S0, T10, mask
+        return kspace_torch, csmaps_torch, ground_truth_torch, grasp_recon_torch, parMap, aif, S0, T10, mask

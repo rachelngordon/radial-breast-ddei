@@ -43,10 +43,10 @@ model:
   losses:
     use_ei_loss: true
     mc_loss:
-      weight: 1
+      weight: 10
     ei_loss:
       temporal_transform: "subsample"
-      weight: 0.0003
+      weight: 100 #0.0003
       warmup: 5
       duration: 100
       subsample_ratio_min: 0.7

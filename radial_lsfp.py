@@ -15,6 +15,7 @@ class MCNUFFT(nn.Module):
 
     def forward(self, inv, data, smaps):
 
+
         data = torch.squeeze(data)  # delete redundant dimension
         Nx = smaps.shape[2]
         Ny = smaps.shape[3]
@@ -56,6 +57,10 @@ class MCNUFFT(nn.Module):
                 x = torch.squeeze(x) / np.sqrt(Nx * Ny)
 
         else:  # forward nufft
+
+            # INPUTS: 
+            # data:  torch.Size([320, 320, 8])
+            # smaps:  torch.Size([1, 16, 320, 320])
 
             if len(data.shape) > 2:  # multi-frame
                 

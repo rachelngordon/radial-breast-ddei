@@ -2,11 +2,11 @@
 
 # Parameters
 #SBATCH --cpus-per-task=4
-#SBATCH --error=logs/lsfpnet_ei_baseline.err
-#SBATCH --output=logs/lsfpnet_ei_baseline.out
+#SBATCH --error=logs/lsfpnet_ei_knorm_two_physics.err
+#SBATCH --output=logs/lsfpnet_ei_knorm_two_physics.out
 #SBATCH --exclude=''
 #SBATCH --gpus-per-node=1
-#SBATCH --job-name=lsfpnet_ei_baseline
+#SBATCH --job-name=lsfpnet_ei_knorm_two_physics
 #SBATCH --mem-per-gpu=480000
 #SBATCH --nodes=1
 #SBATCH --ntasks-per-node=1
@@ -21,4 +21,4 @@ source /gpfs/data/karczmar-lab/workspaces/rachelgordon/micromamba/etc/profile.d/
 micromamba activate recon_mri
 
 # Run the training script with srun
-python3 train.py --config configs/config_ei_lsfp.yaml --exp_name lsfpnet_ei_baseline
+python3 train.py --config configs/config_ei_lsfp_knorm_two.yaml --exp_name lsfpnet_ei_knorm_two_physics

@@ -271,8 +271,11 @@ class ArtifactRemovalLSFPNet(nn.Module):
         if adjoint_S:
             for loss_tensor in adjoint_S:
                 total_adjoint_loss_scalar += torch.mean(torch.abs(loss_tensor))
+        if norm:
+            recon = (L + S) * scale                  # rescale to original units
+        else:
+            recon = (L + S)
 
-        recon = (L + S) #* scale                  # rescale to original units
 
         # 4) stack & convert back to (B,2,T,H,W) float32
         x_hat = torch.stack((recon.real, recon.imag), dim=0).unsqueeze(0)  # (B,2,H,W,T)

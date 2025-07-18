@@ -20,7 +20,7 @@ dataloader:
   batch_size: 1
   shuffle: false
   num_workers: 2
-  max_subjects: 300
+  max_subjects: 100
   slice_idx: 41
 
 # Model settings
@@ -55,8 +55,8 @@ model:
       warp_ratio_max: 0.95
     adj_loss:
       weight: 0.0001
-  normalization: "zf"
-  two_physics: false
+  normalization: "kspace"
+  two_physics: true
 
 
 # Training settings

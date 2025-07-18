@@ -27,140 +27,141 @@ from torch.amp import GradScaler, autocast
 import csv
 import torchmetrics
 import time
+from eval import eval_model
 
-def evaluate_on_simulated_data(model, device, config, output_dir, physics_objects):
-    """
-    Performs inference on the simulated test set and computes SSIM and PSNR.
+# def evaluate_on_simulated_data(model, device, config, output_dir, physics_objects):
+#     """
+#     Performs inference on the simulated test set and computes SSIM and PSNR.
     
-    Args:
-        model: The trained model.
-        device: The device to run inference on (e.g., 'cuda').
-        config: The experiment configuration dictionary.
-        output_dir: The main directory for saving results.
-        physics_objects (dict): A dictionary containing the necessary physics objects 
-                                like physics, physics_pure, etc.
-    """
-    print("\n" + "="*80)
-    print("--- Starting Final Evaluation on Simulated Dataset ---")
-    print("="*80)
+#     Args:
+#         model: The trained model.
+#         device: The device to run inference on (e.g., 'cuda').
+#         config: The experiment configuration dictionary.
+#         output_dir: The main directory for saving results.
+#         physics_objects (dict): A dictionary containing the necessary physics objects 
+#                                 like physics, physics_pure, etc.
+#     """
+#     print("\n" + "="*80)
+#     print("--- Starting Final Evaluation on Simulated Dataset ---")
+#     print("="*80)
 
-    # --- 1. Setup DataLoader for Simulated Data ---
-    simulated_data_path = config["evaluation"]["simulated_dataset_path"]
-    model_type = config["model"]["name"]
+#     # --- 1. Setup DataLoader for Simulated Data ---
+#     simulated_data_path = config["evaluation"]["simulated_dataset_path"]
+#     model_type = config["model"]["name"]
 
-    try:
-        eval_dataset = SimulatedDataset(root_dir=simulated_data_path, model_type=model_type)
-    except FileNotFoundError as e:
-        print(f"ERROR: {e}")
-        print("Skipping evaluation.")
-        return
+#     try:
+#         eval_dataset = SimulatedDataset(root_dir=simulated_data_path, model_type=model_type)
+#     except FileNotFoundError as e:
+#         print(f"ERROR: {e}")
+#         print("Skipping evaluation.")
+#         return
 
-    # Use a batch size of 1 for evaluation to process one sample at a time
-    eval_loader = DataLoader(eval_dataset, batch_size=1, shuffle=False, num_workers=4)
+#     # Use a batch size of 1 for evaluation to process one sample at a time
+#     eval_loader = DataLoader(eval_dataset, batch_size=1, shuffle=False, num_workers=4)
 
-    # --- 2. Initialize Metrics ---
-    # We will compute metrics frame by frame. data_range is important for PSNR.
-    # We normalize images to [0, 1], so the data_range is 1.0.
-    ssim = torchmetrics.StructuralSimilarityIndexMeasure(data_range=1.0).to(device)
-    psnr = torchmetrics.PeakSignalNoiseRatio(data_range=1.0).to(device)
+#     # --- 2. Initialize Metrics ---
+#     # We will compute metrics frame by frame. data_range is important for PSNR.
+#     # We normalize images to [0, 1], so the data_range is 1.0.
+#     ssim = torchmetrics.StructuralSimilarityIndexMeasure(data_range=1.0).to(device)
+#     psnr = torchmetrics.PeakSignalNoiseRatio(data_range=1.0).to(device)
     
-    # Store results
-    all_ssim_scores = []
-    all_psnr_scores = []
+#     # Store results
+#     all_ssim_scores = []
+#     all_psnr_scores = []
     
-    # --- 3. Evaluation Loop ---
-    model.eval()
-    with torch.no_grad():
-        for i, (kspace, csmap, ground_truth) in enumerate(tqdm(eval_loader, desc="Evaluating on Simulated Data")):
+#     # --- 3. Evaluation Loop ---
+#     model.eval()
+#     with torch.no_grad():
+#         for i, (kspace, csmap, ground_truth) in enumerate(tqdm(eval_loader, desc="Evaluating on Simulated Data")):
 
-            start = time.time()
+#             start = time.time()
             
-            kspace = kspace.to(device)
-            csmap = csmap.to(device)
-            ground_truth = ground_truth.to(device) # Shape: (1, 2, T, H, W)
+#             kspace = kspace.to(device)
+#             csmap = csmap.to(device)
+#             ground_truth = ground_truth.to(device) # Shape: (1, 2, T, H, W)
             
-            # --- Perform Inference (handle different model types) ---
-            if model_type == "LSFPNet":
-                # LSFPNet requires specific data handling
-                kspace_complex = kspace.squeeze(0) # Remove batch dim
-                csmap_complex = csmap.squeeze(0)   # Remove batch dim
+#             # --- Perform Inference (handle different model types) ---
+#             if model_type == "LSFPNet":
+#                 # LSFPNet requires specific data handling
+#                 kspace_complex = kspace.squeeze(0) # Remove batch dim
+#                 csmap_complex = csmap.squeeze(0)   # Remove batch dim
 
-                with torch.no_grad():
-                    scale = torch.quantile(kspace_complex.abs(), 0.99) + 1e-8
-                kspace_norm = kspace_complex / scale
+#                 with torch.no_grad():
+#                     scale = torch.quantile(kspace_complex.abs(), 0.99) + 1e-8
+#                 kspace_norm = kspace_complex / scale
 
-                x_recon, _ = model(
-                    kspace_norm, 
-                    physics_objects['physics'], 
-                    csmap_complex, 
-                    physics_objects['dcomp']
-                ) # Output shape (C, H, W, T)
-                # Reshape to standard (B, 2, T, H, W) format
-                x_recon = x_recon.permute(0, 4, 1, 2, 3) # T, C, H, W
+#                 x_recon, _ = model(
+#                     kspace_norm, 
+#                     physics_objects['physics'], 
+#                     csmap_complex, 
+#                     physics_objects['dcomp']
+#                 ) # Output shape (C, H, W, T)
+#                 # Reshape to standard (B, 2, T, H, W) format
+#                 x_recon = x_recon.permute(0, 4, 1, 2, 3) # T, C, H, W
             
 
-            elif model_type == "CRNN":
-                # CRNN model inference is more straightforward
-                x_recon = model(kspace, physics_objects['physics'], csmap)
-                x_recon = rearrange(x_recon, 'b c h w t -> b c t h w') # Ensure T is dim 2
+#             elif model_type == "CRNN":
+#                 # CRNN model inference is more straightforward
+#                 x_recon = model(kspace, physics_objects['physics'], csmap)
+#                 x_recon = rearrange(x_recon, 'b c h w t -> b c t h w') # Ensure T is dim 2
 
-            end = time.time()
+#             end = time.time()
 
-            print(f"Time for Inference: {end-start}")
+#             print(f"Time for Inference: {end-start}")
 
-            # --- 4. Prepare Tensors for Metric Calculation ---
-            # Convert complex images to magnitude
-            # x_recon shape: (1, 2, T, H, W) -> (1, T, H, W)
-            recon_mag = torch.sqrt(x_recon[:, 0, ...]**2 + x_recon[:, 1, ...]**2)
-            gt_mag = torch.sqrt(ground_truth[:, 0, ...]**2 + ground_truth[:, 1, ...]**2)
+#             # --- 4. Prepare Tensors for Metric Calculation ---
+#             # Convert complex images to magnitude
+#             # x_recon shape: (1, 2, T, H, W) -> (1, T, H, W)
+#             recon_mag = torch.sqrt(x_recon[:, 0, ...]**2 + x_recon[:, 1, ...]**2)
+#             gt_mag = torch.sqrt(ground_truth[:, 0, ...]**2 + ground_truth[:, 1, ...]**2)
 
-            # Normalize each image in the time series to [0, 1] for fair comparison
-            for t in range(recon_mag.shape[1]): # Iterate over time frames
-                frame_recon = recon_mag[:, t, :, :]
-                frame_gt = gt_mag[:, t, :, :]
+#             # Normalize each image in the time series to [0, 1] for fair comparison
+#             for t in range(recon_mag.shape[1]): # Iterate over time frames
+#                 frame_recon = recon_mag[:, t, :, :]
+#                 frame_gt = gt_mag[:, t, :, :]
 
-                # Normalize by max value of each frame
-                if frame_recon.max() > 0:
-                    frame_recon = frame_recon / frame_recon.max()
-                if frame_gt.max() > 0:
-                    frame_gt = frame_gt / frame_gt.max()
+#                 # Normalize by max value of each frame
+#                 if frame_recon.max() > 0:
+#                     frame_recon = frame_recon / frame_recon.max()
+#                 if frame_gt.max() > 0:
+#                     frame_gt = frame_gt / frame_gt.max()
 
-                # Add channel dimension for torchmetrics: (B, H, W) -> (B, 1, H, W)
-                frame_recon = frame_recon.unsqueeze(1)
-                frame_gt = frame_gt.unsqueeze(1)
+#                 # Add channel dimension for torchmetrics: (B, H, W) -> (B, 1, H, W)
+#                 frame_recon = frame_recon.unsqueeze(1)
+#                 frame_gt = frame_gt.unsqueeze(1)
                 
-                # Update metrics
-                batch_ssim = ssim(frame_recon, frame_gt)
-                batch_psnr = psnr(frame_recon, frame_gt)
-                all_ssim_scores.append(batch_ssim.item())
-                all_psnr_scores.append(batch_psnr.item())
+#                 # Update metrics
+#                 batch_ssim = ssim(frame_recon, frame_gt)
+#                 batch_psnr = psnr(frame_recon, frame_gt)
+#                 all_ssim_scores.append(batch_ssim.item())
+#                 all_psnr_scores.append(batch_psnr.item())
     
-    # --- 5. Compute and Report Final Results ---
-    avg_ssim = np.mean(all_ssim_scores)
-    std_ssim = np.std(all_ssim_scores)
-    avg_psnr = np.mean(all_psnr_scores)
-    std_psnr = np.std(all_psnr_scores)
+#     # --- 5. Compute and Report Final Results ---
+#     avg_ssim = np.mean(all_ssim_scores)
+#     std_ssim = np.std(all_ssim_scores)
+#     avg_psnr = np.mean(all_psnr_scores)
+#     std_psnr = np.std(all_psnr_scores)
 
-    print("\n--- Evaluation Complete ---")
-    print(f"  Average SSIM: {avg_ssim:.4f} ± {std_ssim:.4f}")
-    print(f"  Average PSNR: {avg_psnr:.4f} ± {std_psnr:.4f}")
-    print("-" * 27)
+#     print("\n--- Evaluation Complete ---")
+#     print(f"  Average SSIM: {avg_ssim:.4f} ± {std_ssim:.4f}")
+#     print(f"  Average PSNR: {avg_psnr:.4f} ± {std_psnr:.4f}")
+#     print("-" * 27)
 
-    # Save results to a file
-    results_path = os.path.join(output_dir, "evaluation_metrics.txt")
-    with open(results_path, "w") as f:
-        f.write("Evaluation Metrics on Simulated Dataset\n")
-        f.write("="*40 + "\n")
-        f.write(f"Model: {model_type}\n")
-        f.write(f"Experiment: {os.path.basename(output_dir)}\n")
-        f.write(f"Number of evaluation samples: {len(eval_dataset)}\n")
-        f.write(f"Number of time frames per sample: {ground_truth.shape[2]}\n")
-        f.write("-" * 40 + "\n")
-        f.write(f"Average SSIM: {avg_ssim:.4f} (Std: {std_ssim:.4f})\n")
-        f.write(f"Average PSNR: {avg_psnr:.4f} (Std: {std_psnr:.4f})\n")
+#     # Save results to a file
+#     results_path = os.path.join(output_dir, "evaluation_metrics.txt")
+#     with open(results_path, "w") as f:
+#         f.write("Evaluation Metrics on Simulated Dataset\n")
+#         f.write("="*40 + "\n")
+#         f.write(f"Model: {model_type}\n")
+#         f.write(f"Experiment: {os.path.basename(output_dir)}\n")
+#         f.write(f"Number of evaluation samples: {len(eval_dataset)}\n")
+#         f.write(f"Number of time frames per sample: {ground_truth.shape[2]}\n")
+#         f.write("-" * 40 + "\n")
+#         f.write(f"Average SSIM: {avg_ssim:.4f} (Std: {std_ssim:.4f})\n")
+#         f.write(f"Average PSNR: {avg_psnr:.4f} (Std: {std_psnr:.4f})\n")
     
-    print(f"Results saved to {results_path}")
-    print("="*80 + "\n")
+#     print(f"Results saved to {results_path}")
+#     print("="*80 + "\n")
 
 
 
@@ -1406,7 +1407,7 @@ else:
                     'dcomp': eval_dcomp if model_type == "LSFPNet" else None,
                 }
 
-                evaluate_on_simulated_data(model, device, config, output_dir, physics_objects)
+                eval_model(model, device, config, output_dir, physics_objects)
 
 
         # --- Plotting and Logging ---

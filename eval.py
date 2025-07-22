@@ -7,7 +7,7 @@ from tqdm import tqdm
 import numpy as np
 import torchmetrics
 import time
-from dataloader import SimulatedDataset
+from data.dataloader import SimulatedDataset
 from lsfpnet import to_torch_complex, from_torch_complex
 import numpy as np
 from scipy.optimize import curve_fit

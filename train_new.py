@@ -1,40 +1,29 @@
 import argparse
 import json
 import os
-import subprocess
-
-import deepinv as dinv
 import matplotlib.pyplot as plt
 import torch
 import yaml
-from crnn import CRNN, ArtifactRemovalCRNN
-from dataloader import SliceDataset, SimulatedDataset
-# from deepinv.loss import MCLoss#, EILoss
+from data.dataloader import SliceDataset
 from deepinv.transform import Transform
 from einops import rearrange
-from radial import DynamicRadialPhysics, RadialDCLayer, to_torch_complex, MCNUFFT_CRNN
+from data.radial import to_torch_complex
 from torch.utils.data import DataLoader
 from torchvision.transforms import InterpolationMode
 from tqdm import tqdm
-import numpy as np
-from transform import VideoRotate, VideoDiffeo, SubsampleTime, MonophasicTimeWarp, TemporalNoise, TimeReverse
-from ei import EILoss
-from mc import MCLoss
-from lsfpnet import LSFPNet, ArtifactRemovalLSFPNet
-from radial_lsfp import MCNUFFT, MCNUFFT_pure
-import torchkbnufft as tkbn
-from torch.amp import GradScaler, autocast
-import csv
-import torchmetrics
-import time
+from losses.transform import VideoRotate, VideoDiffeo, SubsampleTime, MonophasicTimeWarp, TemporalNoise, TimeReverse
+from losses.ei import EILoss
+from losses.mc import MCLoss
+from models.lsfpnet import LSFPNet
+from data.radial_lsfp import MCNUFFT
 from eval import eval_model
-from train_funcs import trajGR, prep_nufft, log_gradient_stats, plot_enhancement_curve, get_cosine_ei_weight, plot_reconstruction_sample, get_git_commit, save_checkpoint, load_checkpoint
+from utils import prep_nufft, log_gradient_stats, plot_enhancement_curve, get_cosine_ei_weight, plot_reconstruction_sample, get_git_commit, save_checkpoint, load_checkpoint
 
 
     
 
 # Parse command-line arguments
-parser = argparse.ArgumentParser(description="Train ReconResNet model.")
+parser = argparse.ArgumentParser()
 parser.add_argument(
     "--config",
     type=str,
@@ -187,35 +176,14 @@ eval_nufft_ob = eval_nufft_ob.to(device)
 eval_adjnufft_ob = eval_adjnufft_ob.to(device)
 
 
-if model_type == "CRNN":
-    # physics = DynamicRadialPhysics(
-    # im_size=(H, W, N_time),
-    # N_spokes=N_spokes,
-    # N_samples=N_samples,
-    # N_time=N_time,
-    # N_coils=N_coils,
-    # )
 
-    physics = MCNUFFT_CRNN(nufft_ob, adjnufft_ob, ktraj, dcomp, N_time, N_spokes, N_samples, N_coils)
 
-    datalayer = RadialDCLayer(physics=physics)
-    backbone = CRNN(
-        num_cascades=config["model"]["cascades"],
-        chans=config["model"]["channels"],
-        datalayer=datalayer,
-    ).to(device)
 
-    model = ArtifactRemovalCRNN(backbone_net=backbone).to(device)
+physics = MCNUFFT(nufft_ob, adjnufft_ob, ktraj, dcomp)
+eval_physics = MCNUFFT(eval_nufft_ob, eval_adjnufft_ob, eval_ktraj, eval_dcomp)
 
-elif model_type == "LSFPNet":
+model = LSFPNet(LayerNo=num_layers, channels=config['model']['channels']).to(device)
 
-    physics = MCNUFFT(nufft_ob, adjnufft_ob, ktraj, dcomp)
-    eval_physics = MCNUFFT(eval_nufft_ob, eval_adjnufft_ob, eval_ktraj, eval_dcomp)
-
-    model = LSFPNet(LayerNo=num_layers, channels=config['model']['channels']).to(device)
-
-else:
-    raise(ValueError("Unsupported model."))
 
 optimizer = torch.optim.Adam(
     model.parameters(),

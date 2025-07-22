@@ -2,7 +2,7 @@
 data:
   root_dir: "/ess/scratch/scratch1/rachelgordon/dce-8tf/binned_kspace"
   dataset_key: "ktspace"
-  split_file: "/gpfs/data/karczmar-lab/workspaces/rachelgordon/breastMRI-recon/ddei/patient_splits.json"
+  split_file: "/gpfs/data/karczmar-lab/workspaces/rachelgordon/breastMRI-recon/ddei/data/patient_splits.json"
   val_split_ratio: 0.2
   height: 320
   width: 320

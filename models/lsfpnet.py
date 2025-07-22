@@ -4,7 +4,7 @@ import torch
 import torch.nn as nn
 from torch.nn import init
 import torch.nn.functional as F
-from lsp import Project_inf, Wxs, Wtxs
+from .lsp import Project_inf, Wxs, Wtxs
 from einops import rearrange
 
 

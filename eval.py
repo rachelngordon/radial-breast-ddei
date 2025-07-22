@@ -8,7 +8,7 @@ import numpy as np
 import torchmetrics
 import time
 from data.dataloader import SimulatedDataset
-from lsfpnet import to_torch_complex, from_torch_complex
+from models.lsfpnet import to_torch_complex, from_torch_complex
 import numpy as np
 from scipy.optimize import curve_fit
 from scipy.interpolate import PchipInterpolator

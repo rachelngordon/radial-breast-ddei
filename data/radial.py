@@ -5,7 +5,7 @@ import torch.nn as nn
 from deepinv.physics.time import TimeMixin
 from einops import rearrange
 from torchkbnufft import KbNufft, KbNufftAdjoint
-from noise import ZeroNoise
+from .noise import ZeroNoise
 import warnings
 from torch import Tensor
 from time import time

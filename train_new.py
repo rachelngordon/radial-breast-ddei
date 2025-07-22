@@ -7,7 +7,6 @@ import yaml
 from data.dataloader import SliceDataset
 from deepinv.transform import Transform
 from einops import rearrange
-from data.radial import to_torch_complex
 from torch.utils.data import DataLoader
 from torchvision.transforms import InterpolationMode
 from tqdm import tqdm
@@ -17,7 +16,7 @@ from losses.mc import MCLoss
 from models.lsfpnet import LSFPNet
 from data.radial_lsfp import MCNUFFT
 from eval import eval_model
-from utils import prep_nufft, log_gradient_stats, plot_enhancement_curve, get_cosine_ei_weight, plot_reconstruction_sample, get_git_commit, save_checkpoint, load_checkpoint
+from utils import prep_nufft, log_gradient_stats, plot_enhancement_curve, get_cosine_ei_weight, plot_reconstruction_sample, get_git_commit, save_checkpoint, load_checkpoint, to_torch_complex
 
 
     
@@ -766,7 +765,6 @@ else:
                 with torch.no_grad():
                     physics_objects = {
                         'physics': eval_physics,
-                        'physics_pure': eval_physics_pure if model_type == "LSFPNet" else None,
                         'dcomp': eval_dcomp if model_type == "LSFPNet" else None,
                     }
 

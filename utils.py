@@ -5,6 +5,19 @@ import torch
 import numpy as np
 import torchkbnufft as tkbn
 import csv
+from einops import rearrange
+
+def to_torch_complex(x: torch.Tensor):
+    """(B, 2, ...) real -> (B, ...) complex"""
+    assert x.shape[1] == 2, (
+        f"Input tensor must have 2 channels (real, imag), but got shape {x.shape}"
+    )
+    return torch.view_as_complex(rearrange(x, "b c ... -> b ... c").contiguous())
+
+
+def from_torch_complex(x: torch.Tensor):
+    """(B, ...) complex -> (B, 2, ...) real"""
+    return rearrange(torch.view_as_real(x), "b ... c -> b c ...").contiguous()
 
 
 

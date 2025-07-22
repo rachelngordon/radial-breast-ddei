@@ -1,7 +1,6 @@
 import argparse
 import json
 import os
-import subprocess
 import matplotlib.pyplot as plt
 import torch
 import yaml
@@ -19,8 +18,6 @@ from losses.ei import EILoss
 from losses.mc import MCLoss
 from models.lsfpnet import LSFPNet, ArtifactRemovalLSFPNet
 from data.radial_lsfp import MCNUFFT, MCNUFFT_pure
-import torchkbnufft as tkbn
-import csv
 from eval import eval_model
 from utils import prep_nufft, log_gradient_stats, plot_enhancement_curve, get_cosine_ei_weight, plot_reconstruction_sample, get_git_commit, save_checkpoint, load_checkpoint
     

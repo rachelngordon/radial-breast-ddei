@@ -48,13 +48,9 @@ class MCLoss(Loss):
         elif self.model_type == "LSFPNet":
             x_net = to_torch_complex(x_net)
 
-            x_net_norm = x_net #/ (scale + 1e-8)
-
-            y_hat = physics(inv=False, data=x_net_norm, smaps=csmap).to(self.device)
-
-            y_norm = y #/ (scale + 1e-8)
+            y_hat = physics(inv=False, data=x_net, smaps=csmap).to(self.device)
 
             y_hat = torch.stack([y_hat.real, y_hat.imag], dim=-1)
-            y = torch.stack([y_norm.real, y_norm.imag], dim=-1)
+            y = torch.stack([y.real, y.imag], dim=-1)
 
             return self.metric(y_hat, y)

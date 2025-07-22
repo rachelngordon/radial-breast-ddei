@@ -37,7 +37,7 @@ model:
     b2: 0.999
     eps: 0.000000001
   scheduler:
-      enable: true
+      enable: false
       type: "cosine"
       min_lr: 1.0e-6
   losses:
@@ -46,7 +46,7 @@ model:
       weight: 10
     ei_loss:
       temporal_transform: "subsample"
-      weight: 100 #0.0003
+      weight: 10 #0.0003
       warmup: 5
       duration: 100
       subsample_ratio_min: 0.7
@@ -54,7 +54,7 @@ model:
       warp_ratio_min: 0.6
       warp_ratio_max: 0.95
     adj_loss:
-      weight: 0.0001
+      weight: 0.00001
   normalization: "zf"
   two_physics: false
 
@@ -66,7 +66,7 @@ training:
   plot_interval: 20
   device: "cuda"  # or "cpu"
 evaluation:
-  num_samples: 0
+  num_samples: 1
   simulated_dataset_path: "/ess/scratch/scratch1/rachelgordon/simulated_dataset/"
 
 debugging:

@@ -2,12 +2,12 @@
 
 # Parameters
 #SBATCH --cpus-per-task=4
-#SBATCH --error=logs/lsfpnet_ei_sq_adj_lower_weight.err
-#SBATCH --output=logs/lsfpnet_ei_sq_adj_lower_weight.out
+#SBATCH --error=logs/new_lsfpnet_mc.err
+#SBATCH --output=logs/new_lsfpnet_mc.out
 #SBATCH --exclude=''
 #SBATCH --gpus-per-node=1
-#SBATCH --job-name=lsfpnet_ei_sq_adj_lower_weight
-#SBATCH --mem-per-gpu=400000
+#SBATCH --job-name=new_lsfpnet_mc
+#SBATCH --mem-per-gpu=80000
 #SBATCH --nodes=1
 #SBATCH --ntasks-per-node=1
 #SBATCH --open-mode=append
@@ -21,4 +21,4 @@ source /gpfs/data/karczmar-lab/workspaces/rachelgordon/micromamba/etc/profile.d/
 micromamba activate recon_mri
 
 # Run the training script with srun
-python3 train.py --config configs/config_ei_lsfp.yaml --exp_name lsfpnet_ei_sq_adj_lower_weight
+python3 train_new.py --config configs/config_mc_lsfp.yaml --exp_name new_lsfpnet_mc

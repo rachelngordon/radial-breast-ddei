@@ -2,12 +2,12 @@
 
 # Parameters
 #SBATCH --cpus-per-task=4
-#SBATCH --error=logs/lsfpnet_mc_adj_loss_weight1.err
-#SBATCH --output=logs/lsfpnet_mc_adj_loss_weight1.out
+#SBATCH --error=logs/lsfpnet_mc_baseline.err
+#SBATCH --output=logs/lsfpnet_mc_baseline.out
 #SBATCH --exclude=''
 #SBATCH --gpus-per-node=1
-#SBATCH --job-name=lsfpnet_mc_adj_loss_weight1
-#SBATCH --mem-per-gpu=490000
+#SBATCH --job-name=lsfpnet_mc_baseline
+#SBATCH --mem-per-gpu=80000
 #SBATCH --nodes=1
 #SBATCH --ntasks-per-node=1
 #SBATCH --open-mode=append
@@ -21,4 +21,4 @@ source /gpfs/data/karczmar-lab/workspaces/rachelgordon/micromamba/etc/profile.d/
 micromamba activate recon_mri
 
 # Run the training script with srun
-python3 train.py --config configs/config_mc_lsfp.yaml --exp_name lsfpnet_mc_adj_loss_weight1
+python3 train.py --config configs/config_mc_lsfp.yaml --exp_name lsfpnet_mc_baseline

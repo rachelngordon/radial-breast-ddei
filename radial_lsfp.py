@@ -19,12 +19,14 @@ class MCNUFFT(nn.Module):
         data = torch.squeeze(data)  # delete redundant dimension
         Nx = smaps.shape[2]
         Ny = smaps.shape[3]
+        smaps = smaps.to(dtype=dtype, device=data.device)
 
         if inv:  # adjoint nufft
 
             smaps = smaps.to(dtype)
 
             if len(data.shape) > 2:  # multi-frame
+                # frames = []
 
                 x = torch.zeros([Nx, Ny, data.shape[2]], dtype=dtype)
 
@@ -39,6 +41,7 @@ class MCNUFFT(nn.Module):
                     tt1 = time()
 
                     x_temp = self.adjnufft_ob(kd*d, k, smaps=smaps)
+                    # frames.append(torch.squeeze(x_temp))
 
                     x[:, :, ii] = torch.squeeze(x_temp) / np.sqrt(Nx * Ny)
                     tt2 = time()
@@ -47,6 +50,7 @@ class MCNUFFT(nn.Module):
                     # plt.figure()
                     # plt.imshow(np.abs(x_temp.numpy()), 'gray')
                     # plt.show()
+                # x = torch.stack(frames, dim=2) / np.sqrt(Nx * Ny)
 
             else:  # single frame
 
@@ -65,6 +69,7 @@ class MCNUFFT(nn.Module):
             if len(data.shape) > 2:  # multi-frame
                 
                 x = torch.zeros([smaps.shape[1], self.ktraj.shape[1], data.shape[-1]], dtype=dtype)
+                # frames = []
 
                 for ii in range(0, data.shape[-1]):
                     image = data[:, :, ii]
@@ -73,6 +78,8 @@ class MCNUFFT(nn.Module):
                     image = image.unsqueeze(0).unsqueeze(0)
                     x_temp = self.nufft_ob(image, k, smaps=smaps)
                     x[:, :, ii] = torch.squeeze(x_temp) / np.sqrt(Nx * Ny)
+                #     frames.append(torch.squeeze(x_temp))
+                # x = torch.stack(frames, dim=2) / np.sqrt(Nx * Ny)
 
             else:  # single frame
 
@@ -95,6 +102,7 @@ class MCNUFFT_pure(nn.Module):
         data = torch.squeeze(data)  # delete redundant dimension
         Nx = smaps.shape[2]
         Ny = smaps.shape[3]
+        
 
         if inv:  # adjoint nufft
 

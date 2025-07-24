@@ -147,48 +147,7 @@ class SliceDataset(Dataset):
         return kspace_final, csmap, grasp_img
 
 
-# ----------------------------
-# Example usage:
-# ----------------------------
-if __name__ == "__main__":
-    # 1) Point this to wherever your HDF5 k-space files live
-    root_dir = "/ess/scratch/scratch1/rachelgordon/dce-12tf/binned_kspace"
 
-    # 2) If your HDF5 file stores k-space under a different key path, adjust dataset_key:
-    dataset_key = "ktspace"  # change if your HDF5 group/dataset is named differently
-
-    # 3) (Optional) Example transform: convert two‐channel real/imag → complex64
-    def to_complex(x_np: "np.ndarray") -> "np.ndarray":
-        """
-        If x_np.shape = (C, H, W, 2) or similar where the last dim is [real, imag],
-        convert to complex64 with shape (C, H, W).
-        Adjust slicing logic if your real/imag channels are elsewhere.
-        """
-        real = x_np[..., 0].astype("float32")
-        imag = x_np[..., 1].astype("float32")
-        return (real + 1j * imag).astype("complex64")
-
-    dataset = SliceDataset(
-        root_dir=root_dir, dataset_key=dataset_key, file_pattern="*.h5"
-    )
-
-    # 4) Wrap in DataLoader
-    loader = DataLoader(
-        dataset,
-        batch_size=1,
-        shuffle=True,
-        num_workers=4,
-        pin_memory=True,
-    )
-
-    # 5) Iterate and inspect
-    for batch_idx, kspace_batch in enumerate(loader):
-        # kspace_batch.dtype could be torch.float32 or torch.complex64, depending on transform
-        print(
-            f"Batch {batch_idx}: k-space batch shape = {kspace_batch.shape}, dtype = {kspace_batch.dtype}"
-        )
-        # Now feed `kspace_batch` into your DDEI model or DC layer, etc.
-        break
 
 class SimulatedDataset(Dataset):
     """
@@ -196,14 +155,25 @@ class SimulatedDataset(Dataset):
     It loads the simulated k-space, coil sensitivity maps, and the
     ground truth dynamic image (DRO).
     """
-    def __init__(self, root_dir, model_type, num_samples):
+    def __init__(self, root_dir, model_type, patient_ids):
         self.model_type = model_type
         # Find all sample directories, e.g., 'sample_001_sub1', 'sample_002_sub2', etc.
-        self.sample_paths = sorted(glob.glob(os.path.join(root_dir, 'sample_*')))[:num_samples]
+        self.sample_paths = sorted(glob.glob(os.path.join(root_dir, 'sample_*')))
         if not self.sample_paths:
             raise FileNotFoundError(f"No sample directories found in {root_dir}. "
                                     "Please check the path to your simulated dataset.")
-        print(f"Found {len(self.sample_paths)} simulated samples in {root_dir}.")
+        
+        # filter file list by patient ID substring
+        filtered = []
+        for fp in self.sample_paths:
+            fname = os.path.basename(fp)
+            # Check if any patient_id appears in the filename
+            if any(pid in fname for pid in patient_ids):
+                filtered.append(fp)
+
+        self.sample_paths = filtered
+
+        print(f"Found {len(self.sample_paths)} simulated samples in {root_dir} for this dataset.")
 
         self.TISSUE_NAMES = [
             'glandular', 'benign', 'malignant', 'muscle',
@@ -274,4 +244,4 @@ class SimulatedDataset(Dataset):
             raise ValueError(f"Unsupported model_type for SimulatedDataset: {self.model_type}")
 
         # return kspace_torch.float(), csmaps_torch.cfloat(), ground_truth_torch.float(), grasp_recon_torch.float(), parMap, aif, S0, T10, mask
-        return kspace_torch, csmaps_torch, ground_truth_torch, grasp_recon_torch, parMap, aif, S0, T10, mask
+        return kspace_torch, csmaps_torch, ground_truth_torch, grasp_recon_torch, mask#, parMap, aif, S0, T10, mask

@@ -6,7 +6,7 @@ import matplotlib.pyplot as plt
 import torch
 import yaml
 from crnn import CRNN, ArtifactRemovalCRNN
-from dataloader import SliceDataset
+from dataloader import SliceDataset, SimulatedDataset
 from deepinv.transform import Transform
 from einops import rearrange
 from radial import RadialDCLayer, to_torch_complex, MCNUFFT_CRNN
@@ -19,7 +19,7 @@ from mc import MCLoss
 from lsfpnet import LSFPNet, ArtifactRemovalLSFPNet
 from radial_lsfp import MCNUFFT
 from utils import prep_nufft, log_gradient_stats, plot_enhancement_curve, get_cosine_ei_weight, plot_reconstruction_sample, get_git_commit, save_checkpoint, load_checkpoint, to_torch_complex
-from eval import eval_model
+from eval import eval_model, eval_grasp, eval_sample
 
 
 # Parse command-line arguments
@@ -119,13 +119,18 @@ with open(split_file, "r") as fp:
 # NOTE: need to look into why I am only loading 88 training samples and not 192
 if max_subjects < 300:
     max_train = int(max_subjects * (1 - config["data"]["val_split_ratio"]))
-    max_val = int(max_subjects * config["data"]["val_split_ratio"])
 
     train_patient_ids = splits["train"][:max_train]
-    val_patient_ids = splits["val"][:max_val]
+
+    val_patient_ids = splits["val"][:2]
+    val_dro_patient_ids = splits["val_dro"][:2]
+    
+
 else:
     train_patient_ids = splits["train"]
+
     val_patient_ids = splits["val"]
+    val_dro_patient_ids = splits["val_dro"]
 
 
 train_dataset = SliceDataset(
@@ -146,6 +151,11 @@ val_dataset = SliceDataset(
     N_coils=N_coils
 )
 
+val_dro_dataset = SimulatedDataset(
+    root_dir=config["evaluation"]["simulated_dataset_path"], 
+    model_type=model_type, 
+    patient_ids=val_dro_patient_ids)
+
 
 train_loader = DataLoader(
     train_dataset,
@@ -157,6 +167,13 @@ train_loader = DataLoader(
 
 val_loader = DataLoader(
     val_dataset,
+    batch_size=config["dataloader"]["batch_size"],
+    shuffle=config["dataloader"]["shuffle"],
+    num_workers=config["dataloader"]["num_workers"],
+)
+
+val_dro_loader = DataLoader(
+    val_dro_dataset,
     batch_size=config["dataloader"]["batch_size"],
     shuffle=config["dataloader"]["shuffle"],
     num_workers=config["dataloader"]["num_workers"],
@@ -328,6 +345,10 @@ if args.from_checkpoint == False:
     initial_val_ei_loss = 0.0
     initial_train_adj_loss = 0.0
     initial_val_adj_loss = 0.0
+    grasp_ssims = []
+    grasp_psnrs = []
+    grasp_mses = []
+    grasp_dcs = []
 
 
     with torch.no_grad():
@@ -377,38 +398,58 @@ if args.from_checkpoint == False:
 
 
         # Evaluate on validation data
-        for measured_kspace, csmap, grasp_img in tqdm(val_loader, desc="Step 0 Validation Evaluation"):
+        for measured_kspace, csmap, ground_truth, grasp_img, *_ in tqdm(val_dro_loader, desc="Step 0 Validation Evaluation"):
+        #for measured_kspace, csmap, grasp_img in tqdm(val_dro_loader, desc="Step 0 Validation Evaluation"):
 
             # with autocast(config["training"]["device"]):
 
             if model_type == "LSFPNet":
 
-                measured_kspace = to_torch_complex(measured_kspace).squeeze()
-                measured_kspace = rearrange(measured_kspace, 't co sp sam -> co (sp sam) t')
+                measured_kspace = measured_kspace.to(device)
+                csmap = csmap.to(device)
 
-                csmap = csmap.to(device).to(measured_kspace.dtype)
+                measured_kspace = measured_kspace.squeeze(0).to(device) # Remove batch dim
+                csmap = csmap.squeeze(0).to(device)   # Remove batch dim
+
+
+                # measured_kspace = to_torch_complex(measured_kspace).squeeze()
+                # measured_kspace = rearrange(measured_kspace, 't co sp sam -> co (sp sam) t')
+
+                # csmap = csmap.to(device).to(measured_kspace.dtype)
+                # al_kspace_batch:  torch.Size([16, 23040, 22])                                                                             | 0/15 [00:00<?, ?it/s]
+                # x_temp:  torch.Size([1, 1, 16, 320, 320])
+                # measured_kspace:  torch.Size([16, 23040, 22])
 
                 x_recon, adj_loss = model(
-                    measured_kspace.to(device), physics, csmap
+                    measured_kspace.to(device), eval_physics, csmap
                 )
                 initial_val_adj_loss += adj_loss.item()
             
             else:
 
                 x_recon = model(
-                    measured_kspace.to(device), physics, csmap
+                    measured_kspace.to(device), eval_physics, csmap
                 )  # model output shape: (B, C, T, H, W)
 
-            mc_loss = mc_loss_fn(measured_kspace.to(device), x_recon, physics, csmap)
+            mc_loss = mc_loss_fn(measured_kspace.to(device), x_recon, eval_physics, csmap)
             initial_val_mc_loss += mc_loss.item()
 
             if use_ei_loss:
                 # x_recon: reconstructed image
                 ei_loss, t_img = ei_loss_fn(
-                    x_recon, physics, model, csmap
+                    x_recon, eval_physics, model, csmap
                 )
 
                 initial_val_ei_loss += ei_loss.item()
+
+            ground_truth = ground_truth.to(device) # Shape: (1, 2, T, H, W)
+            grasp_recon = grasp_img.to(device) # Shape: (1, 2, H, T, W)
+
+            ssim_grasp, psnr_grasp, mse_grasp, dc_grasp = eval_grasp(measured_kspace, csmap, ground_truth, grasp_recon, eval_physics, device)
+            grasp_ssims.append(ssim_grasp)
+            grasp_psnrs.append(psnr_grasp)
+            grasp_mses.append(mse_grasp)
+            grasp_dcs.append(dc_grasp)
 
         step0_val_mc_loss = initial_val_mc_loss / len(val_loader)
         val_mc_losses.append(step0_val_mc_loss)
@@ -430,6 +471,11 @@ else:
         running_mc_loss = 0.0
         running_ei_loss = 0.0
         running_adj_loss = 0.0
+        epoch_eval_ssims = []
+        epoch_eval_psnrs = []
+        epoch_eval_mses = []
+        epoch_eval_dcs = []
+
         # turn on anomaly detection for debugging but slows down training
         # with torch.autograd.set_detect_anomaly(False):
         train_loader_tqdm = tqdm(
@@ -578,34 +624,39 @@ else:
             leave=False,
         )
         with torch.no_grad():
-            for val_kspace_batch, val_csmap, val_grasp_img in val_loader_tqdm:
+            for val_kspace_batch, val_csmap, val_ground_truth, val_grasp_img, val_mask in tqdm(val_dro_loader):
+            # for val_kspace_batch, val_csmap, val_grasp_img in val_loader_tqdm:
 
                 # with autocast(config["training"]["device"]):
 
                 if model_type == "LSFPNet":
 
-                    val_kspace_batch = to_torch_complex(val_kspace_batch).squeeze()
-                    val_kspace_batch = rearrange(val_kspace_batch, 't co sp sam -> co (sp sam) t')
+                    val_kspace_batch = val_kspace_batch.squeeze(0).to(device) # Remove batch dim
+                    val_csmap = val_csmap.squeeze(0).to(device)   # Remove batch dim
+                    val_ground_truth = val_ground_truth.to(device) # Shape: (1, 2, T, H, W)
+                    val_grasp_img_tensor = val_grasp_img.to(device)
 
-                    val_csmap = val_csmap.to(device).to(val_kspace_batch.dtype)
+                    # val_kspace_batch = to_torch_complex(val_kspace_batch).squeeze()
+                    # val_kspace_batch = rearrange(val_kspace_batch, 't co sp sam -> co (sp sam) t')
+
+                    # val_csmap = val_csmap.to(device).to(val_kspace_batch.dtype)
 
                     val_x_recon, val_adj_loss = model(
-                        val_kspace_batch.to(device), physics, val_csmap
+                        val_kspace_batch.to(device), eval_physics, val_csmap
                     )
                     val_running_adj_loss += val_adj_loss.item()
 
                 else:
                     # The model takes the raw k-space and physics operator
-                    val_x_recon = model(val_kspace_batch.to(device), physics, val_csmap)
+                    val_x_recon = model(val_kspace_batch.to(device), eval_physics, val_csmap)
 
                 # For MCLoss, compare the physics model's output with the measured k-space.
-                val_y_meas = val_kspace_batch
-                val_mc_loss = mc_loss_fn(val_y_meas.to(device), val_x_recon, physics, val_csmap)
+                val_mc_loss = mc_loss_fn(val_kspace_batch.to(device), val_x_recon, eval_physics, val_csmap)
                 val_running_mc_loss += val_mc_loss.item()
 
                 if use_ei_loss:
                     val_ei_loss, val_t_img = ei_loss_fn(
-                        val_x_recon, physics, model, val_csmap
+                        val_x_recon, eval_physics, model, val_csmap
                     )
                     val_running_ei_loss += val_ei_loss.item()
                     val_loader_tqdm.set_postfix(
@@ -614,8 +665,31 @@ else:
                 else:
                     val_loader_tqdm.set_postfix(val_mc_loss=val_mc_loss.item())
 
+
+                ## Evaluation
+                ssim, psnr, mse, dc = eval_sample(val_kspace_batch, val_csmap, val_ground_truth, val_x_recon, eval_physics, val_mask, val_grasp_img, output_dir, epoch, device)
+                epoch_eval_ssims.append(ssim)
+                epoch_eval_psnrs.append(psnr)
+                epoch_eval_mses.append(mse)
+                epoch_eval_dcs.append(dc)
+
+
+
+        # Calculate and store average validation evaluation metrics
+        epoch_eval_ssim = np.mean(epoch_eval_ssims)
+        epoch_eval_psnr = np.mean(epoch_eval_psnrs)
+        epoch_eval_mse = np.mean(epoch_eval_mses)
+        epoch_eval_dc = np.mean(epoch_eval_dcs)
+
+        eval_ssims.append(epoch_eval_ssim)
+        eval_psnrs.append(epoch_eval_psnrs)
+        eval_mses.append(epoch_eval_mses)
+        eval_dcs.append(epoch_eval_dcs)    
+        
         # save a sample from the last validation batch of the epoch
         if epoch % save_interval == 0:
+
+
             plot_reconstruction_sample(
                 val_x_recon,
                 f"Validation Sample - Epoch {epoch}",
@@ -659,29 +733,32 @@ else:
         else:
             val_adj_losses.append(0.0)
 
+
+
+
         # --- Plotting and Logging ---
         if epoch % save_interval == 0:
 
             # =====================================================================
             # --- EVALUATION ON SIMULATED DATASET ---
             # =====================================================================
-            if config['evaluation']['num_samples'] > 0:
+            # if config['evaluation']['num_samples'] > 0:
 
-                with torch.no_grad():
-                    physics_objects = {
-                        'physics': eval_physics,
-                        'dcomp': eval_dcomp if model_type == "LSFPNet" else None,
-                    }
+            # with torch.no_grad():
+            #     physics_objects = {
+            #         'physics': eval_physics,
+            #         'dcomp': eval_dcomp if model_type == "LSFPNet" else None,
+            #     }
 
-                    if epoch != epochs:
-                        eval_ssim, eval_psnr, eval_mse, eval_dc = eval_model(model, device, config, eval_dir, physics_objects, epoch)
-                    else:
-                        eval_ssim, eval_psnr, eval_mse, eval_dc = eval_model(model, device, config, eval_dir, physics_objects, epoch)#, temporal_eval=True)
+            #     # if epoch != epochs:
+            #     #     eval_ssim, eval_psnr, eval_mse, eval_dc = eval_model(val_dro_dataset, model, device, config, eval_dir, physics_objects, epoch)
+            #     # else:
+            #     eval_ssim, eval_psnr, eval_mse, eval_dc = eval_model(val_dro_dataset, model, device, config, eval_dir, physics_objects, epoch)#, temporal_eval=True)
 
-                    eval_ssims.append(eval_ssim)
-                    eval_psnrs.append(eval_psnr)
-                    eval_mses.append(eval_mse)
-                    eval_dcs.append(eval_dc)
+            #     eval_ssims.append(eval_ssim)
+            #     eval_psnrs.append(eval_psnr)
+            #     eval_mses.append(eval_mse)
+            #     eval_dcs.append(eval_dc)
 
 
             # Save the model checkpoint
@@ -813,12 +890,19 @@ else:
             print(
                 f"Epoch {epoch}: Training Adj Loss: {epoch_train_adj_loss:.6f}, Validation Adj Loss: {epoch_val_adj_loss:.6f}"
             )
+        print(f"--- Evaluation Metrics: Epoch {epoch} ---")
+        print(f"Recon SSIM: {epoch_eval_ssim:.6f}, St Dev: {np.std(epoch_eval_ssims):.6f}")
+        print(f"Recon PSNR: {epoch_eval_psnr:.6f}, St Dev: {np.std(epoch_eval_psnrs):.6f}")
+        print(f"Recon MSE: {epoch_eval_mse:.6f}, St Dev: {np.std(epoch_eval_mses):.6f}")
+        print(f"Recon DC: {epoch_eval_dc:.6f}, St Dev: {np.std(epoch_eval_dcs):.6f}")
+        print(f"GRASP SSIM: {np.mean(grasp_ssims):.6f}, St Dev: {np.std(grasp_ssims):.6f}")
+        print(f"GRASP PSNR: {np.mean(grasp_psnrs):.6f}, St Dev: {np.std(grasp_psnrs):.6f}")
+        print(f"GRASP MSE: {np.mean(grasp_mses):.6f}, St Dev: {np.std(grasp_mses):.6f}")
+        print(f"GRASP DC: {np.mean(grasp_dcs):.6f}, St Dev: {np.std(grasp_dcs):.6f}")
 
 
 # Save the model at the end of training
-# model_save_path = os.path.join(output_dir, f'{exp_name}_model_checkpoint.pth')
-# torch.save(model.state_dict(), model_save_path)
-# print(f'Model saved to {model_save_path}')
+
 train_curves = dict(
     train_mc_losses=train_mc_losses,
     train_ei_losses=train_ei_losses,

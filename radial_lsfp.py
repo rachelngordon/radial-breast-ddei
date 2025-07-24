@@ -36,7 +36,6 @@ class MCNUFFT(nn.Module):
                     d = d.unsqueeze(0).unsqueeze(0)
 
                     tt1 = time()
-
                     x_temp = self.adjnufft_ob(kd * d, k, smaps=smaps)
 
                     x[:, :, ii] = torch.squeeze(x_temp) / np.sqrt(Nx * Ny)

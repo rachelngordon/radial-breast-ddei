@@ -2,7 +2,7 @@
 data:
   root_dir: "/ess/scratch/scratch1/rachelgordon/dce-8tf/binned_kspace"
   dataset_key: "ktspace"
-  split_file: "/gpfs/data/karczmar-lab/workspaces/rachelgordon/breastMRI-recon/ddei/data/patient_splits.json"
+  split_file: "/gpfs/data/karczmar-lab/workspaces/rachelgordon/breastMRI-recon/ddei/data/data_split.json"
   val_split_ratio: 0.2
   height: 320
   width: 320
@@ -56,13 +56,13 @@ model:
 
 # Training settings
 training:
-  epochs: 100
+  epochs: 30
   save_interval: 1
   plot_interval: 20
   device: "cuda"  # or "cpu"
 
 evaluation:
-  num_samples: 10
+  num_samples: 15
   simulated_dataset_path: "/ess/scratch/scratch1/rachelgordon/simulated_dataset/"
 
 

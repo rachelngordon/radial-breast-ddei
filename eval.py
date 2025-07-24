@@ -287,6 +287,7 @@ def plot_temporal_curves(
         filename (str): The path to save the output plot.
     """
     regions = [r for r in ['malignant', 'glandular', 'muscle'] if r in masks and masks[r].any()]
+
     if not regions:
         print("No relevant regions found in mask to plot temporal curves.")
         return
@@ -654,26 +655,214 @@ def estimate_pk_parameters(
 
 
 
-
 # ==========================================================
-# EVALUATION LOOP
+# EVALUATION 
 # ==========================================================
+def eval_grasp(kspace, csmap, ground_truth, grasp_recon, physics, device):
 
-def eval_model(model, device, config, output_dir, physics_objects, epoch, temporal_eval=False):
+    grasp_recon = torch.rot90(grasp_recon, k=-1, dims=(2, 4))
+    grasp_recon = torch.flip(grasp_recon, dims=[-1])
+
+    # ==========================================================
+    # EVALUATE DATA CONSISTENCY
+    # ==========================================================
+
+    # Forward Simulation
+    grasp_recon_complex = rearrange(to_torch_complex(grasp_recon).squeeze(), 'h t w -> h w t')
+    kspace = kspace.squeeze()
+
+    grasp_kspace = physics(False, grasp_recon_complex.to(csmap.dtype), csmap)
+
+
+    # Compute MSE
+    dc_grasp = calc_dc(grasp_kspace, kspace, device)
+
+
+    # ==========================================================
+    # EVALUATE SPATIAL IMAGE QUALITY
+    # ==========================================================
+
+
+    # Convert complex images to magnitude
+    gt_mag = torch.sqrt(ground_truth[:, 0, ...]**2 + ground_truth[:, 1, ...]**2)
+    grasp_mag = torch.sqrt(grasp_recon[:, 0, ...]**2 + grasp_recon[:, 1, ...]**2)
+
+
+
+
+    for t in range(grasp_mag.shape[-2]): # Iterate over time frames
+
+
+        frame_gt = gt_mag[:, t, :, :]
+        frame_grasp = grasp_mag[:, :, t, :]
+
+        # calculate data range from ground truth
+        data_range = frame_gt.max() - frame_gt.min()
+
+
+        # Add channel dimension for torchmetrics: (B, H, W) -> (B, 1, H, W)
+        frame_gt = frame_gt.unsqueeze(1)
+        frame_grasp = frame_grasp.unsqueeze(1).contiguous()
+        
+        # Calculate Spatial Image Quality Metrics
+        ssim_grasp, psnr_grasp, mse_grasp = calc_image_metrics(frame_grasp, frame_gt, data_range, device)
+
+
+    # ==========================================================
+    # VISUALIZATION PREP
+    # ==========================================================
+
+    # grasp_recon_complex_np = rearrange(to_torch_complex(grasp_recon).squeeze(), 'h t w -> h w t').cpu().numpy()
+
+    # grasp_mag_np = np.abs(grasp_recon_complex_np)
+    
+    
+    
+    return ssim_grasp, psnr_grasp, mse_grasp, dc_grasp#, grasp_mag_np
+
+
+
+def eval_sample(kspace, csmap, ground_truth, x_recon, physics, mask, grasp_img_mag, output_dir, epoch, device):
+
+    # ground_truth = ground_truth.to(device) # Shape: (1, 2, T, H, W)
+    # grasp_recon = grasp_recon.to(device) # Shape: (1, 2, H, T, W)
+
+    # ==========================================================
+    # EVALUATE DATA CONSISTENCY
+    # ==========================================================
+
+    # Forward Simulation
+    x_recon_complex = to_torch_complex(x_recon).squeeze()
+    kspace = kspace.squeeze()
+
+
+    recon_kspace = physics(False, x_recon_complex, csmap)
+
+
+    # Compute MSE
+    dc = calc_dc(recon_kspace, kspace, device)
+
+
+    # ==========================================================
+    # EVALUATE SPATIAL IMAGE QUALITY
+    # ==========================================================
+
+    # calculate the single optimal scaling factor 'c'
+    x_recon_np = x_recon.cpu().numpy()
+    ground_truth_np = ground_truth.cpu().numpy()
+
+    c = np.dot(x_recon_np.flatten(), ground_truth_np.flatten()) / np.dot(x_recon_np.flatten(), x_recon_np.flatten())
+
+    recon_complex_scaled = torch.tensor(c * x_recon_np, device=device)
+
+
+    # Convert complex images to magnitude
+    recon_mag_scaled = torch.sqrt(recon_complex_scaled[:, 0, ...]**2 + recon_complex_scaled[:, 1, ...]**2)
+    gt_mag = torch.sqrt(ground_truth[:, 0, ...]**2 + ground_truth[:, 1, ...]**2)
+
+
+    for t in range(recon_mag_scaled.shape[-1]): # Iterate over time frames
+
+
+        frame_recon = recon_mag_scaled[..., t]
+        frame_gt = gt_mag[:, t, :, :]
+
+        # calculate data range from ground truth
+        data_range = frame_gt.max() - frame_gt.min()
+
+
+        # Add channel dimension for torchmetrics: (B, H, W) -> (B, 1, H, W)
+        frame_recon = frame_recon.unsqueeze(1)
+        frame_gt = frame_gt.unsqueeze(1)
+        
+        # Calculate Spatial Image Quality Metrics
+        ssim, psnr, mse = calc_image_metrics(frame_recon, frame_gt, data_range, device)
+
+
+    # ==========================================================
+    # VISUALIZATION
+    # ==========================================================
+
+    x_recon_complex_np = to_torch_complex(recon_complex_scaled).squeeze().cpu().numpy()
+
+    gt_squeezed = ground_truth.squeeze()  # Shape: (C, T, H, W) -> (2, 22, 320, 320)
+    gt_rearranged = rearrange(gt_squeezed, 'c t h w -> t c h w') # Shape: (22, 320, 320, 2)
+    gt_complex_tensor = to_torch_complex(gt_rearranged) # Shape: (22, 320, 320)
+    gt_final_tensor = rearrange(gt_complex_tensor, 't h w -> h w t') # Shape: (320, 320, 22)
+    gt_complex_np = gt_final_tensor.cpu().numpy()
+
+    recon_mag_np = np.abs(x_recon_complex_np)
+    gt_mag_np = np.abs(gt_complex_np)
+    
+    masks_np = {key: val.cpu().numpy().squeeze().astype(bool) for key, val in mask.items()}
+    num_frames = recon_mag_np.shape[2]
+    aif_time_points = np.linspace(0, 150, num_frames)
+
+
+    print("\nGenerating diagnostic plots for the first evaluation sample...")
+    if mask['malignant'].any():
+        
+        # --- Plot Spatial Quality at a Peak Enhancement Frame ---
+        # Find a frame around peak enhancement (e.g., 1/3 of the way through)
+        peak_frame = num_frames // 3
+        data_range = gt_mag_np[:, :, peak_frame].max() - gt_mag_np[:, :, peak_frame].min()
+        plot_spatial_quality(
+            recon_img=recon_mag_np[:, :, peak_frame],
+            gt_img=gt_mag_np[:, :, peak_frame],
+            grasp_img=grasp_img_mag[:, :, peak_frame],
+            time_frame_index=peak_frame,
+            filename=os.path.join(output_dir, f"spatial_quality_epoch{epoch}.png"),
+            data_range=data_range
+        )
+
+        # --- Plot Temporal Curves for Key Regions ---
+        # This is the most important plot for debugging your PK results!
+        plot_temporal_curves(
+            gt_img_stack=gt_mag_np,
+            recon_img_stack=recon_mag_np,
+            grasp_img_stack=grasp_img_mag,
+            masks=masks_np,
+            time_points=aif_time_points,
+            filename=os.path.join(output_dir, f"temporal_curves_epoch{epoch}.png")
+        )
+
+        plot_single_temporal_curve(
+            img_stack=recon_mag_np,
+            masks=masks_np,
+            time_points=aif_time_points,
+            filename=os.path.join(output_dir, f"recon_temporal_curve_epoch{epoch}.png")
+        )
+
+        plot_time_series(
+            gt_img_stack=gt_mag_np,
+            recon_img_stack=recon_mag_np,
+            grasp_img_stack=grasp_img_mag,
+            filename=os.path.join(output_dir, f"time_points_epoch{epoch}.png")
+        )
+
+        print("Diagnostic plots saved.")
+    
+    
+    return ssim, psnr, mse, dc
+
+
+
+
+def eval_model(eval_dataset, model, device, config, output_dir, physics_objects, epoch, temporal_eval=False):
     print("\n" + "="*80)
     print("--- Starting Evaluation on Simulated Dataset ---")
     print("="*80)
 
     # --- 1. Setup DataLoader for Simulated Data ---
-    simulated_data_path = config["evaluation"]["simulated_dataset_path"]
+    # simulated_data_path = config["evaluation"]["simulated_dataset_path"]
     model_type = config["model"]["name"]
 
-    try:
-        eval_dataset = SimulatedDataset(root_dir=simulated_data_path, model_type=model_type, num_samples=config['evaluation']['num_samples'])
-    except FileNotFoundError as e:
-        print(f"ERROR: {e}")
-        print("Skipping evaluation.")
-        return
+    # try:
+    #     eval_dataset = SimulatedDataset(root_dir=simulated_data_path, model_type=model_type, patient_ids=)
+    # except FileNotFoundError as e:
+    #     print(f"ERROR: {e}")
+    #     print("Skipping evaluation.")
+    #     return
 
     # Use a batch size of 1 for evaluation to process one sample at a time
     eval_loader = DataLoader(eval_dataset, batch_size=1, shuffle=False, num_workers=4)
@@ -716,12 +905,12 @@ def eval_model(model, device, config, output_dir, physics_objects, epoch, tempor
             kspace_complex = kspace_complex.squeeze(0) # Remove batch dim
             csmap_complex = csmap.squeeze(0)   # Remove batch dim
 
-            with torch.no_grad():
-                scale = torch.quantile(kspace_complex.abs(), 0.99) + 1e-8
-            kspace_norm = kspace_complex / scale
+            # with torch.no_grad():
+            #     scale = torch.quantile(kspace_complex.abs(), 0.99) + 1e-8
+            # kspace_norm = kspace_complex / scale
 
             x_recon, _, = model(
-                kspace_norm, 
+                kspace_complex, 
                 physics, 
                 csmap_complex, 
             ) # Output shape (B, C, H, W, T)
@@ -885,10 +1074,11 @@ def eval_model(model, device, config, output_dir, physics_objects, epoch, tempor
             gt_mag_np = np.abs(gt_complex_np)
             
             masks_np = {key: val.cpu().numpy().squeeze().astype(bool) for key, val in mask.items()}
+            print(f"malignancy status for i = {i}: {masks_np['malignant'].any()}")
             num_frames = recon_mag_np.shape[2]
             aif_time_points = np.linspace(0, 150, num_frames)
 
-            if i == 0:
+            if i == 1:
                 print("\nGenerating diagnostic plots for the first evaluation sample...")
                 
                 # --- Plot Spatial Quality at a Peak Enhancement Frame ---
@@ -950,8 +1140,8 @@ def eval_model(model, device, config, output_dir, physics_objects, epoch, tempor
     std_psnr_grasp = np.std(all_psnr_scores_grasp)
     avg_mse_grasp = np.mean(all_mse_scores_grasp)
     std_mse_grasp = np.std(all_mse_scores_grasp)
-    avg_dc_grasp = np.mean(all_mse_scores_grasp)
-    std_dc_grasp = np.std(all_mse_scores_grasp)
+    avg_dc_grasp = np.mean(all_dc_scores_grasp)
+    std_dc_grasp = np.std(all_dc_scores_grasp)
 
     print("\n--- Evaluation Complete ---")
     print(f"  Average SSIM: {avg_ssim:.4f} ± {std_ssim:.4f}")

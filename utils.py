@@ -286,10 +286,12 @@ def plot_reconstruction_sample(x_recon, title, filename, output_dir, grasp_img=N
 
     grasp_img_mag = torch.sqrt(grasp_img[:, 0, ...] ** 2 + grasp_img[:, 1, ...] ** 2)
 
-    if grasp_img_mag.shape[1] == 320:
-        n_timeframes = grasp_img_mag.shape[-1]
-    else:
+    if grasp_img_mag.shape[-1] == 320 and grasp_img_mag.shape[-2] == 320:
         n_timeframes = grasp_img_mag.shape[1]
+    elif grasp_img_mag.shape[-1] == 320 and grasp_img_mag.shape[1] == 320:
+        n_timeframes = grasp_img_mag.shape[-2]
+    else:
+        n_timeframes = grasp_img_mag.shape[-1]
 
     fig, axes = plt.subplots(
         nrows=2,
@@ -320,6 +322,8 @@ def plot_reconstruction_sample(x_recon, title, filename, output_dir, grasp_img=N
             grasp_img = grasp_img_mag[batch_idx, t, :, :].cpu().detach().numpy()
         elif grasp_img_mag.shape[-1] == n_timeframes:
             grasp_img = grasp_img_mag[batch_idx, :, :, t].cpu().detach().numpy()
+        else:
+            grasp_img = grasp_img_mag[batch_idx, :, t, :].cpu().detach().numpy()
 
         ax1 = axes[0, t]
         ax1.imshow(np.rot90(img, 2), cmap="gray")
@@ -331,6 +335,7 @@ def plot_reconstruction_sample(x_recon, title, filename, output_dir, grasp_img=N
         ax2.set_title(f"t = {t}")
         ax2.set_xticks([])
         ax2.set_yticks([])
+    
     fig.suptitle(title, fontsize=16)
     plt.tight_layout(rect=[0, 0.03, 1, 0.95])
     plt.savefig(os.path.join(output_dir, f"{filename}.png"))

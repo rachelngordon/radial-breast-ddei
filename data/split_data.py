@@ -1,48 +1,45 @@
 import pandas as pd
 import json
-from sklearn.model_selection import train_test_split
+import random
 
-# Path to the Excel file
-excel_path = "/gpfs/data/karczmar-lab/workspaces/rachelgordon/breastMRI-recon/process_data/data_splits/breast_fastMRI_final.xlsx"
+# Load CSV
+csv_path = "DROSubID_vs_fastMRIbreastID.csv"
+df = pd.read_csv(csv_path)
 
-# Read the Excel file into a DataFrame
-df = pd.read_excel(excel_path)
+# Extract test set (from DRO mappings)
+test_ids = set(df['fastMRIbreast'].tolist())
 
-# Assume the columns are named exactly as given:
-# "Patient Coded Name", "Data split (0=training, 1=testing)"
-patient_col = "Patient Coded Name"
-split_col = "Data split (0=training, 1=testing)"
+# Create the full set of fastMRI breast patient IDs from 1 to 300
+all_ids = set(range(1, 301))
 
-# 1. Separate patient IDs into train vs. test according to the "Data split" column
-train_df = df[df[split_col] == 0]
-test_df  = df[df[split_col] == 1]
+# Remaining IDs for train/val
+train_val_ids = list(all_ids - test_ids)
 
-train_ids = train_df[patient_col].tolist()
-test_ids  = test_df[patient_col].tolist()
+# Shuffle for randomness
+random.seed(42)  # For reproducibility
+random.shuffle(train_val_ids)
 
-# 2. Further split the train_ids into train vs. val (80/20 split)
-#    Use a fixed random_state for reproducibility
-train_ids_final, val_ids = train_test_split(
-    train_ids,
-    test_size=0.20,
-    random_state=42,
-    shuffle=True
-)
+# 80/20 split
+split_idx = int(0.8 * len(train_val_ids))
+train_ids = train_val_ids[:split_idx]
+val_ids = train_val_ids[split_idx:]
 
-# 3. Package everything into a dictionary
+# Helper to format IDs with zero-padding
+def format_id(pid):
+    return f"fastMRI_breast_{pid:03d}"
+
+# Format all sets
 splits = {
-    "train": train_ids_final,
-    "val": val_ids,
-    "test": test_ids
+    "train": [format_id(pid) for pid in sorted(train_ids)],
+    "val": [format_id(pid) for pid in sorted(val_ids)],
+    "test": [format_id(pid) for pid in sorted(test_ids)],
 }
 
-print("Number of train patients: ", len(train_ids_final))
-print("Number of val patients: ", len(val_ids))
-print("Number of test patients: ", len(test_ids))
+# Save to JSON
+with open("patient_splits.json", "w") as f:
+    json.dump(splits, f, indent=4)
 
-# 4. Save to a JSON file so you can load it easily later
-output_path = "patient_splits.json"
-with open(output_path, "w") as fp:
-    json.dump(splits, fp, indent=4)
-
-print(f"Saved train/val/test splits to {output_path}")
+# Print counts
+print(f"Train set size: {len(splits['train'])}")
+print(f"Validation set size: {len(splits['val'])}")
+print(f"Test set size: {len(splits['test'])}")

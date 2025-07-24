@@ -1,4 +1,6 @@
 import torch
+import numpy as np
+from time import time
 
 dtype=torch.complex64
 
@@ -6,13 +8,7 @@ def Project_inf(x, c):
     # torch.cuda.synchronize()
     # start1 = time()
     # x_max = torch.maximum((abs(x)/c), torch.ones(x.shape).to(x.device))
-    # --- DEBUG ---
-    print(f"Inside Project_inf: x.norm()={x.norm():.4e}, c={c.item():.4e}")
-    abs_x_over_c = abs(x) / c
-    print(f"Inside Project_inf: abs(x)/c norm = {abs_x_over_c.norm():.4e}")
-    # --- END DEBUG ---
-
-    x_max = torch.maximum((abs_x_over_c), torch.tensor(1))
+    x_max = torch.maximum((abs(x) / c), torch.tensor(1))
     x_max = x_max.to(dtype)
     s = torch.div(x, x_max)
 

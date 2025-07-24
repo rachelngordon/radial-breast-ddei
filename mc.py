@@ -4,14 +4,7 @@ import torch
 from deepinv.loss.loss import Loss
 from deepinv.loss.metric.metric import Metric
 from deepinv.transform.base import Transform
-from einops import rearrange
-
-def to_torch_complex(x: torch.Tensor):
-    """(B, 2, ...) real -> (B, ...) complex"""
-    assert x.shape[1] == 2, (
-        f"Input tensor must have 2 channels (real, imag), but got shape {x.shape}"
-    )
-    return torch.view_as_complex(rearrange(x, "b c ... -> b ... c").contiguous())
+from radial import to_torch_complex
 
 
 class MCLoss(Loss):

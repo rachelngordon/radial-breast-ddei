@@ -3,75 +3,9 @@ import subprocess
 import matplotlib.pyplot as plt
 import torch
 import numpy as np
+from einops import rearrange
 import torchkbnufft as tkbn
 import csv
-from einops import rearrange
-
-def to_torch_complex(x: torch.Tensor):
-    """(B, 2, ...) real -> (B, ...) complex"""
-    assert x.shape[1] == 2, (
-        f"Input tensor must have 2 channels (real, imag), but got shape {x.shape}"
-    )
-    return torch.view_as_complex(rearrange(x, "b c ... -> b ... c").contiguous())
-
-
-def from_torch_complex(x: torch.Tensor):
-    """(B, ...) complex -> (B, 2, ...) real"""
-    return rearrange(torch.view_as_real(x), "b ... c -> b c ...").contiguous()
-
-
-
-def trajGR(Nkx, Nspokes):
-    '''
-    function for generating golden-angle radial sampling trajectory
-    :param Nkx: spoke length
-    :param Nspokes: number of spokes
-    :return: ktraj: golden-angle radial sampling trajectory
-    '''
-    # ga = np.deg2rad(180 / ((np.sqrt(5) + 1) / 2))
-    ga = np.pi * ((1 - np.sqrt(5)) / 2)
-    kx = np.zeros(shape=(Nkx, Nspokes))
-    ky = np.zeros(shape=(Nkx, Nspokes))
-    ky[:, 0] = np.linspace(-np.pi, np.pi, Nkx)
-    for i in range(1, Nspokes):
-        kx[:, i] = np.cos(ga) * kx[:, i - 1] - np.sin(ga) * ky[:, i - 1]
-        ky[:, i] = np.sin(ga) * kx[:, i - 1] + np.cos(ga) * ky[:, i - 1]
-    ky = np.transpose(ky)
-    kx = np.transpose(kx)
-
-    ktraj = np.stack((ky.flatten(), kx.flatten()), axis=0)
-
-    return ktraj
-
-
-################### prepare NUFFT ################
-def prep_nufft(Nsample, Nspokes, Ng):
-
-    overSmaple = 2
-    im_size = (int(Nsample/overSmaple), int(Nsample/overSmaple))
-    grid_size = (Nsample, Nsample)
-
-    ktraj = trajGR(Nsample, Nspokes * Ng)
-    ktraj = torch.tensor(ktraj, dtype=torch.float)
-    dcomp = tkbn.calc_density_compensation_function(ktraj=ktraj, im_size=im_size)
-    dcomp = dcomp.squeeze()
-
-    ktraju = np.zeros([2, Nspokes * Nsample, Ng], dtype=float)
-    dcompu = np.zeros([Nspokes * Nsample, Ng], dtype=complex)
-
-    for ii in range(0, Ng):
-        ktraju[:, :, ii] = ktraj[:, (ii * Nspokes * Nsample):((ii + 1) * Nspokes * Nsample)]
-        dcompu[:, ii] = dcomp[(ii * Nspokes * Nsample):((ii + 1) * Nspokes * Nsample)]
-
-    ktraju = torch.tensor(ktraju, dtype=torch.float)
-    dcompu = torch.tensor(dcompu, dtype=torch.complex64)
-
-    nufft_ob = tkbn.KbNufft(im_size=im_size, grid_size=grid_size)  # forward nufft
-    adjnufft_ob = tkbn.KbNufftAdjoint(im_size=im_size, grid_size=grid_size)  # backward nufft
-
-    return ktraju, dcompu, nufft_ob, adjnufft_ob
-
-
 
 def log_gradient_stats(model, epoch, iteration, output_dir, log_filename="gradient_stats.csv"):
     """
@@ -142,6 +76,56 @@ def log_gradient_stats(model, epoch, iteration, output_dir, log_filename="gradie
         for name, norm in param_norms:
             writer.writerow([epoch, iteration, total_norm, name, norm])
 
+
+
+def trajGR(Nkx, Nspokes):
+    '''
+    function for generating golden-angle radial sampling trajectory
+    :param Nkx: spoke length
+    :param Nspokes: number of spokes
+    :return: ktraj: golden-angle radial sampling trajectory
+    '''
+    # ga = np.deg2rad(180 / ((np.sqrt(5) + 1) / 2))
+    ga = np.pi * ((1 - np.sqrt(5)) / 2)
+    kx = np.zeros(shape=(Nkx, Nspokes))
+    ky = np.zeros(shape=(Nkx, Nspokes))
+    ky[:, 0] = np.linspace(-np.pi, np.pi, Nkx)
+    for i in range(1, Nspokes):
+        kx[:, i] = np.cos(ga) * kx[:, i - 1] - np.sin(ga) * ky[:, i - 1]
+        ky[:, i] = np.sin(ga) * kx[:, i - 1] + np.cos(ga) * ky[:, i - 1]
+    ky = np.transpose(ky)
+    kx = np.transpose(kx)
+
+    ktraj = np.stack((ky.flatten(), kx.flatten()), axis=0)
+
+    return ktraj
+
+################### prepare NUFFT ################
+def prep_nufft(Nsample, Nspokes, Ng):
+
+    overSmaple = 2
+    im_size = (int(Nsample/overSmaple), int(Nsample/overSmaple))
+    grid_size = (Nsample, Nsample)
+
+    ktraj = trajGR(Nsample, Nspokes * Ng)
+    ktraj = torch.tensor(ktraj, dtype=torch.float)
+    dcomp = tkbn.calc_density_compensation_function(ktraj=ktraj, im_size=im_size)
+    dcomp = dcomp.squeeze()
+
+    ktraju = np.zeros([2, Nspokes * Nsample, Ng], dtype=float)
+    dcompu = np.zeros([Nspokes * Nsample, Ng], dtype=complex)
+
+    for ii in range(0, Ng):
+        ktraju[:, :, ii] = ktraj[:, (ii * Nspokes * Nsample):((ii + 1) * Nspokes * Nsample)]
+        dcompu[:, ii] = dcomp[(ii * Nspokes * Nsample):((ii + 1) * Nspokes * Nsample)]
+
+    ktraju = torch.tensor(ktraju, dtype=torch.float)
+    dcompu = torch.tensor(dcompu, dtype=torch.complex64)
+
+    nufft_ob = tkbn.KbNufft(im_size=im_size, grid_size=grid_size)  # forward nufft
+    adjnufft_ob = tkbn.KbNufftAdjoint(im_size=im_size, grid_size=grid_size)  # backward nufft
+
+    return ktraju, dcompu, nufft_ob, adjnufft_ob
 
 
 def _calculate_top_percentile_curve(dynamic_slice: torch.Tensor, percentile: float) -> list[float]:
@@ -321,6 +305,7 @@ def plot_reconstruction_sample(x_recon, title, filename, output_dir, grasp_img=N
         os.makedirs(os.path.join(output_dir, "transforms"), exist_ok=True)
 
     else:
+        
         axes[0, 0].set_ylabel("Model Output", fontsize=14, labelpad=10)
         axes[1, 0].set_ylabel("GRASP Benchmark", fontsize=14, labelpad=10)
     
@@ -331,8 +316,11 @@ def plot_reconstruction_sample(x_recon, title, filename, output_dir, grasp_img=N
         else:
             img = x_recon_mag[batch_idx, ..., t].cpu().detach().numpy()
 
+        if grasp_img_mag.shape[1] == n_timeframes:
+            grasp_img = grasp_img_mag[batch_idx, t, :, :].cpu().detach().numpy()
+        elif grasp_img_mag.shape[-1] == n_timeframes:
+            grasp_img = grasp_img_mag[batch_idx, :, :, t].cpu().detach().numpy()
 
-        grasp_img = grasp_img_mag[batch_idx, t, :, :].cpu().detach().numpy()
         ax1 = axes[0, t]
         ax1.imshow(np.rot90(img, 2), cmap="gray")
         ax1.set_title(f"t = {t}")
@@ -370,7 +358,7 @@ def remove_module_prefix(state_dict):
     return new_state_dict
 
 
-def save_checkpoint(model, optimizer, scheduler, epoch,
+def save_checkpoint(model, optimizer, epoch,
                     train_curves, val_curves, eval_curves, filename):
     checkpoint = {
         "epoch": epoch,
@@ -380,11 +368,6 @@ def save_checkpoint(model, optimizer, scheduler, epoch,
         **val_curves,
         **eval_curves,
     }
-
-    # Add scheduler state if it exists
-    if scheduler is not None:
-        checkpoint["scheduler_state_dict"] = scheduler.state_dict()
-
     torch.save(checkpoint, filename)
     print(f"Checkpoint saved at epoch {epoch} to {filename}")
 
@@ -403,8 +386,6 @@ def load_checkpoint(model, optimizer, filename):
         "weighted_train_mc_losses": ckpt.get("weighted_train_mc_losses", []),
         "weighted_train_ei_losses": ckpt.get("weighted_train_ei_losses", []),
         "weighted_train_adj_losses": ckpt.get("weighted_train_adj_losses", []),
-        "learning_rates": ckpt.get("learning_rates", []),
-        
     }
     val_curves = {
         "val_mc_losses": ckpt.get("val_mc_losses", []),
@@ -420,3 +401,10 @@ def load_checkpoint(model, optimizer, filename):
     }
 
     return model, optimizer, ckpt.get("epoch", 1), train_curves, val_curves, eval_curves
+
+def to_torch_complex(x: torch.Tensor):
+    """(B, 2, ...) real -> (B, ...) complex"""
+    assert x.shape[1] == 2, (
+        f"Input tensor must have 2 channels (real, imag), but got shape {x.shape}"
+    )
+    return torch.view_as_complex(rearrange(x, "b c ... -> b ... c").contiguous())

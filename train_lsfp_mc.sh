@@ -2,11 +2,11 @@
 
 # Parameters
 #SBATCH --cpus-per-task=4
-#SBATCH --error=logs/lsfpnet_mc_baseline.err
-#SBATCH --output=logs/lsfpnet_mc_baseline.out
+#SBATCH --error=logs/lsfpnet_mc_eval.err
+#SBATCH --output=logs/lsfpnet_mc_eval.out
 #SBATCH --exclude=''
 #SBATCH --gpus-per-node=1
-#SBATCH --job-name=lsfpnet_mc_baseline
+#SBATCH --job-name=lsfpnet_mc_eval
 #SBATCH --mem-per-gpu=80000
 #SBATCH --nodes=1
 #SBATCH --ntasks-per-node=1
@@ -21,4 +21,4 @@ source /gpfs/data/karczmar-lab/workspaces/rachelgordon/micromamba/etc/profile.d/
 micromamba activate recon_mri
 
 # Run the training script with srun
-python3 train.py --config configs/config_mc_lsfp.yaml --exp_name lsfpnet_mc_baseline
+python3 train.py --config configs/config_mc_lsfp.yaml --exp_name lsfpnet_mc_eval

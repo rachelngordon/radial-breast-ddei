@@ -43,6 +43,8 @@ class SliceDataset(Dataset):
 
         # Find all matching HDF5 files under root_dir
         all_files = sorted(glob.glob(os.path.join(root_dir, file_pattern)))
+        print("Number of files in root directory: ", len(all_files))
+
         if len(all_files) == 0:
             raise RuntimeError(
                 f"No files found in {root_dir} matching pattern {file_pattern}"
@@ -55,6 +57,7 @@ class SliceDataset(Dataset):
             # Check if any patient_id appears in the filename
             if any(pid in fname for pid in patient_ids):
                 filtered.append(fp)
+
         self.file_list = filtered
 
         if len(self.file_list) == 0:
@@ -143,6 +146,49 @@ class SliceDataset(Dataset):
         # e.g., (2, 8, 36, 640)
         return kspace_final, csmap, grasp_img
 
+
+# ----------------------------
+# Example usage:
+# ----------------------------
+if __name__ == "__main__":
+    # 1) Point this to wherever your HDF5 k-space files live
+    root_dir = "/ess/scratch/scratch1/rachelgordon/dce-12tf/binned_kspace"
+
+    # 2) If your HDF5 file stores k-space under a different key path, adjust dataset_key:
+    dataset_key = "ktspace"  # change if your HDF5 group/dataset is named differently
+
+    # 3) (Optional) Example transform: convert two‐channel real/imag → complex64
+    def to_complex(x_np: "np.ndarray") -> "np.ndarray":
+        """
+        If x_np.shape = (C, H, W, 2) or similar where the last dim is [real, imag],
+        convert to complex64 with shape (C, H, W).
+        Adjust slicing logic if your real/imag channels are elsewhere.
+        """
+        real = x_np[..., 0].astype("float32")
+        imag = x_np[..., 1].astype("float32")
+        return (real + 1j * imag).astype("complex64")
+
+    dataset = SliceDataset(
+        root_dir=root_dir, dataset_key=dataset_key, file_pattern="*.h5"
+    )
+
+    # 4) Wrap in DataLoader
+    loader = DataLoader(
+        dataset,
+        batch_size=1,
+        shuffle=True,
+        num_workers=4,
+        pin_memory=True,
+    )
+
+    # 5) Iterate and inspect
+    for batch_idx, kspace_batch in enumerate(loader):
+        # kspace_batch.dtype could be torch.float32 or torch.complex64, depending on transform
+        print(
+            f"Batch {batch_idx}: k-space batch shape = {kspace_batch.shape}, dtype = {kspace_batch.dtype}"
+        )
+        # Now feed `kspace_batch` into your DDEI model or DC layer, etc.
+        break
 
 class SimulatedDataset(Dataset):
     """

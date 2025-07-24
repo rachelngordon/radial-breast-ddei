@@ -7,8 +7,8 @@ from tqdm import tqdm
 import numpy as np
 import torchmetrics
 import time
-from data.dataloader import SimulatedDataset
-from models.lsfpnet import to_torch_complex, from_torch_complex
+from dataloader import SimulatedDataset
+from lsfpnet import to_torch_complex, from_torch_complex
 import numpy as np
 from scipy.optimize import curve_fit
 from scipy.interpolate import PchipInterpolator
@@ -24,16 +24,15 @@ from typing import List, Dict
 # EVALUATION FUNCTIONS
 # ==========================================================
 
-def calc_image_metrics(input, reference, device):
+def calc_image_metrics(input, reference, data_range, device):
     """
     Calculates image metrics for a given input and reference image.
     """
 
     # --- Initialize Metrics ---
     # We will compute metrics frame by frame. data_range is important for PSNR.
-    # We normalize images to [0, 1], so the data_range is 1.0.
-    ssim = torchmetrics.StructuralSimilarityIndexMeasure(data_range=1.0).to(device)
-    psnr = torchmetrics.PeakSignalNoiseRatio(data_range=1.0).to(device)
+    ssim = torchmetrics.StructuralSimilarityIndexMeasure(data_range=data_range).to(device)
+    psnr = torchmetrics.PeakSignalNoiseRatio(data_range=data_range).to(device)
     mse = torchmetrics.MeanSquaredError().to(device)
 
     ssim = ssim(input, reference)
@@ -200,7 +199,8 @@ def plot_spatial_quality(
     gt_img: np.ndarray,
     grasp_img: np.ndarray,
     time_frame_index: int,
-    filename: str
+    filename: str,
+    data_range: float
 ):
     """
     Generates a comparison plot for a single time frame in a 2x4 grid.
@@ -213,19 +213,14 @@ def plot_spatial_quality(
         time_frame_index (int): The index of the time frame for titling.
         filename (str): The path to save the output plot.
     """
-    # Ensure images are normalized for fair comparison
-    recon_img = recon_img / recon_img.max() if recon_img.max() > 0 else recon_img
-    gt_img = gt_img / gt_img.max() if gt_img.max() > 0 else gt_img
-    grasp_img = grasp_img / grasp_img.max() if grasp_img.max() > 0 else grasp_img
 
     # Calculate error maps
     error_map_dl = recon_img - gt_img
     error_map_grasp = grasp_img - gt_img
 
     # Calculate SSIM maps
-    # Use data_range=1.0 since images are normalized to [0, 1]
-    _, ssim_map_dl = ssim_map_func(gt_img, recon_img, data_range=1.0, full=True)
-    _, ssim_map_grasp = ssim_map_func(gt_img, grasp_img, data_range=1.0, full=True)
+    _, ssim_map_dl = ssim_map_func(gt_img, recon_img, data_range=data_range, full=True)
+    _, ssim_map_grasp = ssim_map_func(gt_img, grasp_img, data_range=data_range, full=True)
 
     # Create a 2x4 plot grid
     fig, axes = plt.subplots(2, 4, figsize=(24, 12))
@@ -271,7 +266,6 @@ def plot_spatial_quality(
 
 
 
-
 def plot_temporal_curves(
     gt_img_stack: np.ndarray,
     recon_img_stack: np.ndarray,
@@ -303,16 +297,20 @@ def plot_temporal_curves(
 
     for i, region in enumerate(regions):
         mask = masks[region]
-        
+
         # Calculate mean signal in the masked region for each time point
         gt_curve = [gt_img_stack[:, :, t][mask].mean() for t in range(gt_img_stack.shape[2])]
         recon_curve = [recon_img_stack[:, :, t][mask].mean() for t in range(recon_img_stack.shape[2])]
         grasp_curve = [grasp_img_stack[:, :, t][mask].mean() for t in range(grasp_img_stack.shape[2])]
 
         # Plot
-        axes[i].plot(time_points, gt_curve, 'k-', label='Ground Truth', linewidth=2)
-        axes[i].plot(time_points, recon_curve, 'r--', label='DL Recon')
-        axes[i].plot(time_points, grasp_curve, 'b:', label='GRASP Recon')
+        # --- CHANGES ARE HERE ---
+        # Added marker='o' to show dots for each time point
+        axes[i].plot(time_points, gt_curve, 'k-', label='Ground Truth', linewidth=2, marker='o')
+        axes[i].plot(time_points, recon_curve, 'r--', label='DL Recon', marker='o')
+        axes[i].plot(time_points, grasp_curve, 'b:', label='GRASP Recon', marker='o')
+        # --- END OF CHANGES ---
+        
         axes[i].set_title(f"Region: {region.capitalize()}")
         axes[i].set_xlabel("Time (s)")
         axes[i].grid(True)
@@ -322,6 +320,58 @@ def plot_temporal_curves(
     plt.tight_layout(rect=[0, 0.03, 1, 0.95])
     plt.savefig(filename)
     plt.close()
+
+
+# def plot_temporal_curves(
+#     gt_img_stack: np.ndarray,
+#     recon_img_stack: np.ndarray,
+#     grasp_img_stack: np.ndarray,
+#     masks: dict,
+#     time_points: np.ndarray,
+#     filename: str
+# ):
+#     """
+#     Plots the mean signal intensity vs. time for different tissue regions.
+#     This is CRITICAL for debugging PK model fitting.
+
+#     Args:
+#         gt_img_stack (np.ndarray): Time series of ground truth images (H, W, T).
+#         recon_img_stack (np.ndarray): Time series of your model's images (H, W, T).
+#         grasp_img_stack (np.ndarray): Time series of GRASP images (H, W, T).
+#         masks (dict): Dictionary of boolean NumPy masks for different regions.
+#         time_points (np.ndarray): The time vector for the x-axis.
+#         filename (str): The path to save the output plot.
+#     """
+#     regions = [r for r in ['malignant', 'glandular', 'muscle'] if r in masks and masks[r].any()]
+#     if not regions:
+#         print("No relevant regions found in mask to plot temporal curves.")
+#         return
+
+#     fig, axes = plt.subplots(1, len(regions), figsize=(7 * len(regions), 5), sharey=True)
+#     if len(regions) == 1: axes = [axes] # Ensure axes is always a list
+#     fig.suptitle("Temporal Fidelity: Mean Signal vs. Time", fontsize=16)
+
+#     for i, region in enumerate(regions):
+#         mask = masks[region]
+        
+#         # Calculate mean signal in the masked region for each time point
+#         gt_curve = [gt_img_stack[:, :, t][mask].mean() for t in range(gt_img_stack.shape[2])]
+#         recon_curve = [recon_img_stack[:, :, t][mask].mean() for t in range(recon_img_stack.shape[2])]
+#         grasp_curve = [grasp_img_stack[:, :, t][mask].mean() for t in range(grasp_img_stack.shape[2])]
+
+#         # Plot
+#         axes[i].plot(time_points, gt_curve, 'k-', label='Ground Truth', linewidth=2)
+#         axes[i].plot(time_points, recon_curve, 'r--', label='DL Recon')
+#         axes[i].plot(time_points, grasp_curve, 'b:', label='GRASP Recon')
+#         axes[i].set_title(f"Region: {region.capitalize()}")
+#         axes[i].set_xlabel("Time (s)")
+#         axes[i].grid(True)
+#         axes[i].legend()
+
+#     axes[0].set_ylabel("Mean Signal Intensity")
+#     plt.tight_layout(rect=[0, 0.03, 1, 0.95])
+#     plt.savefig(filename)
+#     plt.close()
 
 
 
@@ -362,6 +412,7 @@ def plot_single_temporal_curve(
     tumor_mask = masks[region_key]
 
     if frames_to_show is None:
+        # frames_to_show = [0, 6, 20, 21] # Default frames from the example
         frames_to_show = [0, 6, 13, 20] # Default frames from the example
     if len(frames_to_show) != 4:
         raise ValueError(f"This function is designed to show exactly 4 frames, but {len(frames_to_show)} were provided.")
@@ -657,6 +708,7 @@ def eval_model(model, device, config, output_dir, physics_objects, epoch, tempor
             grasp_recon = torch.rot90(grasp_recon, k=-1, dims=(2, 4))
             grasp_recon = torch.flip(grasp_recon, dims=[-1])
 
+
             
             # ==========================================================
             # PERFORM INFERENCE
@@ -668,11 +720,10 @@ def eval_model(model, device, config, output_dir, physics_objects, epoch, tempor
                 scale = torch.quantile(kspace_complex.abs(), 0.99) + 1e-8
             kspace_norm = kspace_complex / scale
 
-            x_recon, _, _ = model(
+            x_recon, _, = model(
                 kspace_norm, 
                 physics, 
                 csmap_complex, 
-                physics_objects['dcomp']
             ) # Output shape (B, C, H, W, T)
 
 
@@ -709,27 +760,33 @@ def eval_model(model, device, config, output_dir, physics_objects, epoch, tempor
             # EVALUATE SPATIAL IMAGE QUALITY
             # ==========================================================
 
+            # calculate the single optimal scaling factor 'c'
+            x_recon_np = x_recon.cpu().numpy()
+            ground_truth_np = ground_truth.cpu().numpy()
+
+            c = np.dot(x_recon_np.flatten(), ground_truth_np.flatten()) / np.dot(x_recon_np.flatten(), x_recon_np.flatten())
+
+            recon_complex_scaled = torch.tensor(c * x_recon_np, device=device)
+
+
             # Convert complex images to magnitude
-            recon_mag = torch.sqrt(x_recon[:, 0, ...]**2 + x_recon[:, 1, ...]**2)
+            recon_mag_scaled = torch.sqrt(recon_complex_scaled[:, 0, ...]**2 + recon_complex_scaled[:, 1, ...]**2)
             gt_mag = torch.sqrt(ground_truth[:, 0, ...]**2 + ground_truth[:, 1, ...]**2)
             grasp_mag = torch.sqrt(grasp_recon[:, 0, ...]**2 + grasp_recon[:, 1, ...]**2)
 
 
-            # Normalize each image in the time series to [0, 1] for fair comparison
-            for t in range(recon_mag.shape[-1]): # Iterate over time frames
 
-                frame_recon = recon_mag[..., t]
+
+            for t in range(recon_mag_scaled.shape[-1]): # Iterate over time frames
+
+
+                frame_recon = recon_mag_scaled[..., t]
                 frame_gt = gt_mag[:, t, :, :]
                 frame_grasp = grasp_mag[:, :, t, :]
 
-                # Normalize by max value of each frame
-                # NOTE: Make sure this is the correct normalization with my training scheme
-                if frame_recon.max() > 0:
-                    frame_recon = frame_recon / frame_recon.max()
-                if frame_gt.max() > 0:
-                    frame_gt = frame_gt / frame_gt.max()
-                if frame_grasp.max() > 0:
-                    frame_grasp = frame_grasp / frame_grasp.max()
+                # calculate data range from ground truth
+                data_range = frame_gt.max() - frame_gt.min()
+
 
                 # Add channel dimension for torchmetrics: (B, H, W) -> (B, 1, H, W)
                 frame_recon = frame_recon.unsqueeze(1)
@@ -737,13 +794,13 @@ def eval_model(model, device, config, output_dir, physics_objects, epoch, tempor
                 frame_grasp = frame_grasp.unsqueeze(1).contiguous()
                 
                 # Calculate Spatial Image Quality Metrics
-                ssim, psnr, mse = calc_image_metrics(frame_recon, frame_gt, device)
+                ssim, psnr, mse = calc_image_metrics(frame_recon, frame_gt, data_range, device)
                 all_ssim_scores.append(ssim)
                 all_psnr_scores.append(psnr)
                 all_mse_scores.append(mse)
 
 
-                ssim_grasp, psnr_grasp, mse_grasp = calc_image_metrics(frame_grasp, frame_gt, device)
+                ssim_grasp, psnr_grasp, mse_grasp = calc_image_metrics(frame_grasp, frame_gt, data_range, device)
                 all_ssim_scores_grasp.append(ssim_grasp)
                 all_psnr_scores_grasp.append(psnr_grasp)
                 all_mse_scores_grasp.append(mse_grasp)
@@ -757,7 +814,7 @@ def eval_model(model, device, config, output_dir, physics_objects, epoch, tempor
 
                 # Estimate PK Parameters
                 # Define the time vector for the AIF and dynamic images
-                num_frames = x_recon.shape[-1]
+                num_frames = recon_complex_scaled.shape[-1]
                 aif_time_points = np.linspace(0, 150, num_frames) # Time in seconds
 
                 ground_truth_pk_map = parMap
@@ -813,7 +870,8 @@ def eval_model(model, device, config, output_dir, physics_objects, epoch, tempor
             # ==========================================================
             # VISUALIZATION
             # ==========================================================
-            x_recon_complex_np = to_torch_complex(x_recon).squeeze().cpu().numpy()
+
+            x_recon_complex_np = to_torch_complex(recon_complex_scaled).squeeze().cpu().numpy()
             grasp_recon_complex_np = rearrange(to_torch_complex(grasp_recon).squeeze(), 'h t w -> h w t').cpu().numpy()
 
             gt_squeezed = ground_truth.squeeze()  # Shape: (C, T, H, W) -> (2, 22, 320, 320)
@@ -836,12 +894,14 @@ def eval_model(model, device, config, output_dir, physics_objects, epoch, tempor
                 # --- Plot Spatial Quality at a Peak Enhancement Frame ---
                 # Find a frame around peak enhancement (e.g., 1/3 of the way through)
                 peak_frame = num_frames // 3
+                data_range = gt_mag_np[:, :, peak_frame].max() - gt_mag_np[:, :, peak_frame].min()
                 plot_spatial_quality(
                     recon_img=recon_mag_np[:, :, peak_frame],
                     gt_img=gt_mag_np[:, :, peak_frame],
                     grasp_img=grasp_mag_np[:, :, peak_frame],
                     time_frame_index=peak_frame,
-                    filename=os.path.join(output_dir, f"spatial_quality_epoch{epoch}.png")
+                    filename=os.path.join(output_dir, f"spatial_quality_epoch{epoch}.png"),
+                    data_range=data_range
                 )
 
                 # --- Plot Temporal Curves for Key Regions ---

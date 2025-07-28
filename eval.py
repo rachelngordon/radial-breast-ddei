@@ -682,6 +682,13 @@ def eval_grasp(kspace, csmap, ground_truth, grasp_recon, physics, device):
     # EVALUATE SPATIAL IMAGE QUALITY
     # ==========================================================
 
+    grasp_recon_np = grasp_recon.cpu().numpy()
+    ground_truth_np = ground_truth.cpu().numpy()
+
+    c = np.dot(grasp_recon_np.flatten(), ground_truth_np.flatten()) / np.dot(grasp_recon_np.flatten(), grasp_recon_np.flatten())
+
+    grasp_recon = torch.tensor(c * grasp_recon_np, device=device)
+
 
     # Convert complex images to magnitude
     gt_mag = torch.sqrt(ground_truth[:, 0, ...]**2 + ground_truth[:, 1, ...]**2)
@@ -707,22 +714,13 @@ def eval_grasp(kspace, csmap, ground_truth, grasp_recon, physics, device):
         # Calculate Spatial Image Quality Metrics
         ssim_grasp, psnr_grasp, mse_grasp = calc_image_metrics(frame_grasp, frame_gt, data_range, device)
 
-
-    # ==========================================================
-    # VISUALIZATION PREP
-    # ==========================================================
-
-    # grasp_recon_complex_np = rearrange(to_torch_complex(grasp_recon).squeeze(), 'h t w -> h w t').cpu().numpy()
-
-    # grasp_mag_np = np.abs(grasp_recon_complex_np)
     
-    
-    
-    return ssim_grasp, psnr_grasp, mse_grasp, dc_grasp#, grasp_mag_np
+    return ssim_grasp, psnr_grasp, mse_grasp, dc_grasp
 
 
 
-def eval_sample(kspace, csmap, ground_truth, x_recon, physics, mask, grasp_img_mag, output_dir, epoch, device):
+def eval_sample(kspace, csmap, ground_truth, x_recon, physics, mask, grasp_img, output_dir, epoch, device):
+
 
     # ground_truth = ground_truth.to(device) # Shape: (1, 2, T, H, W)
     # grasp_recon = grasp_recon.to(device) # Shape: (1, 2, H, T, W)
@@ -750,10 +748,15 @@ def eval_sample(kspace, csmap, ground_truth, x_recon, physics, mask, grasp_img_m
     # calculate the single optimal scaling factor 'c'
     x_recon_np = x_recon.cpu().numpy()
     ground_truth_np = ground_truth.cpu().numpy()
+    grasp_recon_np = grasp_img.cpu().numpy()
 
     c = np.dot(x_recon_np.flatten(), ground_truth_np.flatten()) / np.dot(x_recon_np.flatten(), x_recon_np.flatten())
 
     recon_complex_scaled = torch.tensor(c * x_recon_np, device=device)
+
+    c_grasp = np.dot(grasp_recon_np.flatten(), ground_truth_np.flatten()) / np.dot(grasp_recon_np.flatten(), grasp_recon_np.flatten())
+
+    grasp_img = torch.tensor(c_grasp * grasp_recon_np, device=device)
 
 
     # Convert complex images to magnitude
@@ -783,6 +786,10 @@ def eval_sample(kspace, csmap, ground_truth, x_recon, physics, mask, grasp_img_m
     # VISUALIZATION
     # ==========================================================
 
+    grasp_recon_complex_np = rearrange(to_torch_complex(grasp_img).squeeze(), 'h t w -> h w t').cpu().numpy()
+    # grasp_recon_complex_np = to_torch_complex(grasp_img).squeeze().cpu().numpy()
+    grasp_mag_np = np.abs(grasp_recon_complex_np)
+
     x_recon_complex_np = to_torch_complex(recon_complex_scaled).squeeze().cpu().numpy()
 
     gt_squeezed = ground_truth.squeeze()  # Shape: (C, T, H, W) -> (2, 22, 320, 320)
@@ -798,8 +805,7 @@ def eval_sample(kspace, csmap, ground_truth, x_recon, physics, mask, grasp_img_m
     num_frames = recon_mag_np.shape[2]
     aif_time_points = np.linspace(0, 150, num_frames)
 
-
-    print("\nGenerating diagnostic plots for the first evaluation sample...")
+    print("\nGenerating diagnostic plots...")
     if mask['malignant'].any():
         
         # --- Plot Spatial Quality at a Peak Enhancement Frame ---
@@ -809,7 +815,7 @@ def eval_sample(kspace, csmap, ground_truth, x_recon, physics, mask, grasp_img_m
         plot_spatial_quality(
             recon_img=recon_mag_np[:, :, peak_frame],
             gt_img=gt_mag_np[:, :, peak_frame],
-            grasp_img=grasp_img_mag[:, :, peak_frame],
+            grasp_img=grasp_mag_np[:, :, peak_frame],
             time_frame_index=peak_frame,
             filename=os.path.join(output_dir, f"spatial_quality_epoch{epoch}.png"),
             data_range=data_range
@@ -820,7 +826,7 @@ def eval_sample(kspace, csmap, ground_truth, x_recon, physics, mask, grasp_img_m
         plot_temporal_curves(
             gt_img_stack=gt_mag_np,
             recon_img_stack=recon_mag_np,
-            grasp_img_stack=grasp_img_mag,
+            grasp_img_stack=grasp_mag_np,
             masks=masks_np,
             time_points=aif_time_points,
             filename=os.path.join(output_dir, f"temporal_curves_epoch{epoch}.png")
@@ -836,7 +842,7 @@ def eval_sample(kspace, csmap, ground_truth, x_recon, physics, mask, grasp_img_m
         plot_time_series(
             gt_img_stack=gt_mag_np,
             recon_img_stack=recon_mag_np,
-            grasp_img_stack=grasp_img_mag,
+            grasp_img_stack=grasp_mag_np,
             filename=os.path.join(output_dir, f"time_points_epoch{epoch}.png")
         )
 

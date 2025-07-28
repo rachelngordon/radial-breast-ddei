@@ -1,17 +1,16 @@
+
 import torch
 import numpy as np
 from time import time
 
 dtype=torch.complex64
 
-def Project_inf(x, c, to_complex=True):
+def Project_inf(x, c):
     # torch.cuda.synchronize()
     # start1 = time()
     # x_max = torch.maximum((abs(x)/c), torch.ones(x.shape).to(x.device))
     x_max = torch.maximum((abs(x) / c), torch.tensor(1))
-
-    if to_complex:
-        x_max = x_max.to(dtype)
+    x_max = x_max.to(dtype)
     s = torch.div(x, x_max)
 
     # torch.cuda.synchronize()

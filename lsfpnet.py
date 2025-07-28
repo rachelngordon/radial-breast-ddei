@@ -79,9 +79,102 @@ class BasicBlock(nn.Module):
         y_L = L - self.gamma * gradient - self.gamma * pt_L - self.gamma * pb_L
 
         # pt_L
-        Ut, St, Vt = torch.linalg.svd((c * y_L + pt_L), full_matrices=False)
-        temp_St = torch.diag(Project_inf(St, self.lambda_L))
-        pt_L = Ut.mm(temp_St).mm(Vt)
+
+        # --- START OF THE ROBUST COMPLEX SVD FIX ---
+
+        svd_input_complex = c * y_L + pt_L
+        # print(f"Shape of svd_input_complex before processing: {svd_input_complex.shape}")
+
+        # n_frames = svd_input_complex.shape[-1]
+
+        # svd_input_complex = svd_input_complex.view(-1, n_frames, n_frames)
+        
+        # 1. Store the original magnitude and phase of the complex matrix.
+        #    Add a small epsilon to the magnitude to prevent division by zero when calculating phase.
+        svd_input_mag = svd_input_complex.abs() + 1e-8
+        original_phase = svd_input_complex / svd_input_mag
+
+        # print(f"Shape of svd_input_mag before regularization: {svd_input_mag.shape}")
+
+        # epsilon = 1e-6
+        # stable_input = svd_input_mag + epsilon * torch.eye(svd_input_mag.shape[-1], device=svd_input_mag.device)
+
+        # print(f"Shape of stable_input after regularization: {stable_input.shape}")
+
+        # noise_std = 1e-5 # A small standard deviation for the noise
+        # noise = torch.randn_like(svd_input_mag) * noise_std
+
+        epsilon = 1e-7  # A small constant. Tune if necessary.
+
+        noise_std = 1e-5 # A small standard deviation for the noise
+        noise = torch.randn_like(svd_input_mag) * noise_std
+
+        stable_svd_input = svd_input_mag + noise #epsilon
+
+        
+
+        # 2. Perform SVD on the REAL-VALUED magnitude matrix. 
+        #    This completely avoids the complex svd_backward error.
+        #    Using linalg.svd is fine here since the input is real.
+        Ut, St, Vt = torch.linalg.svd(stable_svd_input, full_matrices=False)
+
+        # 3. Apply the shrinkage/thresholding to the real singular values.
+        #    (Project_inf operates on magnitudes, so this is correct).
+        St_shrunk = Project_inf(St, self.lambda_L, to_complex=False)
+
+        # 4. Reconstruct the new, thresholded MAGNITUDE matrix.
+        pt_L_mag = Ut @ torch.diag_embed(St_shrunk) @ Vt
+
+        # 5. Re-apply the original phase to our new magnitude matrix to get the
+        #    final complex-valued update term.
+        pt_L = pt_L_mag * original_phase
+
+
+        # --- HOOK IMPLEMENTATION START ---
+
+        # We define the hook function inside the forward pass so it has access to local variables if needed
+        # def svd_grad_hook(grad):
+        #     """
+        #     This function will be called when the gradient for `pt_L` is computed.
+        #     `grad` is the gradient tensor itself.
+        #     """
+        #     # Check if the gradient is valid
+        #     if grad is not None:
+        #         # We use .detach() to avoid modifying the computation graph during inspection
+        #         grad_norm = grad.detach().norm(2).item()
+        #         print(f"--- SVD GRADIENT HOOK ---")
+        #         print(f"  Gradient norm of pt_L output: {grad_norm:.6e}")
+        #         if grad_norm < 1e-7:
+        #             print(f"  !!! WARNING: Gradient from SVD block is vanishing!")
+        #         print(f"-------------------------")
+        #     else:
+        #         print("--- SVD GRADIENT HOOK: Gradient is None ---")
+
+        # # Register the hook on the `pt_L` tensor. 
+        # # It will be called automatically during the backward pass.
+        # # We only want to do this during training.
+        # if self.training:
+        #     pt_L.register_hook(svd_grad_hook)
+
+        # --- HOOK IMPLEMENTATION END ---
+
+
+        # --- END OF THE ROBUST COMPLEX SVD FIX ---
+
+        # svd_input = c * y_L + pt_L
+        
+        # # Add a very small amount of random noise to the input matrix.
+        # # This is a standard technique to break ties in singular values and
+        # # prevent the gradient calculation from becoming ill-defined.
+        # noise_std = 1e-5 # A small standard deviation for the noise
+        # noise = torch.randn_like(svd_input) * noise_std
+        
+        # # Perform SVD on the slightly perturbed matrix
+        # Ut, St, Vt = torch.svd(svd_input + noise)
+
+        # Ut, St, Vt = torch.linalg.svd((c * y_L + pt_L), full_matrices=False)
+        # temp_St = torch.diag(Project_inf(St, self.lambda_L))
+        # pt_L = Ut.mm(temp_St).mm(Vt)
 
         # update p_L
         temp_y_L_input = torch.cat((torch.real(y_L), torch.imag(y_L)), 0).to(torch.float32)
@@ -234,21 +327,56 @@ class ArtifactRemovalLSFPNet(nn.Module):
         self.backbone_net = backbone_net
 
     @staticmethod
-    def _normalise(zf: torch.Tensor, data: torch.Tensor):
+    def _normalise_both(zf: torch.Tensor, data: torch.Tensor):
         """
         Per-dynamic-series max-magnitude scaling (paper default).
         Both `zf` (image) and `data` (k-space) share the SAME scalar.
         """
         scale = zf.abs().max()                       # scalar, grads OK
         return zf / scale, data / scale, scale
+    
+    @staticmethod
+    def _normalise_indep(x: torch.Tensor):
+        """
+        Per-dynamic-series max-magnitude scaling (paper default).
+        Both `zf` (image) and `data` (k-space) share the SAME scalar.
+        """
 
-    def forward(self, y, E, csmap, **kwargs):
+        scale = torch.quantile(x.abs(), 0.99) + 1e-6
+        if scale < 1e-6: # Handle case where input is all zeros
+             scale = 1.0
+        return x / scale, scale
+
+    def forward(self, y, E, csmap, norm="both", **kwargs):
 
         # 1. Get the initial ZF recon. This defines our target energy/scale.
         x_init = E(inv=True, data=y, smaps=csmap)
 
         # 2. Permute and normalize the input for the network
-        x_init_norm, y_norm, scale = self._normalise(x_init, y)
+        # print("--- Values Before Normalization --- ")
+        # print("zf image min: ", torch.abs(x_init).min())
+        # print("zf image max: ", torch.abs(x_init).max())
+        # print("zf image mean: ", torch.abs(x_init).mean())
+        # print("kspace min: ", torch.abs(y).min())
+        # print("kspace max: ", torch.abs(y).max())
+        # print("kspace mean: ", torch.abs(y).mean())
+        if norm =="both":
+            x_init_norm, y_norm, scale = self._normalise_both(x_init, y)
+        elif norm == "independent":
+            # 2. Normalize the image and k-space INDEPENDENTLY.
+            x_init_norm, scale = self._normalise_indep(x_init)
+            y_norm, scale_y = self._normalise_indep(y)
+        elif norm == "none":
+            x_init_norm = x_init
+            y_norm = y
+            scale = 1.0
+        # print("--- Values After Normalization --- ")
+        # print("zf image min: ", torch.abs(x_init_norm).min())
+        # print("zf image max: ", torch.abs(x_init_norm).max())
+        # print("zf image mean: ", torch.abs(x_init_norm).mean())
+        # print("kspace min: ", torch.abs(y_norm).min())
+        # print("kspace max: ", torch.abs(y_norm).max())
+        # print("kspace mean: ", torch.abs(y_norm).mean())
 
         L, S, loss_layers_adj_L, loss_layers_adj_S  = self.backbone_net(x_init_norm, E, y_norm, csmap)
 
@@ -261,7 +389,7 @@ class ArtifactRemovalLSFPNet(nn.Module):
             loss_constraint_L += torch.square(torch.mean(loss_layers_adj_L[k + 1])) / self.backbone_net.LayerNo
 
 
-        recon = (L + S) * scale                  # rescale to original units
+        recon = (L + S) * scale                 # rescale to original units
 
         # 4) stack & convert back to (B,2,T,H,W) float32
         x_hat = torch.stack((recon.real, recon.imag), dim=0).unsqueeze(0)  # (B,2,H,W,T)

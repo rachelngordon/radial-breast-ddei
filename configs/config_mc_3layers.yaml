@@ -27,9 +27,9 @@ dataloader:
 # Model settings
 model:
   name: "LSFPNet"
-  num_layers: 8
+  num_layers: 3
   cascades: 2
-  channels: 8
+  channels: 16
   optimizer:
     name: "Adam"
     lr: 0.0001
@@ -38,20 +38,21 @@ model:
     b2: 0.999
     eps: 0.000000001
   losses:
-    use_ei_loss: true
     adj_loss:
       weight: 0.0001
+    use_ei_loss: false
     mc_loss:
       weight: 10
     ei_loss:
       temporal_transform: "subsample"
-      weight: 1000
-      warmup: 10
-      duration: 100
+      weight: 0
+      warmup: 3
+      duration: 5
       subsample_ratio_min: 0.7
       subsample_ratio_max: 0.95
       warp_ratio_min: 0.6
       warp_ratio_max: 0.95
+  norm: "both"
 
 
 # Training settings
@@ -64,7 +65,6 @@ training:
 evaluation:
   num_samples: 15
   simulated_dataset_path: "/ess/scratch/scratch1/rachelgordon/simulated_dataset/"
-
 
 debugging:
   calc_step_0: true

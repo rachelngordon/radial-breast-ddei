@@ -1,0 +1,247 @@
+import glob
+import os
+
+import h5py
+import numpy as np
+import torch
+from torch.utils.data import DataLoader, Dataset
+import nibabel as nib
+
+
+class SliceDataset(Dataset):
+    """
+    A Dataset that:
+      - Looks for all .h5/.hdf5 files under `root_dir`.
+      - Each file is assumed to contain a dataset at `dataset_key`, with shape (... Z),
+        where Z is the number of slices/partitions.
+      - Splits each volume into Z separate examples (one per slice).
+      - Returns each slice as a torch.Tensor.
+    """
+
+    def __init__(
+        self,
+        root_dir,
+        patient_ids,
+        dataset_key="kspace",
+        file_pattern="*.h5",
+        slice_idx=41,
+        N_time = 8,
+        N_coils=16
+    ):
+        """
+        Args:
+            root_dir (str): Path to the folder containing all HDF5 k-space files.
+            dataset_key (str): The key/path inside each .h5 file to the k-space dataset (e.g. "kspace").
+            file_pattern (str): Glob pattern to match your HDF5 files (default "*.h5").
+        """
+        super().__init__()
+        self.root_dir = root_dir
+        self.dataset_key = dataset_key
+        self.slice_idx = slice_idx
+        self.N_time = N_time
+        self.N_coils = N_coils
+
+        # Find all matching HDF5 files under root_dir
+        all_files = sorted(glob.glob(os.path.join(root_dir, file_pattern)))
+        print("Number of files in root directory: ", len(all_files))
+
+        if len(all_files) == 0:
+            raise RuntimeError(
+                f"No files found in {root_dir} matching pattern {file_pattern}"
+            )
+
+        # filter file list by patient ID substring
+        filtered = []
+        for fp in all_files:
+            fname = os.path.basename(fp)
+            # Check if any patient_id appears in the filename
+            if any(pid in fname for pid in patient_ids):
+                filtered.append(fp)
+
+        self.file_list = filtered
+
+        if len(self.file_list) == 0:
+            raise RuntimeError("No files matched the provided patient_ids filter.")
+
+        # Build a list of (file_path, slice_index) for every slice in every volume
+        # self.slice_index_map = []
+        # for fp in self.file_list:
+        #     with h5py.File(fp, "r") as f:
+        #         if self.dataset_key not in f:
+        #             raise KeyError(f"Dataset key '{self.dataset_key}' not found in file {fp}")
+        #         ds = f[self.dataset_key]
+        #         num_slices = ds.shape[0]
+
+        #     for z in range(num_slices):
+        #         self.slice_index_map.append((fp, z))
+
+    def load_dynamic_img(self, patient_id):
+
+        H = W = 320
+        data = np.empty((2, self.N_time, H, W), dtype=np.float32)
+
+        for t in range(self.N_time):
+            # load image 
+            img_path = f'/ess/scratch/scratch1/rachelgordon/dce-{self.N_time}tf/{patient_id}/slice_{self.slice_idx:03d}_frame_{t:03d}.nii'
+
+            # if os.path.exists(img_path):
+
+            img = nib.load(img_path)
+            img_data = img.get_fdata()
+
+            if img_data.shape != (2, H, W):
+                raise ValueError(f"{img_path} has shape {img_data.shape}; "
+                                f"expected (2, {H}, {W})")
+
+            data[:, t] = img_data.astype(np.float32)
+            
+            # else:
+            #     return None
+
+        return torch.from_numpy(data) 
+    
+    def load_csmaps(self, patient_id):
+
+        ground_truth_dir = os.path.join(os.path.dirname(self.root_dir), 'cs_maps')
+        csmap_path = os.path.join(ground_truth_dir, patient_id + '_cs_maps', f'cs_map_slice_{self.slice_idx:03d}.npy')
+
+        csmap = np.load(csmap_path)
+
+        return csmap.squeeze()
+
+
+    def __len__(self):
+        return len(self.file_list)
+
+    def __getitem__(self, idx):
+        """
+        Returns a single slice of k-space as a torch.Tensor.
+        The output shape will be the standard (C=2, T, S, I) where C is [real, imag].
+        """
+
+        # load GRASP recon image
+        file_path = self.file_list[idx]
+        patient_id = file_path.split('/')[-1].strip('.h5')
+
+        grasp_img = self.load_dynamic_img(patient_id)
+        csmap = self.load_csmaps(patient_id)
+
+        with h5py.File(file_path, "r") as f:
+            ds = torch.tensor(f[self.dataset_key][:])
+            kspace_slice = ds[self.slice_idx]
+
+        # Select the first coil
+        if self.N_coils == 1:
+            kspace_slice = kspace_slice[:, 0, :, :]  # Shape: (T, S, I)
+
+        # Separate real and imaginary components
+        real_part = kspace_slice.real
+        imag_part = kspace_slice.imag
+
+        # Stack them along a new 'channel' dimension (dim=0).
+        # This creates the final, standard (C=2, T, S, I) format.
+        kspace_final = torch.stack([real_part, imag_part], dim=0).float()
+
+        # The final shape is (2, num_timeframes, num_spokes, num_samples)
+        # e.g., (2, 8, 36, 640)
+        return kspace_final, csmap, grasp_img
+
+
+
+
+class SimulatedDataset(Dataset):
+    """
+    Dataset for loading the simulated data generated by your script.
+    It loads the simulated k-space, coil sensitivity maps, and the
+    ground truth dynamic image (DRO).
+    """
+    def __init__(self, root_dir, model_type, patient_ids):
+        self.model_type = model_type
+        # Find all sample directories, e.g., 'sample_001_sub1', 'sample_002_sub2', etc.
+        self.sample_paths = sorted(glob.glob(os.path.join(root_dir, 'sample_*')))
+        if not self.sample_paths:
+            raise FileNotFoundError(f"No sample directories found in {root_dir}. "
+                                    "Please check the path to your simulated dataset.")
+        
+        # filter file list by patient ID substring
+        filtered = []
+        for fp in self.sample_paths:
+            fname = os.path.basename(fp)
+            # Check if any patient_id appears in the filename
+            if any(pid in fname for pid in patient_ids):
+                filtered.append(fp)
+
+        self.sample_paths = filtered
+
+        print(f"Found {len(self.sample_paths)} simulated samples in {root_dir} for this dataset.")
+
+        self.TISSUE_NAMES = [
+            'glandular', 'benign', 'malignant', 'muscle',
+            'skin', 'liver', 'heart', 'vascular'
+        ]
+
+    def __len__(self):
+        return len(self.sample_paths)
+
+    def __getitem__(self, idx):
+        sample_dir = self.sample_paths[idx]
+
+        # Load the data from .npy files
+        kspace_complex = np.load(os.path.join(sample_dir, 'simulated_kspace.npy'))
+        csmaps = np.load(os.path.join(sample_dir, 'csmaps.npy'))
+        dro = np.load(os.path.join(sample_dir, 'dro_ground_truth.npz'))
+        grasp_recon = np.load(os.path.join(sample_dir, 'grasp_recon.npy'))
+
+        ground_truth_complex = dro['ground_truth_images']
+
+        parMap = dro['parMap']
+        aif = dro['aif']
+        S0 = dro['S0']
+        T10 = dro['T10']
+        # mask = dro['mask']
+
+        # ==========================================================
+        # --- RECONSTRUCT THE MASK DICTIONARY ---
+        # ==========================================================
+        mask_dictionary_rebuilt = {}
+        for tissue_name in self.TISSUE_NAMES:
+            # Check if the key for this tissue (e.g., 'malignant') exists in the file
+            if tissue_name in dro:
+                # Load the boolean array and add it to the dictionary
+                mask_dictionary_rebuilt[tissue_name] = dro[tissue_name]
+        
+        # 'mask' is now the dictionary of boolean arrays, just like your functions expect
+        mask = mask_dictionary_rebuilt
+
+
+        # --- Convert to PyTorch Tensors ---
+        # Ground truth: (H, W, T) -> (2, T, H, W) [real/imag, time, h, w]
+        ground_truth_torch = torch.from_numpy(ground_truth_complex).permute(2, 0, 1) # T, H, W
+        ground_truth_torch = torch.stack([ground_truth_torch.real, ground_truth_torch.imag], dim=0)
+
+        # GRASP Recon: (H, W, T) -> (2, T, H, W) [real/imag, time, h, w]
+        grasp_recon_torch = torch.from_numpy(grasp_recon).permute(2, 0, 1) # T, H, W
+        grasp_recon_torch = torch.stack([grasp_recon_torch.real, grasp_recon_torch.imag], dim=0)
+
+        # CSMaps: (H, W, C) -> (1, C, H, W) [batch, coils, h, w]
+        csmaps_torch = torch.from_numpy(csmaps).permute(2, 0, 1).unsqueeze(0)
+
+        # --- Prepare k-space based on model type ---
+        if self.model_type == "CRNN":
+            # k-space: (C, Samples, T) -> (1, 2, C*Samples*T) -> reshape to training format
+            # The training code expects k-space as (B, C, 2, Samples, T)
+            # Your simulated k-space is (Coils, N_samples_per_frame * N_spokes, N_frames)
+            kspace_real_imag = np.stack([kspace_complex.real, kspace_complex.imag]) # (2, C, Samples, T)
+            kspace_torch = torch.from_numpy(kspace_real_imag)
+            # Add batch and coil dimensions to match trainer. Assuming C=1 from trainer code.
+            kspace_torch = kspace_torch.permute(2, 0, 1, 3).unsqueeze(0) # (B, C, 2, Samples, T)
+        
+        elif self.model_type == "LSFPNet":
+            # LSFPNet expects complex k-space of shape (coils, samples, time)
+            kspace_torch = torch.from_numpy(kspace_complex)
+        
+        else:
+            raise ValueError(f"Unsupported model_type for SimulatedDataset: {self.model_type}")
+
+        # return kspace_torch.float(), csmaps_torch.cfloat(), ground_truth_torch.float(), grasp_recon_torch.float(), parMap, aif, S0, T10, mask
+        return kspace_torch, csmaps_torch, ground_truth_torch, grasp_recon_torch, mask#, parMap, aif, S0, T10, mask

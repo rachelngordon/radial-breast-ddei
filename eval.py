@@ -380,6 +380,7 @@ def plot_single_temporal_curve(
     img_stack: np.ndarray,
     masks: Dict[str, np.ndarray],
     time_points: np.ndarray,
+    num_frames: int,
     filename: str,
     # New arguments required for this specific plot style:
     frames_to_show: List[int] = None
@@ -414,7 +415,9 @@ def plot_single_temporal_curve(
 
     if frames_to_show is None:
         # frames_to_show = [0, 6, 20, 21] # Default frames from the example
-        frames_to_show = [0, 6, 13, 20] # Default frames from the example
+        interval = round(num_frames / 4)
+        frames_to_show = [0, interval, 2*interval, num_frames-1]
+        # frames_to_show = [0, 6, 13, 20] # Default frames from the example
     if len(frames_to_show) != 4:
         raise ValueError(f"This function is designed to show exactly 4 frames, but {len(frames_to_show)} were provided.")
 
@@ -719,7 +722,7 @@ def eval_grasp(kspace, csmap, ground_truth, grasp_recon, physics, device):
 
 
 
-def eval_sample(kspace, csmap, ground_truth, x_recon, physics, mask, grasp_img, output_dir, epoch, device):
+def eval_sample(kspace, csmap, ground_truth, x_recon, physics, mask, grasp_img, output_dir, label, device):
 
 
     # ground_truth = ground_truth.to(device) # Shape: (1, 2, T, H, W)
@@ -728,6 +731,7 @@ def eval_sample(kspace, csmap, ground_truth, x_recon, physics, mask, grasp_img, 
     # ==========================================================
     # EVALUATE DATA CONSISTENCY
     # ==========================================================
+
 
     # Forward Simulation
     x_recon_complex = to_torch_complex(x_recon).squeeze()
@@ -749,6 +753,7 @@ def eval_sample(kspace, csmap, ground_truth, x_recon, physics, mask, grasp_img, 
     x_recon_np = x_recon.cpu().numpy()
     ground_truth_np = ground_truth.cpu().numpy()
     grasp_recon_np = grasp_img.cpu().numpy()
+
 
     c = np.dot(x_recon_np.flatten(), ground_truth_np.flatten()) / np.dot(x_recon_np.flatten(), x_recon_np.flatten())
 
@@ -802,7 +807,9 @@ def eval_sample(kspace, csmap, ground_truth, x_recon, physics, mask, grasp_img, 
     gt_mag_np = np.abs(gt_complex_np)
     
     masks_np = {key: val.cpu().numpy().squeeze().astype(bool) for key, val in mask.items()}
+
     num_frames = recon_mag_np.shape[2]
+
     aif_time_points = np.linspace(0, 150, num_frames)
 
     print("\nGenerating diagnostic plots...")
@@ -817,7 +824,7 @@ def eval_sample(kspace, csmap, ground_truth, x_recon, physics, mask, grasp_img, 
             gt_img=gt_mag_np[:, :, peak_frame],
             grasp_img=grasp_mag_np[:, :, peak_frame],
             time_frame_index=peak_frame,
-            filename=os.path.join(output_dir, f"spatial_quality_epoch{epoch}.png"),
+            filename=os.path.join(output_dir, f"spatial_quality_{label}.png"),
             data_range=data_range
         )
 
@@ -829,21 +836,22 @@ def eval_sample(kspace, csmap, ground_truth, x_recon, physics, mask, grasp_img, 
             grasp_img_stack=grasp_mag_np,
             masks=masks_np,
             time_points=aif_time_points,
-            filename=os.path.join(output_dir, f"temporal_curves_epoch{epoch}.png")
+            filename=os.path.join(output_dir, f"temporal_curves_{label}.png")
         )
 
         plot_single_temporal_curve(
             img_stack=recon_mag_np,
             masks=masks_np,
             time_points=aif_time_points,
-            filename=os.path.join(output_dir, f"recon_temporal_curve_epoch{epoch}.png")
+            num_frames=num_frames,
+            filename=os.path.join(output_dir, f"recon_temporal_curve_{label}.png")
         )
 
         plot_time_series(
             gt_img_stack=gt_mag_np,
             recon_img_stack=recon_mag_np,
             grasp_img_stack=grasp_mag_np,
-            filename=os.path.join(output_dir, f"time_points_epoch{epoch}.png")
+            filename=os.path.join(output_dir, f"time_points_{label}.png")
         )
 
         print("Diagnostic plots saved.")
@@ -1115,6 +1123,7 @@ def eval_model(eval_dataset, model, device, config, output_dir, physics_objects,
                     img_stack=recon_mag_np,
                     masks=masks_np,
                     time_points=aif_time_points,
+                    num_frames=num_frames,
                     filename=os.path.join(output_dir, f"recon_temporal_curve_epoch{epoch}.png")
                 )
 

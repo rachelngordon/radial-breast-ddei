@@ -27,12 +27,18 @@ dataloader:
 # Model settings
 model:
   name: "LSFPNet"
-  num_layers: 8
+  num_layers: 3
   cascades: 2
   channels: 16
+  lambda_L: 0.0025
+  lambda_S: 0.05
+  lambda_spatial_L: 0.05
+  lambda_spatial_S: 0.005
+  gamma: 0.1
+  lambda_step: 0.1
   optimizer:
     name: "Adam"
-    lr: 0.0001
+    lr: 0.0005
     weight_decay: 0.0
     b1: 0.9
     b2: 0.999
@@ -57,7 +63,7 @@ model:
 
 # Training settings
 training:
-  epochs: 30
+  epochs: 10
   save_interval: 1
   plot_interval: 20
   device: "cuda"  # or "cpu"

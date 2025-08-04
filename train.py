@@ -20,7 +20,7 @@ from lsfpnet import LSFPNet, ArtifactRemovalLSFPNet
 from radial_lsfp import MCNUFFT
 from utils import prep_nufft, log_gradient_stats, plot_enhancement_curve, get_cosine_ei_weight, plot_reconstruction_sample, get_git_commit, save_checkpoint, load_checkpoint, to_torch_complex
 from eval import eval_model, eval_grasp, eval_sample
-
+import csv
 
 # Parse command-line arguments
 parser = argparse.ArgumentParser(description="Train ReconResNet model.")
@@ -84,6 +84,13 @@ split_file = config["data"]["split_file"]
 
 batch_size = config["dataloader"]["batch_size"]
 max_subjects = config["dataloader"]["max_subjects"]
+
+initial_lambdas = {'lambda_L': config['model']['lambda_L'], 
+                   'lambda_S': config['model']['lambda_S'], 
+                   'lambda_spatial_L': config['model']['lambda_spatial_L'],
+                   'lambda_spatial_S': config['model']['lambda_spatial_S'],
+                   'gamma': config['model']['gamma'],
+                   'lambda_step': config['model']['lambda_step']}
 
 mc_loss_weight = config["model"]["losses"]["mc_loss"]["weight"]
 adj_loss_weight = config["model"]["losses"]["adj_loss"]["weight"]
@@ -216,7 +223,7 @@ elif model_type == "LSFPNet":
     physics = MCNUFFT(nufft_ob, adjnufft_ob, ktraj, dcomp)
     eval_physics = MCNUFFT(eval_nufft_ob, eval_adjnufft_ob, eval_ktraj, eval_dcomp)
 
-    lsfp_backbone = LSFPNet(LayerNo=config["model"]["num_layers"], channels=config['model']['channels'])
+    lsfp_backbone = LSFPNet(LayerNo=config["model"]["num_layers"], lambdas=initial_lambdas, channels=config['model']['channels'])
     model = ArtifactRemovalLSFPNet(lsfp_backbone).to(device)
 
 else:
@@ -309,10 +316,10 @@ if args.from_checkpoint:
     weighted_train_mc_losses = train_curves["weighted_train_mc_losses"]
     weighted_train_ei_losses = train_curves["weighted_train_ei_losses"]
     weighted_train_adj_losses = train_curves["weighted_train_adj_losses"]
-    eval_ssims = eval_curves["ssim"]
-    eval_psnrs = eval_curves["psnr"]
-    eval_mses = eval_curves["mse"]
-    eval_dcs = eval_curves["dc"]
+    eval_ssims = eval_curves["eval_ssims"]
+    eval_psnrs = eval_curves["eval_psnrs"]
+    eval_mses = eval_curves["eval_mses"]
+    eval_dcs = eval_curves["eval_dcs"]
 else:
     train_mc_losses = []
     val_mc_losses = []
@@ -450,14 +457,17 @@ if args.from_checkpoint == False and config['debugging']['calc_step_0'] == True:
             grasp_mses.append(mse_grasp)
             grasp_dcs.append(dc_grasp)
 
-        step0_val_mc_loss = initial_val_mc_loss / len(val_loader)
+        step0_val_mc_loss = initial_val_mc_loss / len(val_dro_loader)
         val_mc_losses.append(step0_val_mc_loss)
 
-        step0_val_ei_loss = initial_val_ei_loss / len(val_loader)
+        step0_val_ei_loss = initial_val_ei_loss / len(val_dro_loader)
         val_ei_losses.append(step0_val_ei_loss)
 
-        step0_val_adj_loss = initial_val_adj_loss / len(val_loader)
+        step0_val_adj_loss = initial_val_adj_loss / len(val_dro_loader)
         val_adj_losses.append(step0_val_adj_loss)
+
+    print(f"Step 0 Train Losses: MC: {step0_train_mc_loss}, EI: {step0_train_ei_loss}, Adj: {step0_train_adj_loss}")
+    print(f"Step 0 Val Losses: MC: {step0_val_mc_loss}, EI: {step0_val_ei_loss}, Adj: {step0_val_adj_loss}")
 
 # Training Loop
 if (epochs + 1) == start_epoch:
@@ -621,7 +631,7 @@ else:
         val_running_ei_loss = 0.0
         val_running_adj_loss = 0.0
         val_loader_tqdm = tqdm(
-            val_loader,
+            val_dro_loader,
             desc=f"Epoch {epoch}/{epochs}  Validation",
             unit="batch",
             leave=False,
@@ -727,15 +737,15 @@ else:
 
 
         # Calculate and store average validation losses
-        epoch_val_mc_loss = val_running_mc_loss / len(val_loader)
+        epoch_val_mc_loss = val_running_mc_loss / len(val_dro_loader)
         val_mc_losses.append(epoch_val_mc_loss)
         if use_ei_loss:
-            epoch_val_ei_loss = val_running_ei_loss / len(val_loader)
+            epoch_val_ei_loss = val_running_ei_loss / len(val_dro_loader)
             val_ei_losses.append(epoch_val_ei_loss)
         else:
             val_ei_losses.append(0.0)
         if model_type == "LSFPNet":
-            epoch_val_adj_loss = val_running_adj_loss / len(val_loader)
+            epoch_val_adj_loss = val_running_adj_loss / len(val_dro_loader)
             val_adj_losses.append(epoch_val_adj_loss)
         else:
             val_adj_losses.append(0.0)
@@ -960,14 +970,14 @@ else:
                 f"Epoch {epoch}: Training Adj Loss: {epoch_train_adj_loss:.6f}, Validation Adj Loss: {epoch_val_adj_loss:.6f}"
             )
         print(f"--- Evaluation Metrics: Epoch {epoch} ---")
-        print(f"Recon SSIM: {epoch_eval_ssim:.6f}, St Dev: {np.std(epoch_eval_ssims):.6f}")
-        print(f"Recon PSNR: {epoch_eval_psnr:.6f}, St Dev: {np.std(epoch_eval_psnrs):.6f}")
-        print(f"Recon MSE: {epoch_eval_mse:.6f}, St Dev: {np.std(epoch_eval_mses):.6f}")
-        print(f"Recon DC: {epoch_eval_dc:.6f}, St Dev: {np.std(epoch_eval_dcs):.6f}")
-        print(f"GRASP SSIM: {np.mean(grasp_ssims):.6f}, St Dev: {np.std(grasp_ssims):.6f}")
-        print(f"GRASP PSNR: {np.mean(grasp_psnrs):.6f}, St Dev: {np.std(grasp_psnrs):.6f}")
-        print(f"GRASP MSE: {np.mean(grasp_mses):.6f}, St Dev: {np.std(grasp_mses):.6f}")
-        print(f"GRASP DC: {np.mean(grasp_dcs):.6f}, St Dev: {np.std(grasp_dcs):.6f}")
+        print(f"Recon SSIM: {epoch_eval_ssim:.4f} ± {np.std(epoch_eval_ssims):.4f}")
+        print(f"Recon PSNR: {epoch_eval_psnr:.4f} ± {np.std(epoch_eval_psnrs):.4f}")
+        print(f"Recon MSE: {epoch_eval_mse:.4f} ± {np.std(epoch_eval_mses):.4f}")
+        print(f"Recon DC: {epoch_eval_dc:.4f} ± {np.std(epoch_eval_dcs):.4f}")
+        print(f"GRASP SSIM: {np.mean(grasp_ssims):.4f} ± {np.std(grasp_ssims):.4f}")
+        print(f"GRASP PSNR: {np.mean(grasp_psnrs):.4f} ± {np.std(grasp_psnrs):.4f}")
+        print(f"GRASP MSE: {np.mean(grasp_mses):.4f} ± {np.std(grasp_mses):.4f}")
+        print(f"GRASP DC: {np.mean(grasp_dcs):.6f} ± {np.std(grasp_dcs):.4f}")
 
 
 # Save the model at the end of training
@@ -992,8 +1002,18 @@ eval_curves = dict(
     eval_dcs=eval_dcs,
 )
 model_save_path = os.path.join(output_dir, f'{exp_name}_model.pth')
-save_checkpoint(model, optimizer, epochs + 1, train_curves, val_curves, model_save_path)
+save_checkpoint(model, optimizer, epochs + 1, train_curves, val_curves, eval_curves, model_save_path)
 print(f'Model saved to {model_save_path}')
+
+
+# save final evaluation metrics
+metrics_path = os.path.join(eval_dir, "eval_metrics.csv")
+
+with open(metrics_path, 'w', newline='') as csvfile:
+    writer = csv.writer(csvfile)
+    writer.writerow(['Recon', 'SSIM', 'PSNR', 'MSE', 'DC'])
+    writer.writerow(['DL', f'{epoch_eval_ssim:.4f} ± {np.std(epoch_eval_ssims):.4f}', f'{epoch_eval_psnr:.4f} ± {np.std(epoch_eval_psnrs):.4f}', f'{epoch_eval_mse:.4f} ± {np.std(epoch_eval_mses):.4f}', f'{epoch_eval_dc:.4f} ± {np.std(epoch_eval_dcs):.4f}'])
+    writer.writerow(['GRASP', f'{np.mean(grasp_ssims):.4f} ± {np.std(grasp_ssims):.4f}', f'{np.mean(grasp_psnrs):.4f} ± {np.std(grasp_psnrs):.4f}', f'{np.mean(grasp_mses):.4f} ± {np.std(grasp_mses):.4f}', f'{np.mean(grasp_dcs):.4f} ± {np.std(grasp_dcs):.4f}'])
 
 
 

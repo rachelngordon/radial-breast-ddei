@@ -60,6 +60,7 @@ class MCNUFFT(nn.Module):
                 x = torch.zeros([smaps.shape[1], self.ktraj.shape[1], data.shape[-1]], dtype=dtype)
 
                 for ii in range(0, data.shape[-1]):
+
                     image = data[:, :, ii]
                     k = self.ktraj[:, :, ii]
 

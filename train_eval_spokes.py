@@ -6,7 +6,7 @@ import matplotlib.pyplot as plt
 import torch
 import yaml
 from crnn import CRNN, ArtifactRemovalCRNN
-from dataloader import SliceDataset, SimulatedDataset
+from dataloader import SliceDataset, SimulatedDataset, SimulatedSPFDataset
 from deepinv.transform import Transform
 from einops import rearrange
 from radial import RadialDCLayer, to_torch_complex, MCNUFFT_CRNN
@@ -20,50 +20,7 @@ from lsfpnet import LSFPNet, ArtifactRemovalLSFPNet
 from radial_lsfp import MCNUFFT
 from utils import prep_nufft, log_gradient_stats, plot_enhancement_curve, get_cosine_ei_weight, plot_reconstruction_sample, get_git_commit, save_checkpoint, load_checkpoint, to_torch_complex
 from eval import eval_model, eval_grasp, eval_sample
-
-
-# --- Main Evaluation Plan ---
-# Increased fixed budget of 320 total spokes.
-MAIN_EVALUATION_PLAN = [
-    {
-        "spokes_per_frame": 16,
-        "num_frames": 20, # 16 * 20 = 320 total spokes
-        "slice": slice(1, 21), # Wide window
-        "description": "High temporal resolution"
-    },
-    {
-        "spokes_per_frame": 20,
-        "num_frames": 16, # 20 * 16 = 320 total spokes
-        "slice": slice(3, 19), # Medium-wide window
-        "description": "Good temporal resolution"
-    },
-    {
-        "spokes_per_frame": 32,
-        "num_frames": 10, # 32 * 10 = 320 total spokes
-        "slice": slice(5, 15), # Narrow window centered on enhancement
-        "description": "Standard temporal resolution"
-    },
-    {
-        "spokes_per_frame": 40,
-        "num_frames": 8,  # 40 * 8 = 320 total spokes
-        "slice": slice(5, 13), # Very narrow window on peak
-        "description": "Low temporal resolution"
-    }
-]
-
-# --- Stress Test Plan ---
-# Designed to push the limits with very few spokes per frame.
-# This has a different (lower) total spoke budget.
-STRESS_TEST_PLAN = [
-    {
-        "spokes_per_frame": 8,
-        "num_frames": 22, # 8 * 22 = 176 total spokes
-        "slice": slice(0, 22), # The entire 22-frame duration
-        "description": "Stress test: max temporal points, min spokes"
-    }
-]
-
-
+import csv
 
 # Parse command-line arguments
 parser = argparse.ArgumentParser(description="Train ReconResNet model.")
@@ -127,6 +84,13 @@ split_file = config["data"]["split_file"]
 
 batch_size = config["dataloader"]["batch_size"]
 max_subjects = config["dataloader"]["max_subjects"]
+
+initial_lambdas = {'lambda_L': config['model']['lambda_L'], 
+                   'lambda_S': config['model']['lambda_S'], 
+                   'lambda_spatial_L': config['model']['lambda_spatial_L'],
+                   'lambda_spatial_S': config['model']['lambda_spatial_S'],
+                   'gamma': config['model']['gamma'],
+                   'lambda_step': config['model']['lambda_step']}
 
 mc_loss_weight = config["model"]["losses"]["mc_loss"]["weight"]
 adj_loss_weight = config["model"]["losses"]["adj_loss"]["weight"]
@@ -259,7 +223,7 @@ elif model_type == "LSFPNet":
     physics = MCNUFFT(nufft_ob, adjnufft_ob, ktraj, dcomp)
     eval_physics = MCNUFFT(eval_nufft_ob, eval_adjnufft_ob, eval_ktraj, eval_dcomp)
 
-    lsfp_backbone = LSFPNet(LayerNo=config["model"]["num_layers"], channels=config['model']['channels'])
+    lsfp_backbone = LSFPNet(LayerNo=config["model"]["num_layers"], lambdas=initial_lambdas, channels=config['model']['channels'])
     model = ArtifactRemovalLSFPNet(lsfp_backbone).to(device)
 
 else:
@@ -277,7 +241,6 @@ optimizer = torch.optim.Adam(
 if args.from_checkpoint == True:
     checkpoint_file = f'output/{exp_name}/{exp_name}_model.pth'
     model, optimizer, start_epoch, train_curves, val_curves, eval_curves = load_checkpoint(model, optimizer, checkpoint_file)
-    print("start epoch: ", start_epoch)
 else:
     start_epoch = 1
 
@@ -493,14 +456,17 @@ if args.from_checkpoint == False and config['debugging']['calc_step_0'] == True:
             grasp_mses.append(mse_grasp)
             grasp_dcs.append(dc_grasp)
 
-        step0_val_mc_loss = initial_val_mc_loss / len(val_loader)
+        step0_val_mc_loss = initial_val_mc_loss / len(val_dro_loader)
         val_mc_losses.append(step0_val_mc_loss)
 
-        step0_val_ei_loss = initial_val_ei_loss / len(val_loader)
+        step0_val_ei_loss = initial_val_ei_loss / len(val_dro_loader)
         val_ei_losses.append(step0_val_ei_loss)
 
-        step0_val_adj_loss = initial_val_adj_loss / len(val_loader)
+        step0_val_adj_loss = initial_val_adj_loss / len(val_dro_loader)
         val_adj_losses.append(step0_val_adj_loss)
+
+    print(f"Step 0 Train Losses: MC: {step0_train_mc_loss}, EI: {step0_train_ei_loss}, Adj: {step0_train_adj_loss}")
+    print(f"Step 0 Val Losses: MC: {step0_val_mc_loss}, EI: {step0_val_ei_loss}, Adj: {step0_val_adj_loss}")
 
 # Training Loop
 if (epochs + 1) == start_epoch:
@@ -664,7 +630,7 @@ else:
         val_running_ei_loss = 0.0
         val_running_adj_loss = 0.0
         val_loader_tqdm = tqdm(
-            val_loader,
+            val_dro_loader,
             desc=f"Epoch {epoch}/{epochs}  Validation",
             unit="batch",
             leave=False,
@@ -716,7 +682,7 @@ else:
 
 
                 ## Evaluation
-                ssim, psnr, mse, dc = eval_sample(val_kspace_batch, val_csmap, val_ground_truth, val_x_recon, eval_physics, val_mask, val_grasp_img_tensor, eval_dir, epoch, device)
+                ssim, psnr, mse, dc = eval_sample(val_kspace_batch, val_csmap, val_ground_truth, val_x_recon, eval_physics, val_mask, val_grasp_img_tensor, eval_dir, f'epoch{epoch}', device)
                 epoch_eval_ssims.append(ssim)
                 epoch_eval_psnrs.append(psnr)
                 epoch_eval_mses.append(mse)
@@ -770,15 +736,15 @@ else:
 
 
         # Calculate and store average validation losses
-        epoch_val_mc_loss = val_running_mc_loss / len(val_loader)
+        epoch_val_mc_loss = val_running_mc_loss / len(val_dro_loader)
         val_mc_losses.append(epoch_val_mc_loss)
         if use_ei_loss:
-            epoch_val_ei_loss = val_running_ei_loss / len(val_loader)
+            epoch_val_ei_loss = val_running_ei_loss / len(val_dro_loader)
             val_ei_losses.append(epoch_val_ei_loss)
         else:
             val_ei_losses.append(0.0)
         if model_type == "LSFPNet":
-            epoch_val_adj_loss = val_running_adj_loss / len(val_loader)
+            epoch_val_adj_loss = val_running_adj_loss / len(val_dro_loader)
             val_adj_losses.append(epoch_val_adj_loss)
         else:
             val_adj_losses.append(0.0)
@@ -1003,14 +969,14 @@ else:
                 f"Epoch {epoch}: Training Adj Loss: {epoch_train_adj_loss:.6f}, Validation Adj Loss: {epoch_val_adj_loss:.6f}"
             )
         print(f"--- Evaluation Metrics: Epoch {epoch} ---")
-        print(f"Recon SSIM: {epoch_eval_ssim:.6f}, St Dev: {np.std(epoch_eval_ssims):.6f}")
-        print(f"Recon PSNR: {epoch_eval_psnr:.6f}, St Dev: {np.std(epoch_eval_psnrs):.6f}")
-        print(f"Recon MSE: {epoch_eval_mse:.6f}, St Dev: {np.std(epoch_eval_mses):.6f}")
-        print(f"Recon DC: {epoch_eval_dc:.6f}, St Dev: {np.std(epoch_eval_dcs):.6f}")
-        print(f"GRASP SSIM: {np.mean(grasp_ssims):.6f}, St Dev: {np.std(grasp_ssims):.6f}")
-        print(f"GRASP PSNR: {np.mean(grasp_psnrs):.6f}, St Dev: {np.std(grasp_psnrs):.6f}")
-        print(f"GRASP MSE: {np.mean(grasp_mses):.6f}, St Dev: {np.std(grasp_mses):.6f}")
-        print(f"GRASP DC: {np.mean(grasp_dcs):.6f}, St Dev: {np.std(grasp_dcs):.6f}")
+        print(f"Recon SSIM: {epoch_eval_ssim:.4f} ± {np.std(epoch_eval_ssims):.4f}")
+        print(f"Recon PSNR: {epoch_eval_psnr:.4f} ± {np.std(epoch_eval_psnrs):.4f}")
+        print(f"Recon MSE: {epoch_eval_mse:.4f} ± {np.std(epoch_eval_mses):.4f}")
+        print(f"Recon DC: {epoch_eval_dc:.4f} ± {np.std(epoch_eval_dcs):.4f}")
+        print(f"GRASP SSIM: {np.mean(grasp_ssims):.4f} ± {np.std(grasp_ssims):.4f}")
+        print(f"GRASP PSNR: {np.mean(grasp_psnrs):.4f} ± {np.std(grasp_psnrs):.4f}")
+        print(f"GRASP MSE: {np.mean(grasp_mses):.4f} ± {np.std(grasp_mses):.4f}")
+        print(f"GRASP DC: {np.mean(grasp_dcs):.6f} ± {np.std(grasp_dcs):.4f}")
 
 
 # Save the model at the end of training
@@ -1035,8 +1001,447 @@ eval_curves = dict(
     eval_dcs=eval_dcs,
 )
 model_save_path = os.path.join(output_dir, f'{exp_name}_model.pth')
-save_checkpoint(model, optimizer, epochs + 1, train_curves, val_curves, model_save_path)
+save_checkpoint(model, optimizer, epochs + 1, train_curves, val_curves, eval_curves, model_save_path)
 print(f'Model saved to {model_save_path}')
 
 
+# save final evaluation metrics
+metrics_path = os.path.join(eval_dir, "eval_metrics.csv")
 
+with open(metrics_path, 'w', newline='') as csvfile:
+    writer = csv.writer(csvfile)
+    writer.writerow(['Recon', 'SSIM', 'PSNR', 'MSE', 'DC'])
+    writer.writerow(['DL', f'{epoch_eval_ssim:.4f} ± {np.std(epoch_eval_ssims):.4f}', f'{epoch_eval_psnr:.4f} ± {np.std(epoch_eval_psnrs):.4f}', f'{epoch_eval_mse:.4f} ± {np.std(epoch_eval_mses):.4f}', f'{epoch_eval_dc:.4f} ± {np.std(epoch_eval_dcs):.4f}'])
+    writer.writerow(['GRASP', f'{np.mean(grasp_ssims):.4f} ± {np.std(grasp_ssims):.4f}', f'{np.mean(grasp_psnrs):.4f} ± {np.std(grasp_psnrs):.4f}', f'{np.mean(grasp_mses):.4f} ± {np.std(grasp_mses):.4f}', f'{np.mean(grasp_dcs):.4f} ± {np.std(grasp_dcs):.4f}'])
+
+
+
+# EVALUATE WITH VARIABLE SPOKES PER FRAME
+
+MAIN_EVALUATION_PLAN = [
+    {
+        "spokes_per_frame": 16,
+        "num_frames": 20, # 16 * 20 = 320 total spokes
+        "slice": slice(1, 21), # Wide window
+        "description": "High temporal resolution"
+    },
+    {
+        "spokes_per_frame": 20,
+        "num_frames": 16, # 20 * 16 = 320 total spokes
+        "slice": slice(3, 19), # Medium-wide window
+        "description": "Good temporal resolution"
+    },
+    {
+        "spokes_per_frame": 32,
+        "num_frames": 10, # 32 * 10 = 320 total spokes
+        "slice": slice(5, 15), # Narrow window centered on enhancement
+        "description": "Standard temporal resolution"
+    },
+    {
+        "spokes_per_frame": 40,
+        "num_frames": 8,  # 40 * 8 = 320 total spokes
+        "slice": slice(5, 13), # Very narrow window on peak
+        "description": "Low temporal resolution"
+    }
+]
+
+
+
+# --- Stress Test Plan ---
+# Designed to push the limits with very few spokes per frame.
+# This has a different (lower) total spoke budget.
+STRESS_TEST_PLAN = [
+    {
+        "spokes_per_frame": 8,
+        "num_frames": 22, # 8 * 22 = 176 total spokes
+        "slice": slice(0, 22), # The entire 22-frame duration
+        "description": "Stress test: max temporal points, min spokes"
+    }
+]
+
+
+eval_spf_dataset = SimulatedSPFDataset(
+    root_dir=config["evaluation"]["simulated_dataset_path"], 
+    model_type=model_type, 
+    patient_ids=val_dro_patient_ids,
+    )
+
+eval_spf_loader = DataLoader(
+    eval_spf_dataset,
+    batch_size=config["dataloader"]["batch_size"],
+    shuffle=config["dataloader"]["shuffle"],
+    num_workers=config["dataloader"]["num_workers"],
+)
+
+# stress_test_path = os.path.join(os.path.dirname(config["evaluation"]["simulated_dataset_path"]), 'undersampled_sim_8spf')
+
+
+# stress_test_dataset = SimulatedSPFDataset(
+#     root_dir=stress_test_path, 
+#     model_type=model_type, 
+#     patient_ids=val_dro_patient_ids,
+#     )
+
+# stress_test_loader = DataLoader(
+#     stress_test_dataset,
+#     batch_size=config["dataloader"]["batch_size"],
+#     shuffle=config["dataloader"]["shuffle"],
+#     num_workers=config["dataloader"]["num_workers"],
+# )
+
+
+# First, run the fair comparisons
+with torch.no_grad():
+
+    spf_recon_ssim = {}
+    spf_recon_psnr = {}
+    spf_recon_mse = {}
+    spf_recon_dc = {}
+    spf_grasp_ssim = {}
+    spf_grasp_psnr = {}
+    spf_grasp_mse = {}
+    spf_grasp_dc = {}
+
+
+    print("--- Running Stress Test Evaluation (Budget: 176 spokes) ---")
+    for eval_config in STRESS_TEST_PLAN:
+
+        stress_test_ssims = []
+        stress_test_psnrs = []
+        stress_test_mses = []
+        stress_test_dcs = []
+        stress_test_grasp_ssims = []
+        stress_test_grasp_psnrs = []
+        stress_test_grasp_mses = []
+        stress_test_grasp_dcs = []
+
+        spokes = eval_config["spokes_per_frame"]
+        time_slice = eval_config["slice"]
+        num_frames = eval_config["num_frames"]
+
+        eval_spf_dataset.spokes_per_frame = spokes
+        eval_spf_dataset.window = time_slice
+        eval_spf_dataset.num_frames = num_frames
+
+
+        for csmap, ground_truth, grasp_img, mask in tqdm(eval_spf_loader, desc="Variable Spokes Per Frame Evaluation"):
+
+
+            csmap = csmap.squeeze(0).to(device)   # Remove batch dim
+            ground_truth = ground_truth.to(device) # Shape: (1, 2, T, H, W)
+
+            grasp_img = grasp_img.to(device)
+            grasp_img_plot = torch.flip(grasp_img, dims=[-3])
+            grasp_img_plot = torch.rot90(grasp_img_plot, k=3, dims=[-3,-1])
+
+
+
+            # SIMULATE KSPACE
+            ktraj, dcomp, nufft_ob, adjnufft_ob = prep_nufft(640, spokes, num_frames)
+            physics = MCNUFFT(nufft_ob.to(device), adjnufft_ob.to(device), ktraj.to(device), dcomp.to(device))
+
+            sim_kspace = physics(False, ground_truth, csmap)
+
+            kspace = sim_kspace.squeeze(0).to(device) # Remove batch dim
+            
+
+
+            x_recon, _ = model(
+                kspace.to(device), physics, csmap, norm=config['model']['norm']
+            )
+
+            ground_truth = torch.stack([ground_truth.real, ground_truth.imag], dim=1)
+            ground_truth = rearrange(ground_truth, 'b i h w t -> b i t h w')
+
+
+            ## Evaluation
+            ssim, psnr, mse, dc = eval_sample(kspace, csmap, ground_truth, x_recon, physics, mask, grasp_img_plot, eval_dir, f"{spokes}spf", device)
+            stress_test_ssims.append(ssim)
+            stress_test_psnrs.append(psnr)
+            stress_test_mses.append(mse)
+            stress_test_dcs.append(dc)
+
+
+            ssim_grasp, psnr_grasp, mse_grasp, dc_grasp = eval_grasp(kspace, csmap, ground_truth, grasp_img, physics, device)
+            stress_test_grasp_ssims.append(ssim_grasp)
+            stress_test_grasp_psnrs.append(psnr_grasp)
+            stress_test_grasp_mses.append(mse_grasp)
+            stress_test_grasp_dcs.append(dc_grasp)
+
+
+            spf_recon_ssim[spokes] = np.mean(stress_test_ssims)
+            spf_recon_psnr[spokes] = np.mean(stress_test_psnrs)
+            spf_recon_mse[spokes] = np.mean(stress_test_mses)
+            spf_recon_dc[spokes] = np.mean(stress_test_dcs)
+
+            spf_grasp_ssim[spokes] = np.mean(stress_test_grasp_ssims)
+            spf_grasp_psnr[spokes] = np.mean(stress_test_grasp_psnrs)
+            spf_grasp_mse[spokes] = np.mean(stress_test_grasp_mses)
+            spf_grasp_dc[spokes] = np.mean(stress_test_grasp_dcs)
+
+
+
+        # Save Results
+        spf_metrics_path = os.path.join(eval_dir, "eval_metrics.csv")
+        with open(spf_metrics_path, 'a', newline='') as csvfile:
+            writer = csv.writer(csvfile)
+            writer.writerow(['Recon', 'Spokes Per Frame', 'SSIM', 'PSNR', 'MSE', 'DC'])
+
+            writer.writerow(['DL', spokes, 
+            f'{np.mean(stress_test_ssims):.4f} ± {np.std(stress_test_ssims):.4f}', 
+            f'{np.mean(stress_test_psnrs):.4f} ± {np.std(stress_test_psnrs):.4f}', 
+            f'{np.mean(stress_test_mses):.4f} ± {np.std(stress_test_mses):.4f}', 
+            f'{np.mean(stress_test_dcs):.4f} ± {np.std(stress_test_dcs):.4f}'])
+
+            writer.writerow(['GRASP', spokes, 
+            f'{np.mean(stress_test_grasp_ssims):.4f} ± {np.std(stress_test_grasp_ssims):.4f}', 
+            f'{np.mean(stress_test_grasp_psnrs):.4f} ± {np.std(stress_test_grasp_psnrs):.4f}', 
+            f'{np.mean(stress_test_grasp_mses):.4f} ± {np.std(stress_test_grasp_mses):.4f}', 
+            f'{np.mean(stress_test_grasp_dcs):.4f} ± {np.std(stress_test_grasp_dcs):.4f}'])
+
+
+
+    print("--- Running Main Evaluation (Budget: 320 spokes) ---")
+    for eval_config in MAIN_EVALUATION_PLAN:
+
+        spf_eval_ssims = []
+        spf_eval_psnrs = []
+        spf_eval_mses = []
+        spf_eval_dcs = []
+        spf_grasp_ssims = []
+        spf_grasp_psnrs = []
+        spf_grasp_mses = []
+        spf_grasp_dcs = []
+
+        spokes = eval_config["spokes_per_frame"]
+        time_slice = eval_config["slice"]
+        num_frames = eval_config["num_frames"]
+
+        eval_spf_dataset.spokes_per_frame = spokes
+        eval_spf_dataset.window = time_slice
+        eval_spf_dataset.num_frames = num_frames
+
+
+        for csmap, ground_truth, grasp_img, mask in tqdm(eval_spf_loader, desc="Variable Spokes Per Frame Evaluation"):
+
+
+            csmap = csmap.squeeze(0).to(device)   # Remove batch dim
+            ground_truth = ground_truth.to(device) # Shape: (1, 2, T, H, W)
+
+            grasp_img = grasp_img.to(device)
+            grasp_img_plot = torch.flip(grasp_img, dims=[-3])
+            grasp_img_plot = torch.rot90(grasp_img_plot, k=3, dims=[-3,-1])
+
+
+
+            # SIMULATE KSPACE
+            ktraj, dcomp, nufft_ob, adjnufft_ob = prep_nufft(640, spokes, num_frames)
+            physics = MCNUFFT(nufft_ob.to(device), adjnufft_ob.to(device), ktraj.to(device), dcomp.to(device))
+
+            sim_kspace = physics(False, ground_truth, csmap)
+
+            kspace = sim_kspace.squeeze(0).to(device) # Remove batch dim
+            
+
+
+            x_recon, _ = model(
+                kspace.to(device), physics, csmap, norm=config['model']['norm']
+            )
+
+            ground_truth = torch.stack([ground_truth.real, ground_truth.imag], dim=1)
+            ground_truth = rearrange(ground_truth, 'b i h w t -> b i t h w')
+
+
+            ## Evaluation
+            ssim, psnr, mse, dc = eval_sample(kspace, csmap, ground_truth, x_recon, physics, mask, grasp_img_plot, eval_dir, f'{spokes}spf', device)
+            spf_eval_ssims.append(ssim)
+            spf_eval_psnrs.append(psnr)
+            spf_eval_mses.append(mse)
+            spf_eval_dcs.append(dc)
+
+
+            ssim_grasp, psnr_grasp, mse_grasp, dc_grasp = eval_grasp(kspace, csmap, ground_truth, grasp_img, physics, device)
+            spf_grasp_ssims.append(ssim_grasp)
+            spf_grasp_psnrs.append(psnr_grasp)
+            spf_grasp_mses.append(mse_grasp)
+            spf_grasp_dcs.append(dc_grasp)
+
+
+        spf_recon_ssim[spokes] = np.mean(spf_eval_ssims)
+        spf_recon_psnr[spokes] = np.mean(spf_eval_psnrs)
+        spf_recon_mse[spokes] = np.mean(spf_eval_mses)
+        spf_recon_dc[spokes] = np.mean(spf_eval_dcs)
+
+        spf_grasp_ssim[spokes] = np.mean(spf_grasp_ssims)
+        spf_grasp_psnr[spokes] = np.mean(spf_grasp_psnrs)
+        spf_grasp_mse[spokes] = np.mean(spf_grasp_mses)
+        spf_grasp_dc[spokes] = np.mean(spf_grasp_dcs)
+
+
+        # Save Results
+        spf_metrics_path = os.path.join(eval_dir, "eval_metrics.csv")
+        with open(spf_metrics_path, 'a', newline='') as csvfile:
+            writer = csv.writer(csvfile)
+            writer.writerow(['Recon', 'Spokes Per Frame', 'SSIM', 'PSNR', 'MSE', 'DC'])
+
+            writer.writerow(['DL', spokes, 
+            f'{np.mean(spf_eval_ssims):.4f} ± {np.std(spf_eval_ssims):.4f}', 
+            f'{np.mean(spf_eval_psnrs):.4f} ± {np.std(spf_eval_psnrs):.4f}', 
+            f'{np.mean(spf_eval_mses):.4f} ± {np.std(spf_eval_mses):.4f}', 
+            f'{np.mean(spf_eval_dcs):.4f} ± {np.std(spf_eval_dcs):.4f}'])
+
+            writer.writerow(['GRASP', spokes, 
+            f'{np.mean(spf_grasp_ssims):.4f} ± {np.std(spf_grasp_ssims):.4f}', 
+            f'{np.mean(spf_grasp_psnrs):.4f} ± {np.std(spf_grasp_psnrs):.4f}', 
+            f'{np.mean(spf_grasp_mses):.4f} ± {np.std(spf_grasp_mses):.4f}', 
+            f'{np.mean(spf_grasp_dcs):.4f} ± {np.std(spf_grasp_dcs):.4f}'])
+
+    
+
+    
+
+
+
+
+
+
+# # Then, run the stress test to highlight DL model's advantage
+# print("\n--- Running Stress Test (Budget: 176 spokes) ---")
+# for eval_config in STRESS_TEST_PLAN:
+
+#     spokes = eval_config["spokes_per_frame"]
+#     time_slice = eval_config["slice"]
+#     num_frames = eval_config["num_frames"]
+
+#     print(f"  Testing {spokes} spokes/frame with {num_frames} frames.")
+
+#     stress_test_ssims = []
+#     stress_test_psnrs = []
+#     stress_test_mses = []
+#     stress_test_dcs = []
+#     stress_test_grasp_ssims = []
+#     stress_test_grasp_psnrs = []
+#     stress_test_grasp_mses = []
+#     stress_test_grasp_dcs = []
+
+#     eval_spf_dataset.spokes_per_frame = spokes
+#     eval_spf_dataset.window = time_slice
+#     eval_spf_dataset.num_frames = num_frames
+
+
+#     for kspace, csmap, ground_truth, grasp_img, mask, physics in tqdm(val_dro_loader, desc="Stress Test Evaluation"):
+
+
+#         kspace = kspace.squeeze(0).to(device) # Remove batch dim
+#         csmap = csmap.squeeze(0).to(device)   # Remove batch dim
+#         ground_truth = ground_truth.to(device) # Shape: (1, 2, T, H, W)
+
+#         grasp_img = grasp_img.to(device)
+#         grasp_img_plot = torch.flip(grasp_img, dims=[-3])
+#         grasp_img_plot = torch.rot90(grasp_img_plot, k=3, dims=[-3,-1])
+        
+
+#         print("performing inference...")
+#         x_recon, _ = model(
+#             kspace.to(device), physics, csmap, norm=config['model']['norm']
+#         )
+
+
+#         print("calculating evaluation metrics...")
+
+#         ## Evaluation
+#         ssim, psnr, mse, dc = eval_sample(kspace, csmap, ground_truth, x_recon, physics, mask, grasp_img_plot, eval_dir, epoch, device)
+#         stress_test_ssims.append(ssim)
+#         stress_test_psnrs.append(psnr)
+#         stress_test_mses.append(mse)
+#         stress_test_dcs.append(dc)
+
+
+#         ssim_grasp, psnr_grasp, mse_grasp, dc_grasp = eval_grasp(kspace, csmap, ground_truth, grasp_img, physics, device)
+#         stress_test_grasp_ssims.append(ssim_grasp)
+#         stress_test_grasp_psnrs.append(psnr_grasp)
+#         stress_test_grasp_mses.append(mse_grasp)
+#         stress_test_grasp_dcs.append(dc_grasp)
+
+
+#         spf_recon_ssim[spokes] = np.mean(stress_test_ssims)
+#         spf_recon_psnr[spokes] = np.mean(stress_test_psnrs)
+#         spf_recon_mse[spokes] = np.mean(stress_test_mses)
+#         spf_recon_dc[spokes] = np.mean(stress_test_dcs)
+
+#         spf_grasp_ssim[spokes] = np.mean(stress_test_grasp_ssims)
+#         spf_grasp_psnr[spokes] = np.mean(stress_test_grasp_psnrs)
+#         spf_grasp_mse[spokes] = np.mean(stress_test_grasp_mses)
+#         spf_grasp_dc[spokes] = np.mean(stress_test_grasp_dcs)
+
+
+
+#     # Save Results
+#     spf_metrics_path = os.path.join(eval_dir, "eval_metrics.csv")
+#     with open(spf_metrics_path, 'a', newline='') as csvfile:
+#         writer = csv.writer(csvfile)
+#         writer.writerow(['Recon', 'Spokes Per Frame', 'SSIM', 'PSNR', 'MSE', 'DC'])
+
+#         writer.writerow(['DL', spokes, 
+#         f'{np.mean(stress_test_ssims):.4f} ± {np.std(stress_test_ssims):.4f}', 
+#         f'{np.mean(stress_test_psnrs):.4f} ± {np.std(stress_test_psnrs):.4f}', 
+#         f'{np.mean(stress_test_mses):.4f} ± {np.std(stress_test_mses):.4f}', 
+#         f'{np.mean(stress_test_dcs):.4f} ± {np.std(stress_test_dcs):.4f}'])
+
+#         writer.writerow(['GRASP', spokes, 
+#         f'{np.mean(stress_test_grasp_ssims):.4f} ± {np.std(stress_test_grasp_ssims):.4f}', 
+#         f'{np.mean(stress_test_grasp_psnrs):.4f} ± {np.std(stress_test_grasp_psnrs):.4f}', 
+#         f'{np.mean(stress_test_grasp_mses):.4f} ± {np.std(stress_test_grasp_mses):.4f}', 
+#         f'{np.mean(stress_test_grasp_dcs):.4f} ± {np.std(stress_test_grasp_dcs):.4f}'])
+
+
+
+# Plot Metrics vs Spokes Per Frame
+
+
+plt.figure()
+plt.plot(list(spf_recon_ssim.keys()), list(spf_recon_ssim.values()), label="DL Recon", marker='o')
+plt.plot(list(spf_grasp_ssim.keys()), list(spf_grasp_ssim.values()), label="GRASP Recon", marker='o')
+plt.xlabel("Spokes per Frame")
+plt.ylabel("SSIM")
+plt.title("Evaluation SSIM vs Spokes per Frame")
+plt.legend()
+plt.grid(True)
+plt.savefig(os.path.join(eval_dir, "spf_eval_ssim.png"))
+plt.close()
+
+
+plt.figure()
+plt.plot(list(spf_recon_psnr.keys()), list(spf_recon_psnr.values()), label="DL Recon", marker='o')
+plt.plot(list(spf_grasp_psnr.keys()), list(spf_grasp_psnr.values()), label="GRASP Recon", marker='o')
+plt.xlabel("Spokes per Frame")
+plt.ylabel("PSNR")
+plt.title("Evaluation PSNR vs Spokes per Frame")
+plt.legend()
+plt.grid(True)
+plt.savefig(os.path.join(eval_dir, "spf_eval_psnr.png"))
+plt.close()
+
+
+plt.figure()
+plt.plot(list(spf_recon_mse.keys()), list(spf_recon_mse.values()), label="DL Recon", marker='o')
+plt.plot(list(spf_grasp_mse.keys()), list(spf_grasp_mse.values()), label="GRASP Recon", marker='o')
+plt.xlabel("Spokes per Frame")
+plt.ylabel("MSE")
+plt.title("Evaluation Image MSE vs Spokes per Frame")
+plt.legend()
+plt.grid(True)
+plt.savefig(os.path.join(eval_dir, "spf_eval_mse.png"))
+plt.close()
+
+
+plt.figure()
+plt.plot(list(spf_recon_dc.keys()), list(spf_recon_dc.values()), label="DL Recon", marker='o')
+plt.plot(list(spf_grasp_dc.keys()), list(spf_grasp_dc.values()), label="GRASP Recon", marker='o')
+plt.xlabel("Spokes per Frame")
+plt.ylabel("k-space MSE")
+plt.title("Data Consistency Evaluation (MSE) vs Spokes per Frame")
+plt.legend()
+plt.grid(True)
+plt.savefig(os.path.join(eval_dir, "spf_eval_dc.png"))
+plt.close()

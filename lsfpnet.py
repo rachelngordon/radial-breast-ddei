@@ -25,18 +25,27 @@ def from_torch_complex(x: torch.Tensor):
 
 # define LSFP-Net Block
 class BasicBlock(nn.Module):
-    def __init__(self, channels=32):
+    def __init__(self, lambdas, channels=32):
         super(BasicBlock, self).__init__()
 
         self.channels = channels
 
-        self.lambda_L = nn.Parameter(torch.tensor([0.0025]))
-        self.lambda_S = nn.Parameter(torch.tensor([0.05]))
-        self.lambda_spatial_L = nn.Parameter(torch.tensor([5e-2]))
-        self.lambda_spatial_S = nn.Parameter(torch.tensor([5e-2]))
+        self.lambda_L = nn.Parameter(torch.tensor([lambdas['lambda_L']]))
+        self.lambda_S = nn.Parameter(torch.tensor([lambdas['lambda_S']]))
+        self.lambda_spatial_L = nn.Parameter(torch.tensor([lambdas['lambda_spatial_L']]))
+        self.lambda_spatial_S = nn.Parameter(torch.tensor([lambdas['lambda_spatial_S']]))
 
-        self.gamma = nn.Parameter(torch.tensor([0.5]))
-        self.lambda_step = nn.Parameter(torch.tensor([1/10]))
+        self.gamma = nn.Parameter(torch.tensor([lambdas['gamma']]))
+        self.lambda_step = nn.Parameter(torch.tensor([lambdas['lambda_step']]))
+
+
+        # self.lambda_L = nn.Parameter(torch.tensor([0.0025]))
+        # self.lambda_S = nn.Parameter(torch.tensor([0.05]))
+        # self.lambda_spatial_L = nn.Parameter(torch.tensor([5e-2]))
+        # self.lambda_spatial_S = nn.Parameter(torch.tensor([5e-2]))
+
+        # self.gamma = nn.Parameter(torch.tensor([0.5]))
+        # self.lambda_step = nn.Parameter(torch.tensor([1/10]))
 
         self.conv1_forward_l = nn.Parameter(init.xavier_normal_(torch.Tensor(self.channels, 1, 3, 3, 3)))
         self.conv2_forward_l = nn.Parameter(init.xavier_normal_(torch.Tensor(self.channels, self.channels, 3, 3, 3)))
@@ -259,14 +268,14 @@ class BasicBlock(nn.Module):
 
 # define LSFP-Net
 class LSFPNet(nn.Module):
-    def __init__(self, LayerNo, channels=32):
+    def __init__(self, LayerNo, lambdas, channels=32):
         super(LSFPNet, self).__init__()
         onelayer = []
         self.LayerNo = LayerNo
         self.channels = channels
 
         for ii in range(LayerNo):
-            onelayer.append(BasicBlock(channels=self.channels))
+            onelayer.append(BasicBlock(lambdas, channels=self.channels))
 
         self.fcs = nn.ModuleList(onelayer)
 
@@ -298,27 +307,27 @@ class LSFPNet(nn.Module):
         return [L, S, layers_adj_L, layers_adj_S]
     
 
-class EWrapper:
-    """
-    Make `physics` look like the callable interface expected by LSFP-Net:
-        E(inv=False, data=image)  -> k-space
-        E(inv=True , data=data )  -> image
-    Scaling is handled *outside*, so we just delegate.
-    """
-    def __init__(self, physics, csmap):
-        self.physics, self.csmap = physics, csmap
+# class EWrapper:
+#     """
+#     Make `physics` look like the callable interface expected by LSFP-Net:
+#         E(inv=False, data=image)  -> k-space
+#         E(inv=True , data=data )  -> image
+#     Scaling is handled *outside*, so we just delegate.
+#     """
+#     def __init__(self, physics, csmap):
+#         self.physics, self.csmap = physics, csmap
 
-    def __call__(self, *, inv: bool, data: torch.Tensor) -> torch.Tensor:
-        if inv:   # adjoint
-            data = from_torch_complex(data.unsqueeze(0))
-            data = self.physics.A_adjoint(data, self.csmap)
-            data = to_torch_complex(data).squeeze(0)
-            return rearrange(data, 't h w -> h w t')
+#     def __call__(self, *, inv: bool, data: torch.Tensor) -> torch.Tensor:
+#         if inv:   # adjoint
+#             data = from_torch_complex(data.unsqueeze(0))
+#             data = self.physics.A_adjoint(data, self.csmap)
+#             data = to_torch_complex(data).squeeze(0)
+#             return rearrange(data, 't h w -> h w t')
         
-        else:     # forward
-            data = from_torch_complex(data.unsqueeze(0))
-            data = self.physics.A(data, self.csmap)
-            return to_torch_complex(data).squeeze(0)
+#         else:     # forward
+#             data = from_torch_complex(data.unsqueeze(0))
+#             data = self.physics.A(data, self.csmap)
+#             return to_torch_complex(data).squeeze(0)
         
 
 class ArtifactRemovalLSFPNet(nn.Module):

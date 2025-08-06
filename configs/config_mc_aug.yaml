@@ -6,9 +6,8 @@ data:
   val_split_ratio: 0.2
   height: 320
   width: 320
-  timeframes: 8
   total_spokes: 288
-  spokes_per_frame: 640
+  samples: 640
   coils: 16
   eval_timeframes: 22
 
@@ -21,7 +20,7 @@ dataloader:
   batch_size: 1
   shuffle: false
   num_workers: 2
-  max_subjects: 300
+  max_subjects: 4
   slice_idx: 41
 
 # Model settings
@@ -33,8 +32,8 @@ model:
   lambda_L: 0.0025
   lambda_S: 0.05
   lambda_spatial_L: 0.05
-  lambda_spatial_S: 0.05
-  gamma: 0.5
+  lambda_spatial_S: 0.005
+  gamma: 0.1
   lambda_step: 0.1
   optimizer:
     name: "Adam"
@@ -45,10 +44,10 @@ model:
     eps: 0.000000001
   losses:
     adj_loss:
-      weight: 0.0001
+      weight: 0.001
     use_ei_loss: false
     mc_loss:
-      weight: 1
+      weight: 10
     ei_loss:
       temporal_transform: "subsample"
       weight: 0

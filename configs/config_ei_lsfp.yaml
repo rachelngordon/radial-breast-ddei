@@ -29,40 +29,41 @@ model:
   name: "LSFPNet"
   num_layers: 3
   cascades: 2
-  channels: 8
+  channels: 16
   lambda_L: 0.0025
   lambda_S: 0.05
-  lambda_spatial_L: 5e-2
-  lambda_spatial_S: 5e-2
-  gamma: 0.5
+  lambda_spatial_L: 0.05
+  lambda_spatial_S: 0.005
+  gamma: 0.1
   lambda_step: 0.1
   optimizer:
     name: "Adam"
-    lr: 0.0001
+    lr: 0.0005
     weight_decay: 0.0
     b1: 0.9
     b2: 0.999
     eps: 0.000000001
   losses:
-    use_ei_loss: true
     adj_loss:
-      weight: 0.0001
+      weight: 0.001
+    use_ei_loss: true
     mc_loss:
       weight: 10
     ei_loss:
       temporal_transform: "subsample"
-      weight: 1000
-      warmup: 10
-      duration: 100
+      weight: 100
+      warmup: 3
+      duration: 20
       subsample_ratio_min: 0.7
       subsample_ratio_max: 0.95
       warp_ratio_min: 0.6
       warp_ratio_max: 0.95
+  norm: "both"
 
 
 # Training settings
 training:
-  epochs: 10
+  epochs: 25
   save_interval: 1
   plot_interval: 20
   device: "cuda"  # or "cpu"
@@ -70,7 +71,6 @@ training:
 evaluation:
   num_samples: 15
   simulated_dataset_path: "/ess/scratch/scratch1/rachelgordon/simulated_dataset/"
-
 
 debugging:
   calc_step_0: true

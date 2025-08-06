@@ -200,6 +200,7 @@ def plot_spatial_quality(
     grasp_img: np.ndarray,
     time_frame_index: int,
     filename: str,
+    grasp_comparison_filename: str,
     data_range: float
 ):
     """
@@ -263,6 +264,46 @@ def plot_spatial_quality(
     # plt.tight_layout(rect=[0, 0.03, 1, 0.96])
     plt.savefig(filename)
     plt.close()
+
+
+    # Plot the Difference Between GRASP and DL Recon
+
+    # Calculate error map
+    error_map = recon_img - grasp_img
+
+    # Calculate SSIM maps
+    ssim, ssim_map = ssim_map_func(grasp_img, recon_img, data_range=data_range, full=True)
+
+    # Create a 1x4 plot grid
+    fig, axes = plt.subplots(1, 4, figsize=(24, 6))
+    fig.suptitle(f"DL vs GRASP Comparison at Time Frame {time_frame_index}", fontsize=20)
+
+    # --- Top Row: DL Reconstruction Comparison ---
+    axes[0].imshow(grasp_img, cmap='gray')
+    axes[0].set_title("GRASP Reconstruction")
+
+    axes[1].imshow(recon_img, cmap='gray')
+    axes[1].set_title("DL Reconstruction")
+
+    im_err_dl = axes[2].imshow(error_map, cmap='coolwarm', vmin=-0.5, vmax=0.5)
+    axes[2].set_title("Error Map (DL Recon - GRASP)")
+    fig.colorbar(im_err_dl, ax=axes[2], fraction=0.046, pad=0.04)
+
+    im_ssim_dl = axes[3].imshow(ssim_map, cmap='viridis', vmin=0, vmax=1)
+    axes[3].set_title(f"SSIM Map (SSIM: {round(ssim, 3)})")
+    fig.colorbar(im_ssim_dl, ax=axes[3], fraction=0.046, pad=0.04)
+    
+    # Turn off axes for all plots
+    for ax in axes.flat:
+        ax.axis('off')
+
+    print("SSIM between GRASP and DL Recon: ", ssim)
+
+    # plt.tight_layout(rect=[0, 0.03, 1, 0.96])
+    plt.savefig(grasp_comparison_filename)
+    plt.close()
+
+
 
 
 
@@ -825,6 +866,7 @@ def eval_sample(kspace, csmap, ground_truth, x_recon, physics, mask, grasp_img, 
             grasp_img=grasp_mag_np[:, :, peak_frame],
             time_frame_index=peak_frame,
             filename=os.path.join(output_dir, f"spatial_quality_{label}.png"),
+            grasp_comparison_filename=os.path.join(output_dir, f"grasp_comparison_{label}.png"),
             data_range=data_range
         )
 
@@ -847,6 +889,22 @@ def eval_sample(kspace, csmap, ground_truth, x_recon, physics, mask, grasp_img, 
             filename=os.path.join(output_dir, f"recon_temporal_curve_{label}.png")
         )
 
+        # plot_single_temporal_curve(
+        #     img_stack=gt_mag_np,
+        #     masks=masks_np,
+        #     time_points=aif_time_points,
+        #     num_frames=num_frames,
+        #     filename=os.path.join(output_dir, f"gt_temporal_curve_{label}.png")
+        # )
+
+        # plot_single_temporal_curve(
+        #     img_stack=grasp_mag_np,
+        #     masks=masks_np,
+        #     time_points=aif_time_points,
+        #     num_frames=num_frames,
+        #     filename=os.path.join(output_dir, f"grasp_temporal_curve_{label}.png")
+        # )
+
         plot_time_series(
             gt_img_stack=gt_mag_np,
             recon_img_stack=recon_mag_np,
@@ -862,334 +920,335 @@ def eval_sample(kspace, csmap, ground_truth, x_recon, physics, mask, grasp_img, 
 
 
 
-def eval_model(eval_dataset, model, device, config, output_dir, physics_objects, epoch, temporal_eval=False):
-    print("\n" + "="*80)
-    print("--- Starting Evaluation on Simulated Dataset ---")
-    print("="*80)
+# def eval_model(eval_dataset, model, device, config, output_dir, physics_objects, epoch, temporal_eval=False):
+#     print("\n" + "="*80)
+#     print("--- Starting Evaluation on Simulated Dataset ---")
+#     print("="*80)
 
-    # --- 1. Setup DataLoader for Simulated Data ---
-    # simulated_data_path = config["evaluation"]["simulated_dataset_path"]
-    model_type = config["model"]["name"]
+#     # --- 1. Setup DataLoader for Simulated Data ---
+#     # simulated_data_path = config["evaluation"]["simulated_dataset_path"]
+#     model_type = config["model"]["name"]
 
-    # try:
-    #     eval_dataset = SimulatedDataset(root_dir=simulated_data_path, model_type=model_type, patient_ids=)
-    # except FileNotFoundError as e:
-    #     print(f"ERROR: {e}")
-    #     print("Skipping evaluation.")
-    #     return
+#     # try:
+#     #     eval_dataset = SimulatedDataset(root_dir=simulated_data_path, model_type=model_type, patient_ids=)
+#     # except FileNotFoundError as e:
+#     #     print(f"ERROR: {e}")
+#     #     print("Skipping evaluation.")
+#     #     return
 
-    # Use a batch size of 1 for evaluation to process one sample at a time
-    eval_loader = DataLoader(eval_dataset, batch_size=1, shuffle=False, num_workers=4)
+#     # Use a batch size of 1 for evaluation to process one sample at a time
+#     eval_loader = DataLoader(eval_dataset, batch_size=1, shuffle=False, num_workers=4)
 
-    physics = physics_objects['physics']
+#     physics = physics_objects['physics']
 
 
-    # Store results
-    all_ssim_scores = []
-    all_psnr_scores = []
-    all_mse_scores = []
-    all_dc_scores = []
+#     # Store results
+#     all_ssim_scores = []
+#     all_psnr_scores = []
+#     all_mse_scores = []
+#     all_dc_scores = []
 
-    all_ssim_scores_grasp = []
-    all_psnr_scores_grasp = []
-    all_mse_scores_grasp = []
-    all_dc_scores_grasp = []
+#     all_ssim_scores_grasp = []
+#     all_psnr_scores_grasp = []
+#     all_mse_scores_grasp = []
+#     all_dc_scores_grasp = []
 
-    # --- 3. Evaluation Loop ---
-    model.eval()
-    with torch.no_grad():
-        for i, (kspace, csmap, ground_truth, grasp_recon, parMap, aif, S0, T10, mask) in enumerate(tqdm(eval_loader, desc="Evaluating on Simulated Data")):
+#     # --- 3. Evaluation Loop ---
+#     model.eval()
+#     with torch.no_grad():
+#         for i, (kspace, csmap, ground_truth, grasp_recon, parMap, aif, S0, T10, mask) in enumerate(tqdm(eval_loader, desc="Evaluating on Simulated Data")):
 
-            start = time.time()
+#             start = time.time()
             
-            # kspace_complex = to_torch_complex(kspace).to(device)
-            kspace_complex = kspace.to(device)
-            csmap = csmap.to(device)
-            ground_truth = ground_truth.to(device) # Shape: (1, 2, T, H, W)
-            grasp_recon = grasp_recon.to(device) # Shape: (1, 2, H, T, W)
+#             # kspace_complex = to_torch_complex(kspace).to(device)
+#             kspace_complex = kspace.to(device)
+#             csmap = csmap.to(device)
+#             ground_truth = ground_truth.to(device) # Shape: (1, 2, T, H, W)
+#             grasp_recon = grasp_recon.to(device) # Shape: (1, 2, H, T, W)
 
-            grasp_recon = torch.rot90(grasp_recon, k=-1, dims=(2, 4))
-            grasp_recon = torch.flip(grasp_recon, dims=[-1])
+#             grasp_recon = torch.rot90(grasp_recon, k=-1, dims=(2, 4))
+#             grasp_recon = torch.flip(grasp_recon, dims=[-1])
 
 
             
-            # ==========================================================
-            # PERFORM INFERENCE
-            # ==========================================================
-            kspace_complex = kspace_complex.squeeze(0) # Remove batch dim
-            csmap_complex = csmap.squeeze(0)   # Remove batch dim
+#             # ==========================================================
+#             # PERFORM INFERENCE
+#             # ==========================================================
+#             kspace_complex = kspace_complex.squeeze(0) # Remove batch dim
+#             csmap_complex = csmap.squeeze(0)   # Remove batch dim
 
-            # with torch.no_grad():
-            #     scale = torch.quantile(kspace_complex.abs(), 0.99) + 1e-8
-            # kspace_norm = kspace_complex / scale
+#             # with torch.no_grad():
+#             #     scale = torch.quantile(kspace_complex.abs(), 0.99) + 1e-8
+#             # kspace_norm = kspace_complex / scale
 
-            x_recon, _, = model(
-                kspace_complex, 
-                physics, 
-                csmap_complex, 
-            ) # Output shape (B, C, H, W, T)
-
-
-            end = time.time()
-
-            print(f"Time for Inference: {end-start}")
+#             x_recon, _, = model(
+#                 kspace_complex, 
+#                 physics, 
+#                 csmap_complex, 
+#             ) # Output shape (B, C, H, W, T)
 
 
+#             end = time.time()
 
-            # ==========================================================
-            # EVALUATE DATA CONSISTENCY
-            # ==========================================================
-
-            # Forward Simulation
-            x_recon_complex = to_torch_complex(x_recon).squeeze()
-            grasp_recon_complex = rearrange(to_torch_complex(grasp_recon).squeeze(), 'h t w -> h w t')
-            kspace = kspace.squeeze()
-
-
-            recon_kspace = physics(False, x_recon_complex, csmap_complex)
-            grasp_kspace = physics(False, grasp_recon_complex.to(csmap_complex.dtype), csmap_complex)
-
-
-            # Compute MSE
-            dc = calc_dc(recon_kspace, kspace, device)
-            dc_grasp = calc_dc(grasp_kspace, kspace, device)
-
-            all_dc_scores.append(dc)
-            all_dc_scores_grasp.append(dc_grasp)
+#             print(f"Time for Inference: {end-start}")
 
 
 
-            # ==========================================================
-            # EVALUATE SPATIAL IMAGE QUALITY
-            # ==========================================================
+#             # ==========================================================
+#             # EVALUATE DATA CONSISTENCY
+#             # ==========================================================
 
-            # calculate the single optimal scaling factor 'c'
-            x_recon_np = x_recon.cpu().numpy()
-            ground_truth_np = ground_truth.cpu().numpy()
-
-            c = np.dot(x_recon_np.flatten(), ground_truth_np.flatten()) / np.dot(x_recon_np.flatten(), x_recon_np.flatten())
-
-            recon_complex_scaled = torch.tensor(c * x_recon_np, device=device)
+#             # Forward Simulation
+#             x_recon_complex = to_torch_complex(x_recon).squeeze()
+#             grasp_recon_complex = rearrange(to_torch_complex(grasp_recon).squeeze(), 'h t w -> h w t')
+#             kspace = kspace.squeeze()
 
 
-            # Convert complex images to magnitude
-            recon_mag_scaled = torch.sqrt(recon_complex_scaled[:, 0, ...]**2 + recon_complex_scaled[:, 1, ...]**2)
-            gt_mag = torch.sqrt(ground_truth[:, 0, ...]**2 + ground_truth[:, 1, ...]**2)
-            grasp_mag = torch.sqrt(grasp_recon[:, 0, ...]**2 + grasp_recon[:, 1, ...]**2)
+#             recon_kspace = physics(False, x_recon_complex, csmap_complex)
+#             grasp_kspace = physics(False, grasp_recon_complex.to(csmap_complex.dtype), csmap_complex)
+
+
+#             # Compute MSE
+#             dc = calc_dc(recon_kspace, kspace, device)
+#             dc_grasp = calc_dc(grasp_kspace, kspace, device)
+
+#             all_dc_scores.append(dc)
+#             all_dc_scores_grasp.append(dc_grasp)
+
+
+
+#             # ==========================================================
+#             # EVALUATE SPATIAL IMAGE QUALITY
+#             # ==========================================================
+
+#             # calculate the single optimal scaling factor 'c'
+#             x_recon_np = x_recon.cpu().numpy()
+#             ground_truth_np = ground_truth.cpu().numpy()
+
+#             c = np.dot(x_recon_np.flatten(), ground_truth_np.flatten()) / np.dot(x_recon_np.flatten(), x_recon_np.flatten())
+
+#             recon_complex_scaled = torch.tensor(c * x_recon_np, device=device)
+
+
+#             # Convert complex images to magnitude
+#             recon_mag_scaled = torch.sqrt(recon_complex_scaled[:, 0, ...]**2 + recon_complex_scaled[:, 1, ...]**2)
+#             gt_mag = torch.sqrt(ground_truth[:, 0, ...]**2 + ground_truth[:, 1, ...]**2)
+#             grasp_mag = torch.sqrt(grasp_recon[:, 0, ...]**2 + grasp_recon[:, 1, ...]**2)
 
 
 
 
-            for t in range(recon_mag_scaled.shape[-1]): # Iterate over time frames
+#             for t in range(recon_mag_scaled.shape[-1]): # Iterate over time frames
 
 
-                frame_recon = recon_mag_scaled[..., t]
-                frame_gt = gt_mag[:, t, :, :]
-                frame_grasp = grasp_mag[:, :, t, :]
+#                 frame_recon = recon_mag_scaled[..., t]
+#                 frame_gt = gt_mag[:, t, :, :]
+#                 frame_grasp = grasp_mag[:, :, t, :]
 
-                # calculate data range from ground truth
-                data_range = frame_gt.max() - frame_gt.min()
+#                 # calculate data range from ground truth
+#                 data_range = frame_gt.max() - frame_gt.min()
 
 
-                # Add channel dimension for torchmetrics: (B, H, W) -> (B, 1, H, W)
-                frame_recon = frame_recon.unsqueeze(1)
-                frame_gt = frame_gt.unsqueeze(1)
-                frame_grasp = frame_grasp.unsqueeze(1).contiguous()
+#                 # Add channel dimension for torchmetrics: (B, H, W) -> (B, 1, H, W)
+#                 frame_recon = frame_recon.unsqueeze(1)
+#                 frame_gt = frame_gt.unsqueeze(1)
+#                 frame_grasp = frame_grasp.unsqueeze(1).contiguous()
                 
-                # Calculate Spatial Image Quality Metrics
-                ssim, psnr, mse = calc_image_metrics(frame_recon, frame_gt, data_range, device)
-                all_ssim_scores.append(ssim)
-                all_psnr_scores.append(psnr)
-                all_mse_scores.append(mse)
+#                 # Calculate Spatial Image Quality Metrics
+#                 ssim, psnr, mse = calc_image_metrics(frame_recon, frame_gt, data_range, device)
+#                 all_ssim_scores.append(ssim)
+#                 all_psnr_scores.append(psnr)
+#                 all_mse_scores.append(mse)
 
 
-                ssim_grasp, psnr_grasp, mse_grasp = calc_image_metrics(frame_grasp, frame_gt, data_range, device)
-                all_ssim_scores_grasp.append(ssim_grasp)
-                all_psnr_scores_grasp.append(psnr_grasp)
-                all_mse_scores_grasp.append(mse_grasp)
+#                 ssim_grasp, psnr_grasp, mse_grasp = calc_image_metrics(frame_grasp, frame_gt, data_range, device)
+#                 all_ssim_scores_grasp.append(ssim_grasp)
+#                 all_psnr_scores_grasp.append(psnr_grasp)
+#                 all_mse_scores_grasp.append(mse_grasp)
 
 
             
-            # ==========================================================
-            # EVALUATE TEMPORAL FIDELITY
-            # ==========================================================
-            if temporal_eval:
+#             # ==========================================================
+#             # EVALUATE TEMPORAL FIDELITY
+#             # ==========================================================
+#             if temporal_eval:
 
-                # Estimate PK Parameters
-                # Define the time vector for the AIF and dynamic images
-                num_frames = recon_complex_scaled.shape[-1]
-                aif_time_points = np.linspace(0, 150, num_frames) # Time in seconds
+#                 # Estimate PK Parameters
+#                 # Define the time vector for the AIF and dynamic images
+#                 num_frames = recon_complex_scaled.shape[-1]
+#                 aif_time_points = np.linspace(0, 150, num_frames) # Time in seconds
 
-                ground_truth_pk_map = parMap
-
-
-                # Use the function from Part 1 to perform the estimation
-                estimated_pk_map_from_dl = estimate_pk_parameters(
-                    reconstructed_images=x_recon_complex.cpu().numpy(),
-                    aif_t=aif_time_points,
-                    aif_c=aif.cpu().numpy().squeeze(),
-                    S0_map=S0.cpu().numpy().squeeze(),
-                    T10_map=T10.cpu().numpy().squeeze()
-                )
-
-                # Use the function from Part 1 to perform the estimation
-                estimated_pk_map_from_grasp = estimate_pk_parameters(
-                    reconstructed_images=grasp_recon_complex.cpu().numpy(),
-                    aif_t=aif_time_points,
-                    aif_c=aif.cpu().numpy().squeeze(),
-                    S0_map=S0.cpu().numpy().squeeze(),
-                    T10_map=T10.cpu().numpy().squeeze()
-                )
+#                 ground_truth_pk_map = parMap
 
 
-                print("\n--- STEP 5: Final Evaluation of Your Model's Fidelity ---")
+#                 # Use the function from Part 1 to perform the estimation
+#                 estimated_pk_map_from_dl = estimate_pk_parameters(
+#                     reconstructed_images=x_recon_complex.cpu().numpy(),
+#                     aif_t=aif_time_points,
+#                     aif_c=aif.cpu().numpy().squeeze(),
+#                     S0_map=S0.cpu().numpy().squeeze(),
+#                     T10_map=T10.cpu().numpy().squeeze()
+#                 )
 
-                masks_np = {key: val.cpu().numpy().squeeze().astype(bool) for key, val in mask.items()}
-
-
-                # Now, compare the PK map from your model's output to the original ground truth PK map
-                evaluation_summary = evaluate_reconstruction_fidelity(
-                    ground_truth_params=ground_truth_pk_map.cpu().numpy().squeeze(),
-                    estimated_params=estimated_pk_map_from_dl,
-                    masks=masks_np,
-                    regions_to_evaluate=['malignant'] # Focus on a key region
-                )
-
-                grasp_evaluation_summary = evaluate_reconstruction_fidelity(
-                    ground_truth_params=ground_truth_pk_map.cpu().numpy().squeeze(),
-                    estimated_params=estimated_pk_map_from_grasp,
-                    masks=masks_np,
-                    regions_to_evaluate=['malignant'], # Focus on a key region
-                    filename="pk_param_maps_grasp.png"
-                )
-
-                print("\nEvaluation Complete.")
-
-                print("DL Recon: ", evaluation_summary)
-                print("GRASP Recon: ", grasp_evaluation_summary)
+#                 # Use the function from Part 1 to perform the estimation
+#                 estimated_pk_map_from_grasp = estimate_pk_parameters(
+#                     reconstructed_images=grasp_recon_complex.cpu().numpy(),
+#                     aif_t=aif_time_points,
+#                     aif_c=aif.cpu().numpy().squeeze(),
+#                     S0_map=S0.cpu().numpy().squeeze(),
+#                     T10_map=T10.cpu().numpy().squeeze()
+#                 )
 
 
+#                 print("\n--- STEP 5: Final Evaluation of Your Model's Fidelity ---")
 
-            # ==========================================================
-            # VISUALIZATION
-            # ==========================================================
+#                 masks_np = {key: val.cpu().numpy().squeeze().astype(bool) for key, val in mask.items()}
 
-            x_recon_complex_np = to_torch_complex(recon_complex_scaled).squeeze().cpu().numpy()
-            grasp_recon_complex_np = rearrange(to_torch_complex(grasp_recon).squeeze(), 'h t w -> h w t').cpu().numpy()
 
-            gt_squeezed = ground_truth.squeeze()  # Shape: (C, T, H, W) -> (2, 22, 320, 320)
-            gt_rearranged = rearrange(gt_squeezed, 'c t h w -> t c h w') # Shape: (22, 320, 320, 2)
-            gt_complex_tensor = to_torch_complex(gt_rearranged) # Shape: (22, 320, 320)
-            gt_final_tensor = rearrange(gt_complex_tensor, 't h w -> h w t') # Shape: (320, 320, 22)
-            gt_complex_np = gt_final_tensor.cpu().numpy()
+#                 # Now, compare the PK map from your model's output to the original ground truth PK map
+#                 evaluation_summary = evaluate_reconstruction_fidelity(
+#                     ground_truth_params=ground_truth_pk_map.cpu().numpy().squeeze(),
+#                     estimated_params=estimated_pk_map_from_dl,
+#                     masks=masks_np,
+#                     regions_to_evaluate=['malignant'] # Focus on a key region
+#                 )
 
-            recon_mag_np = np.abs(x_recon_complex_np)
-            grasp_mag_np = np.abs(grasp_recon_complex_np)
-            gt_mag_np = np.abs(gt_complex_np)
+#                 grasp_evaluation_summary = evaluate_reconstruction_fidelity(
+#                     ground_truth_params=ground_truth_pk_map.cpu().numpy().squeeze(),
+#                     estimated_params=estimated_pk_map_from_grasp,
+#                     masks=masks_np,
+#                     regions_to_evaluate=['malignant'], # Focus on a key region
+#                     filename="pk_param_maps_grasp.png"
+#                 )
+
+#                 print("\nEvaluation Complete.")
+
+#                 print("DL Recon: ", evaluation_summary)
+#                 print("GRASP Recon: ", grasp_evaluation_summary)
+
+
+
+#             # ==========================================================
+#             # VISUALIZATION
+#             # ==========================================================
+
+#             x_recon_complex_np = to_torch_complex(recon_complex_scaled).squeeze().cpu().numpy()
+#             grasp_recon_complex_np = rearrange(to_torch_complex(grasp_recon).squeeze(), 'h t w -> h w t').cpu().numpy()
+
+#             gt_squeezed = ground_truth.squeeze()  # Shape: (C, T, H, W) -> (2, 22, 320, 320)
+#             gt_rearranged = rearrange(gt_squeezed, 'c t h w -> t c h w') # Shape: (22, 320, 320, 2)
+#             gt_complex_tensor = to_torch_complex(gt_rearranged) # Shape: (22, 320, 320)
+#             gt_final_tensor = rearrange(gt_complex_tensor, 't h w -> h w t') # Shape: (320, 320, 22)
+#             gt_complex_np = gt_final_tensor.cpu().numpy()
+
+#             recon_mag_np = np.abs(x_recon_complex_np)
+#             grasp_mag_np = np.abs(grasp_recon_complex_np)
+#             gt_mag_np = np.abs(gt_complex_np)
             
-            masks_np = {key: val.cpu().numpy().squeeze().astype(bool) for key, val in mask.items()}
-            print(f"malignancy status for i = {i}: {masks_np['malignant'].any()}")
-            num_frames = recon_mag_np.shape[2]
-            aif_time_points = np.linspace(0, 150, num_frames)
+#             masks_np = {key: val.cpu().numpy().squeeze().astype(bool) for key, val in mask.items()}
+#             print(f"malignancy status for i = {i}: {masks_np['malignant'].any()}")
+#             num_frames = recon_mag_np.shape[2]
+#             aif_time_points = np.linspace(0, 150, num_frames)
 
-            if i == 1:
-                print("\nGenerating diagnostic plots for the first evaluation sample...")
+#             if i == 1:
+#                 print("\nGenerating diagnostic plots for the first evaluation sample...")
                 
-                # --- Plot Spatial Quality at a Peak Enhancement Frame ---
-                # Find a frame around peak enhancement (e.g., 1/3 of the way through)
-                peak_frame = num_frames // 3
-                data_range = gt_mag_np[:, :, peak_frame].max() - gt_mag_np[:, :, peak_frame].min()
-                plot_spatial_quality(
-                    recon_img=recon_mag_np[:, :, peak_frame],
-                    gt_img=gt_mag_np[:, :, peak_frame],
-                    grasp_img=grasp_mag_np[:, :, peak_frame],
-                    time_frame_index=peak_frame,
-                    filename=os.path.join(output_dir, f"spatial_quality_epoch{epoch}.png"),
-                    data_range=data_range
-                )
+#                 # --- Plot Spatial Quality at a Peak Enhancement Frame ---
+#                 # Find a frame around peak enhancement (e.g., 1/3 of the way through)
+#                 peak_frame = num_frames // 3
+#                 data_range = gt_mag_np[:, :, peak_frame].max() - gt_mag_np[:, :, peak_frame].min()
+#                 plot_spatial_quality(
+#                     recon_img=recon_mag_np[:, :, peak_frame],
+#                     gt_img=gt_mag_np[:, :, peak_frame],
+#                     grasp_img=grasp_mag_np[:, :, peak_frame],
+#                     time_frame_index=peak_frame,
+#                     filename=os.path.join(output_dir, f"spatial_quality_epoch{epoch}.png"),
+#                     grasp_comparison_filename=os.path.join(output_dir, f"grasp_comparison_{label}.png"),
+#                     data_range=data_range
+#                 )
 
-                # --- Plot Temporal Curves for Key Regions ---
-                # This is the most important plot for debugging your PK results!
-                plot_temporal_curves(
-                    gt_img_stack=gt_mag_np,
-                    recon_img_stack=recon_mag_np,
-                    grasp_img_stack=grasp_mag_np,
-                    masks=masks_np,
-                    time_points=aif_time_points,
-                    filename=os.path.join(output_dir, f"temporal_curves_epoch{epoch}.png")
-                )
+#                 # --- Plot Temporal Curves for Key Regions ---
+#                 # This is the most important plot for debugging your PK results!
+#                 plot_temporal_curves(
+#                     gt_img_stack=gt_mag_np,
+#                     recon_img_stack=recon_mag_np,
+#                     grasp_img_stack=grasp_mag_np,
+#                     masks=masks_np,
+#                     time_points=aif_time_points,
+#                     filename=os.path.join(output_dir, f"temporal_curves_epoch{epoch}.png")
+#                 )
 
-                plot_single_temporal_curve(
-                    img_stack=recon_mag_np,
-                    masks=masks_np,
-                    time_points=aif_time_points,
-                    num_frames=num_frames,
-                    filename=os.path.join(output_dir, f"recon_temporal_curve_epoch{epoch}.png")
-                )
+#                 plot_single_temporal_curve(
+#                     img_stack=recon_mag_np,
+#                     masks=masks_np,
+#                     time_points=aif_time_points,
+#                     num_frames=num_frames,
+#                     filename=os.path.join(output_dir, f"recon_temporal_curve_epoch{epoch}.png")
+#                 )
 
-                plot_time_series(
-                    gt_img_stack=gt_mag_np,
-                    recon_img_stack=recon_mag_np,
-                    grasp_img_stack=grasp_mag_np,
-                    filename=os.path.join(output_dir, f"time_points_epoch{epoch}.png")
-                )
+#                 plot_time_series(
+#                     gt_img_stack=gt_mag_np,
+#                     recon_img_stack=recon_mag_np,
+#                     grasp_img_stack=grasp_mag_np,
+#                     filename=os.path.join(output_dir, f"time_points_epoch{epoch}.png")
+#                 )
 
-                print("Diagnostic plots saved.")
+#                 print("Diagnostic plots saved.")
 
 
                 
 
-    # --- 5. Compute and Report Final Results ---
-    avg_ssim = np.mean(all_ssim_scores)
-    std_ssim = np.std(all_ssim_scores)
-    avg_psnr = np.mean(all_psnr_scores)
-    std_psnr = np.std(all_psnr_scores)
-    avg_mse = np.mean(all_mse_scores)
-    std_mse = np.std(all_mse_scores)
-    avg_dc = np.mean(all_dc_scores)
-    std_dc = np.std(all_dc_scores)
+#     # --- 5. Compute and Report Final Results ---
+#     avg_ssim = np.mean(all_ssim_scores)
+#     std_ssim = np.std(all_ssim_scores)
+#     avg_psnr = np.mean(all_psnr_scores)
+#     std_psnr = np.std(all_psnr_scores)
+#     avg_mse = np.mean(all_mse_scores)
+#     std_mse = np.std(all_mse_scores)
+#     avg_dc = np.mean(all_dc_scores)
+#     std_dc = np.std(all_dc_scores)
 
-    avg_ssim_grasp = np.mean(all_ssim_scores_grasp)
-    std_ssim_grasp = np.std(all_ssim_scores_grasp)
-    avg_psnr_grasp = np.mean(all_psnr_scores_grasp)
-    std_psnr_grasp = np.std(all_psnr_scores_grasp)
-    avg_mse_grasp = np.mean(all_mse_scores_grasp)
-    std_mse_grasp = np.std(all_mse_scores_grasp)
-    avg_dc_grasp = np.mean(all_dc_scores_grasp)
-    std_dc_grasp = np.std(all_dc_scores_grasp)
+#     avg_ssim_grasp = np.mean(all_ssim_scores_grasp)
+#     std_ssim_grasp = np.std(all_ssim_scores_grasp)
+#     avg_psnr_grasp = np.mean(all_psnr_scores_grasp)
+#     std_psnr_grasp = np.std(all_psnr_scores_grasp)
+#     avg_mse_grasp = np.mean(all_mse_scores_grasp)
+#     std_mse_grasp = np.std(all_mse_scores_grasp)
+#     avg_dc_grasp = np.mean(all_dc_scores_grasp)
+#     std_dc_grasp = np.std(all_dc_scores_grasp)
 
-    print("\n--- Evaluation Complete ---")
-    print(f"  Average SSIM: {avg_ssim:.4f} ± {std_ssim:.4f}")
-    print(f"  Average PSNR: {avg_psnr:.4f} ± {std_psnr:.4f}")
-    print(f"  Average MSE: {avg_mse:.4f} ± {std_mse:.4f}")
-    print(f"  Average DC: {avg_dc:.4f} ± {std_dc:.4f}")
-    print(f"  Average GRASP SSIM: {avg_ssim_grasp:.4f} ± {std_ssim_grasp:.4f}")
-    print(f"  Average GRASP PSNR: {avg_psnr_grasp:.4f} ± {std_psnr_grasp:.4f}")
-    print(f"  Average GRASP MSE: {avg_mse_grasp:.4f} ± {std_mse_grasp:.4f}")
-    print(f"  Average GRASP DC: {avg_dc_grasp:.4f} ± {std_dc_grasp:.4f}")
-    print("-" * 27)
+#     print("\n--- Evaluation Complete ---")
+#     print(f"  Average SSIM: {avg_ssim:.4f} ± {std_ssim:.4f}")
+#     print(f"  Average PSNR: {avg_psnr:.4f} ± {std_psnr:.4f}")
+#     print(f"  Average MSE: {avg_mse:.4f} ± {std_mse:.4f}")
+#     print(f"  Average DC: {avg_dc:.4f} ± {std_dc:.4f}")
+#     print(f"  Average GRASP SSIM: {avg_ssim_grasp:.4f} ± {std_ssim_grasp:.4f}")
+#     print(f"  Average GRASP PSNR: {avg_psnr_grasp:.4f} ± {std_psnr_grasp:.4f}")
+#     print(f"  Average GRASP MSE: {avg_mse_grasp:.4f} ± {std_mse_grasp:.4f}")
+#     print(f"  Average GRASP DC: {avg_dc_grasp:.4f} ± {std_dc_grasp:.4f}")
+#     print("-" * 27)
 
-    # Save results to a file
-    results_path = os.path.join(output_dir, "evaluation_metrics.txt")
-    with open(results_path, "a") as f:
-        f.write(f"Evaluation Metrics on Simulated Dataset: Epoch {epoch} \n")
-        f.write("="*40 + "\n")
-        f.write(f"Model: {model_type}\n")
-        f.write(f"Experiment: {os.path.basename(output_dir)}\n")
-        f.write(f"Number of evaluation samples: {len(eval_dataset)}\n")
-        f.write(f"Number of time frames per sample: {ground_truth.shape[2]}\n")
-        f.write("-" * 40 + "\n")
-        f.write(f"Average SSIM: {avg_ssim:.4f} (Std: {std_ssim:.4f})\n")
-        f.write(f"Average PSNR: {avg_psnr:.4f} (Std: {std_psnr:.4f})\n")
-        f.write(f"Average MSE: {avg_mse:.4f} (Std: {std_mse:.4f})\n")
-        f.write(f"Average DC: {avg_dc:.4f} (Std: {std_dc:.4f})\n")
-        f.write(f"Average GRASP SSIM: {avg_ssim_grasp:.4f} (Std: {std_ssim_grasp:.4f})\n")
-        f.write(f"Average GRASP PSNR: {avg_psnr_grasp:.4f} (Std: {std_psnr_grasp:.4f})\n")
-        f.write(f"Average GRASP MSE: {avg_mse_grasp:.4f} (Std: {std_mse_grasp:.4f})\n")
-        f.write(f"Average GRASP DC: {avg_dc_grasp:.4f} (Std: {std_dc_grasp:.4f})\n")
+#     # Save results to a file
+#     results_path = os.path.join(output_dir, "evaluation_metrics.txt")
+#     with open(results_path, "a") as f:
+#         f.write(f"Evaluation Metrics on Simulated Dataset: Epoch {epoch} \n")
+#         f.write("="*40 + "\n")
+#         f.write(f"Model: {model_type}\n")
+#         f.write(f"Experiment: {os.path.basename(output_dir)}\n")
+#         f.write(f"Number of evaluation samples: {len(eval_dataset)}\n")
+#         f.write(f"Number of time frames per sample: {ground_truth.shape[2]}\n")
+#         f.write("-" * 40 + "\n")
+#         f.write(f"Average SSIM: {avg_ssim:.4f} (Std: {std_ssim:.4f})\n")
+#         f.write(f"Average PSNR: {avg_psnr:.4f} (Std: {std_psnr:.4f})\n")
+#         f.write(f"Average MSE: {avg_mse:.4f} (Std: {std_mse:.4f})\n")
+#         f.write(f"Average DC: {avg_dc:.4f} (Std: {std_dc:.4f})\n")
+#         f.write(f"Average GRASP SSIM: {avg_ssim_grasp:.4f} (Std: {std_ssim_grasp:.4f})\n")
+#         f.write(f"Average GRASP PSNR: {avg_psnr_grasp:.4f} (Std: {std_psnr_grasp:.4f})\n")
+#         f.write(f"Average GRASP MSE: {avg_mse_grasp:.4f} (Std: {std_mse_grasp:.4f})\n")
+#         f.write(f"Average GRASP DC: {avg_dc_grasp:.4f} (Std: {std_dc_grasp:.4f})\n")
 
-    print(f"Results saved to {results_path}")
-    print("="*80 + "\n")
+#     print(f"Results saved to {results_path}")
+#     print("="*80 + "\n")
 
 
-    return avg_ssim, avg_psnr, avg_mse, avg_dc
+#     return avg_ssim, avg_psnr, avg_mse, avg_dc

@@ -19,7 +19,7 @@ from mc import MCLoss
 from lsfpnet import LSFPNet, ArtifactRemovalLSFPNet
 from radial_lsfp import MCNUFFT
 from utils import prep_nufft, log_gradient_stats, plot_enhancement_curve, get_cosine_ei_weight, plot_reconstruction_sample, get_git_commit, save_checkpoint, load_checkpoint, to_torch_complex
-from eval import eval_model, eval_grasp, eval_sample
+from eval import eval_grasp, eval_sample
 import csv
 
 # Parse command-line arguments
@@ -123,7 +123,7 @@ with open(split_file, "r") as fp:
     splits = json.load(fp)
 
 
-# NOTE: need to look into why I am only loading 88 training samples and not 192
+
 if max_subjects < 300:
     max_train = int(max_subjects * (1 - config["data"]["val_split_ratio"]))
 
@@ -269,6 +269,8 @@ if use_ei_loss:
         ei_loss_fn = EILoss(time_reverse | (diffeo | rotate), model_type=model_type)
     elif config['model']['losses']['ei_loss']['temporal_transform'] == "all":
         ei_loss_fn = EILoss((subsample | monophasic_warp | temp_noise | time_reverse) | (diffeo | rotate), model_type=model_type)
+    elif config['model']['losses']['ei_loss']['temporal_transform'] == "none":
+        ei_loss_fn = EILoss(rotate | diffeo, model_type=model_type)
     else:
         raise(ValueError, "Unsupported Temporal Transform.")
 

@@ -73,6 +73,6 @@ evaluation:
   simulated_dataset_path: "/ess/scratch/scratch1/rachelgordon/simulated_dataset/"
 
 debugging:
-  calc_step_0: false
+  calc_step_0: true
   enable_gradient_monitoring: true
   monitoring_interval: 5

@@ -2,11 +2,11 @@
 
 # Parameters
 #SBATCH --cpus-per-task=4
-#SBATCH --error=logs/lr0005_layers3_mc01.err
-#SBATCH --output=logs/lr0005_layers3_mc01.out
+#SBATCH --error=logs/lsfp_ei_rotate_mc10_mse.err
+#SBATCH --output=logs/lsfp_ei_rotate_mc10_mse.out
 #SBATCH --exclude=''
 #SBATCH --gpus-per-node=1
-#SBATCH --job-name=lr0005_layers3_mc01
+#SBATCH --job-name=lsfp_ei_rotate_mc10_mse
 #SBATCH --mem-per-gpu=80000
 #SBATCH --nodes=1
 #SBATCH --ntasks-per-node=1
@@ -21,4 +21,4 @@ source /gpfs/data/karczmar-lab/workspaces/rachelgordon/micromamba/etc/profile.d/
 micromamba activate recon_mri
 
 # Run the training script with srun
-python3 train.py --config configs/config_mc01_lr0005.yaml --exp_name lr0005_layers3_mc01 --from_checkpoint True
+python3 train_aug.py --config configs/config_ei_rotate.yaml --exp_name lsfp_ei_rotate_mc10_mse

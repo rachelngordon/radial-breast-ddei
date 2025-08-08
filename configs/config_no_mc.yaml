@@ -8,9 +8,10 @@ data:
   width: 320
   timeframes: 8
   total_spokes: 288
-  spokes_per_frame: 640
+  samples: 640
   coils: 16
   eval_timeframes: 22
+  spf_aug: false
 
 # Experiment settings
 experiment:
@@ -38,19 +39,21 @@ model:
   lambda_step: 0.1
   optimizer:
     name: "Adam"
-    lr: 0.0001
+    lr: 0.0005
     weight_decay: 0.0
     b1: 0.9
     b2: 0.999
     eps: 0.000000001
   losses:
     adj_loss:
-      weight: 0.0001
+      weight: 0.001
     use_ei_loss: false
     mc_loss:
       weight: 0
+      metric: "MSE"
     ei_loss:
-      temporal_transform: "subsample"
+      temporal_transform: "none"
+      spatial_transform: "rotate"
       weight: 0
       warmup: 3
       duration: 5

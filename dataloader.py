@@ -147,9 +147,24 @@ class SliceDataset(Dataset):
         # This creates the final, standard (C=2, T, S, I) format.
         kspace_final = torch.stack([real_part, imag_part], dim=0).float()
 
+        N_samples = kspace_final.shape[-1]
+        spokes_per_frame = kspace_final.shape[-2]
+
+
+        # rotate to match orientation of validation set 
+        # kspace_final = torch.rot90(kspace_final, k=2, dims=[-2, -1])
+        kspace_final = torch.flip(kspace_final, dims=[-1])
+
+        # You MUST also rotate the corresponding csmaps and grasp_img
+        # csmap shape is likely (H, W, C) or (C, H, W). Assuming (H, W, C).
+        # Convert to tensor, rotate, and convert back if needed, or rotate numpy array.
+        csmap_tensor = torch.from_numpy(csmap)
+        csmap_tensor = torch.rot90(csmap_tensor, k=2, dims=[-2, -1]) # Assuming dims 0,1 are H,W
+        csmap = csmap_tensor.numpy()
+
         # The final shape is (2, num_timeframes, num_spokes, num_samples)
-        # e.g., (2, 8, 36, 640)
-        return kspace_final, csmap, grasp_img
+        # e.g., (2, 8, 16, 36, 640)
+        return kspace_final, csmap, grasp_img, N_samples, spokes_per_frame, self.N_time
 
 
 
@@ -520,82 +535,19 @@ class SliceDatasetAug(Dataset):
         # This creates the final, standard (C=2, T, S, I) format.
         kspace_final = torch.stack([real_part, imag_part], dim=0).float()
 
+
+        # rotate to match orientation of validation set 
+        # kspace_final = torch.rot90(kspace_final, k=2, dims=[-2, -1])
+        kspace_final = torch.flip(kspace_final, dims=[-1])
+
+        # You MUST also rotate the corresponding csmaps and grasp_img
+        # csmap shape is likely (H, W, C) or (C, H, W). Assuming (H, W, C).
+        # Convert to tensor, rotate, and convert back if needed, or rotate numpy array.
+        csmap_tensor = torch.from_numpy(csmap)
+        csmap_tensor = torch.rot90(csmap_tensor, k=2, dims=[-2, -1]) # Assuming dims 0,1 are H,W
+        csmap = csmap_tensor.numpy()
+
         # The final shape is (2, num_timeframes, num_spokes, num_samples)
-        # e.g., (2, 8, 36, 640)
+        # e.g., (2, 8, 16, 36, 640)
         return kspace_final, csmap, grasp_img, N_samples, spokes_per_frame, N_time
 
-
-        # # load GRASP recon image
-        # file_path = self.file_list[idx]
-        # patient_id = file_path.split('/')[-1].strip('.h5')
-
-        # grasp_img = self.load_dynamic_img(patient_id)
-        # csmap = self.load_csmaps(patient_id)
-
-
-        # spokes_per_frame = random.choice(self.spokes_range)
-
-        # # read in k-space data
-        # f = h5py.File(file_path, 'r')
-        # ksp_f = f['kspace'][:].T
-        # ksp_f = np.transpose(ksp_f, (4, 3, 2, 1, 0))
-        # f.close()
-
-        # print("kspace shape: ", ksp_f.shape)
-
-        # ksp = ksp_f[0] + 1j * ksp_f[1]
-        # ksp = np.transpose(ksp, (3, 2, 0, 1))
-
-        # print("kspace complex shape: ", ksp.shape)
-
-        # ksp = torch.tensor(ksp).to(self.device, non_blocking=True)
-
-
-        # start = time.time()
-        # # ksp_zf = sp.fft(ksp, axes=(0,))
-        # ksp_zf = torch.fft.fft(ksp, dim=0)
-        # end = time.time()
-
-        # print("kspace shape after fft: ", ksp.shape)
-
-        # print("time for fft: ", end-start)
-
-        # N_slices, N_coils, N_spokes, N_samples = ksp_zf.shape
-
-        # base_res = N_samples // 2
-
-        # N_time = N_spokes // spokes_per_frame
-
-        # N_spokes_prep = N_time * spokes_per_frame
-
-        # ksp_redu = ksp_zf[:, :, :N_spokes_prep, :].cpu().numpy()
-
-        
-        # # retrospecitvely split spokes
-        # ksp_prep = np.swapaxes(ksp_redu, 0, 2)
-        # ksp_prep_shape = ksp_prep.shape
-        # ksp_prep = np.reshape(ksp_prep, [N_time, spokes_per_frame] + list(ksp_prep_shape[1:]))
-        # ksp_prep = np.transpose(ksp_prep, (3, 0, 2, 1, 4))
-
-        # print("kspace shape after time binning: ", ksp_prep.shape)
-
-
-        # # select single k-space partition 
-        # kspace_slice = torch.tensor(ksp_prep[self.slice_idx]) # T, C, Sp, Sam
-
-        # print("kspace single partition shape: ", kspace_slice.shape)
-
-        # # Separate real and imaginary components
-        # real_part = kspace_slice.real
-        # imag_part = kspace_slice.imag
-
-        # # Stack them along a new 'channel' dimension (dim=0).
-        # # This creates the final, standard (C=2, T, S, I) format.
-        # kspace_final = torch.stack([real_part, imag_part], dim=0).float()
-
-        # print("kspace output shape: ", kspace_final.shape)
-
-
-        # # The final shape is (2, num_timeframes, num_spokes, num_samples)
-        # # e.g., (2, 8, 36, 640)
-        # return kspace_final, csmap, grasp_img, N_samples, spokes_per_frame, N_time

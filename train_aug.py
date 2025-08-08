@@ -110,7 +110,7 @@ model_type = config["model"]["name"]
 H, W = config["data"]["height"], config["data"]["width"]
 N_time, N_samples, N_coils, N_time_eval = (
     config["data"]["timeframes"],
-    config["data"]["spokes_per_frame"],
+    config["data"]["samples"],
     config["data"]["coils"],
     config["data"]["eval_timeframes"]
 )
@@ -136,15 +136,25 @@ else:
 val_patient_ids = splits["val"]
 val_dro_patient_ids = splits["val_dro"]
 
-
-train_dataset = SliceDatasetAug(
-    root_dir=config["data"]["root_dir"],
-    patient_ids=train_patient_ids,
-    dataset_key=config["data"]["dataset_key"],
-    file_pattern="*.h5",
-    slice_idx=config["dataloader"]["slice_idx"],
-    N_coils=N_coils
-)
+if config['data']['spf_aug']:
+    train_dataset = SliceDatasetAug(
+        root_dir=config["data"]["root_dir"],
+        patient_ids=train_patient_ids,
+        dataset_key=config["data"]["dataset_key"],
+        file_pattern="*.h5",
+        slice_idx=config["dataloader"]["slice_idx"],
+        N_coils=N_coils
+    )
+else:
+    train_dataset = SliceDataset(
+        root_dir=config["data"]["root_dir"],
+        patient_ids=train_patient_ids,
+        dataset_key=config["data"]["dataset_key"],
+        file_pattern="*.h5",
+        slice_idx=config["dataloader"]["slice_idx"],
+        N_time=N_time,
+        N_coils=N_coils
+    )
 
 val_dataset = SliceDataset(
     root_dir=config["data"]["root_dir"],
@@ -197,7 +207,7 @@ eval_adjnufft_ob = eval_adjnufft_ob.to(device)
 eval_physics = MCNUFFT(eval_nufft_ob, eval_adjnufft_ob, eval_ktraj, eval_dcomp)
 
 lsfp_backbone = LSFPNet(LayerNo=config["model"]["num_layers"], lambdas=initial_lambdas, channels=config['model']['channels'])
-model = ArtifactRemovalLSFPNet(lsfp_backbone).to(device)
+model = ArtifactRemovalLSFPNet(lsfp_backbone, output_dir).to(device)
 
 
 
@@ -218,7 +228,13 @@ else:
 
 
 # define transformations and loss functions
-mc_loss_fn = MCLoss(model_type=model_type)
+if config['model']['losses']['mc_loss']['metric'] == "MSE":
+    mc_loss_fn = MCLoss(model_type=model_type)
+elif config['model']['losses']['mc_loss']['metric'] == "MAE":
+    mc_loss_fn = MCLoss(model_type=model_type, metric=torch.nn.L1Loss())
+else:
+    raise(ValueError, "Unsupported MC Loss Metric.")
+
 
 if use_ei_loss:
     # rotate = VideoRotate(n_trans=1, interpolation_mode=InterpolationMode.BILINEAR)
@@ -232,7 +248,10 @@ if use_ei_loss:
 
     # NOTE: set apply_noise = FALSE for now multi coil implementation
     if config['model']['losses']['ei_loss']['temporal_transform'] == "subsample":
-        ei_loss_fn = EILoss(subsample | (diffeo | rotate), model_type=model_type)
+        if config['model']['losses']['ei_loss']['spatial_transform'] == "none":
+            ei_loss_fn = EILoss(subsample, model_type=model_type)
+        else:
+            ei_loss_fn = EILoss(subsample | (diffeo | rotate), model_type=model_type)
     elif config['model']['losses']['ei_loss']['temporal_transform'] == "monophasic":
         ei_loss_fn = EILoss(monophasic_warp | (diffeo | rotate), model_type=model_type)
     elif config['model']['losses']['ei_loss']['temporal_transform'] == "noise":
@@ -241,6 +260,13 @@ if use_ei_loss:
         ei_loss_fn = EILoss(time_reverse | (diffeo | rotate), model_type=model_type)
     elif config['model']['losses']['ei_loss']['temporal_transform'] == "all":
         ei_loss_fn = EILoss((subsample | monophasic_warp | temp_noise | time_reverse) | (diffeo | rotate), model_type=model_type)
+    elif config['model']['losses']['ei_loss']['temporal_transform'] == "none":
+        if config['model']['losses']['ei_loss']['spatial_transform'] == "rotate":
+            ei_loss_fn = EILoss(rotate, model_type=model_type)
+        elif config['model']['losses']['ei_loss']['spatial_transform'] == "diffeo":
+            ei_loss_fn = EILoss(diffeo, model_type=model_type)
+        else:
+            ei_loss_fn = EILoss(rotate | diffeo, model_type=model_type)
     else:
         raise(ValueError, "Unsupported Temporal Transform.")
 
@@ -312,6 +338,13 @@ grasp_psnrs = []
 grasp_mses = []
 grasp_dcs = []
 
+lambda_Ls = []
+lambda_Ss = []
+lambda_spatial_Ls = []
+lambda_spatial_Ss = []
+gammas = []
+lambda_steps = []
+
 iteration_count = 0
 
 # scaler = GradScaler()
@@ -349,8 +382,8 @@ if args.from_checkpoint == False and config['debugging']['calc_step_0'] == True:
 
                 csmap = csmap.to(device).to(measured_kspace.dtype)
 
-                x_recon, adj_loss = model(
-                    measured_kspace.to(device), physics, csmap, norm=config['model']['norm']
+                x_recon, adj_loss, lambda_L, lambda_S, lambda_spatial_L, lambda_spatial_S, gamma, lambda_step = model(
+                    measured_kspace.to(device), physics, csmap, epoch="train0", norm=config['model']['norm']
                 )
 
                 initial_train_adj_loss += adj_loss.item()
@@ -382,6 +415,14 @@ if args.from_checkpoint == False and config['debugging']['calc_step_0'] == True:
         train_adj_losses.append(step0_train_adj_loss)
 
 
+        lambda_Ls.append(lambda_L.item())
+        lambda_Ss.append(lambda_S.item())
+        lambda_spatial_Ls.append(lambda_spatial_L.item())
+        lambda_spatial_Ss.append(lambda_spatial_S.item())
+        gammas.append(gamma.item())
+        lambda_steps.append(lambda_step.item())
+
+
         # Evaluate on validation data
         for measured_kspace, csmap, ground_truth, grasp_img, *_ in tqdm(val_dro_loader, desc="Step 0 Validation Evaluation"):
         #for measured_kspace, csmap, grasp_img in tqdm(val_dro_loader, desc="Step 0 Validation Evaluation"):
@@ -405,8 +446,8 @@ if args.from_checkpoint == False and config['debugging']['calc_step_0'] == True:
                 # x_temp:  torch.Size([1, 1, 16, 320, 320])
                 # measured_kspace:  torch.Size([16, 23040, 22])
 
-                x_recon, adj_loss = model(
-                    measured_kspace.to(device), eval_physics, csmap, norm=config['model']['norm']
+                x_recon, adj_loss, *_ = model(
+                    measured_kspace.to(device), eval_physics, csmap, epoch="val0", norm=config['model']['norm']
                 )
                 initial_val_adj_loss += adj_loss.item()
             
@@ -491,8 +532,8 @@ else:
 
                 csmap = csmap.to(device).to(measured_kspace.dtype)
 
-                x_recon, adj_loss = model(
-                    measured_kspace.to(device), physics, csmap, norm=config['model']['norm']
+                x_recon, adj_loss, lambda_L, lambda_S, lambda_spatial_L, lambda_spatial_S, gamma, lambda_step = model(
+                    measured_kspace.to(device), physics, csmap, epoch=f"train{epoch}", norm=config['model']['norm']
                 )
                 running_adj_loss += adj_loss.item()
 
@@ -612,6 +653,15 @@ else:
             train_adj_losses.append(0.0)
             weighted_train_adj_losses.append(0.0)
 
+        
+        lambda_Ls.append(lambda_L.item())
+        lambda_Ss.append(lambda_S.item())
+        lambda_spatial_Ls.append(lambda_spatial_L.item())
+        lambda_spatial_Ss.append(lambda_spatial_S.item())
+        gammas.append(gamma.item())
+        lambda_steps.append(lambda_step.item())
+
+
         # --- Validation Loop ---
         model.eval()
         val_running_mc_loss = 0.0
@@ -644,8 +694,8 @@ else:
 
                     # val_csmap = val_csmap.to(device).to(val_kspace_batch.dtype)
 
-                    val_x_recon, val_adj_loss = model(
-                        val_kspace_batch.to(device), eval_physics, val_csmap, norm=config['model']['norm']
+                    val_x_recon, val_adj_loss, *_ = model(
+                        val_kspace_batch.to(device), eval_physics, val_csmap, epoch=f"val{epoch}", norm=config['model']['norm']
                     )
                     val_running_adj_loss += val_adj_loss.item()
 
@@ -886,6 +936,68 @@ else:
                 plt.close()
 
 
+                plt.figure()
+                plt.plot(lambda_Ls)
+                plt.xlabel("Epoch")
+                plt.ylabel("Lambda_L Value")
+                plt.title("Lambda_L During Training")
+                plt.legend()
+                plt.grid(True)
+                plt.savefig(os.path.join(output_dir, "lambda_L.png"))
+                plt.close()
+
+                plt.figure()
+                plt.plot(lambda_Ss)
+                plt.xlabel("Epoch")
+                plt.ylabel("Lambda_S Value")
+                plt.title("Lambda_S During Training")
+                plt.legend()
+                plt.grid(True)
+                plt.savefig(os.path.join(output_dir, "lambda_S.png"))
+                plt.close()
+
+                plt.figure()
+                plt.plot(lambda_spatial_Ls)
+                plt.xlabel("Epoch")
+                plt.ylabel("Lambda_spatial_L Value")
+                plt.title("Lambda_spatial_L During Training")
+                plt.legend()
+                plt.grid(True)
+                plt.savefig(os.path.join(output_dir, "lambda_spatial_L.png"))
+                plt.close()
+
+                plt.figure()
+                plt.plot(lambda_spatial_Ss)
+                plt.xlabel("Epoch")
+                plt.ylabel("Lambda_spatial_S Value")
+                plt.title("Lambda_spatial_S During Training")
+                plt.legend()
+                plt.grid(True)
+                plt.savefig(os.path.join(output_dir, "lambda_spatial_S.png"))
+                plt.close()
+
+                plt.figure()
+                plt.plot(gammas)
+                plt.xlabel("Epoch")
+                plt.ylabel("Gamma Value")
+                plt.title("Step Size During Training")
+                plt.legend()
+                plt.grid(True)
+                plt.savefig(os.path.join(output_dir, "gamma.png"))
+                plt.close()
+
+                plt.figure()
+                plt.plot(lambda_steps)
+                plt.xlabel("Epoch")
+                plt.ylabel("Lambda_step Value")
+                plt.title("Lambda_step During Training")
+                plt.legend()
+                plt.grid(True)
+                plt.savefig(os.path.join(output_dir, "lambda_step.png"))
+                plt.close()
+
+
+
 
             # Plot Weighted Losses
             plt.figure()
@@ -1038,14 +1150,23 @@ MAIN_EVALUATION_PLAN = [
 # --- Stress Test Plan ---
 # Designed to push the limits with very few spokes per frame.
 # This has a different (lower) total spoke budget.
+
 STRESS_TEST_PLAN = [
     {
         "spokes_per_frame": 8,
         "num_frames": 22, # 8 * 22 = 176 total spokes
         "slice": slice(0, 22), # The entire 22-frame duration
-        "description": "Stress test: max temporal points, min spokes"
-    }
+        "description": "Stress test: max temporal points, 8 spokes"
+    },
+    {
+        "spokes_per_frame": 4,
+        "num_frames": 22, # 4 * 22 = 88 total spokes
+        "slice": slice(0, 22), # The entire 22-frame duration
+        "description": "Stress test: max temporal points, 4 spokes"
+    },
+
 ]
+
 
 
 eval_spf_dataset = SimulatedSPFDataset(
@@ -1134,8 +1255,8 @@ with torch.no_grad():
             
 
 
-            x_recon, _ = model(
-                kspace.to(device), physics, csmap, norm=config['model']['norm']
+            x_recon, *_ = model(
+                kspace.to(device), physics, csmap, epoch, norm=config['model']['norm']
             )
 
             ground_truth = torch.stack([ground_truth.real, ground_truth.imag], dim=1)

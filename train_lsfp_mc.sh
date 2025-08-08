@@ -2,11 +2,11 @@
 
 # Parameters
 #SBATCH --cpus-per-task=4
-#SBATCH --error=logs/lr0001_layers3_mc10.err
-#SBATCH --output=logs/lr0001_layers3_mc10.out
+#SBATCH --error=logs/lsfp_mc10_mse.err
+#SBATCH --output=logs/lsfp_mc10_mse.out
 #SBATCH --exclude=''
 #SBATCH --gpus-per-node=1
-#SBATCH --job-name=lr0001_layers3_mc10
+#SBATCH --job-name=lsfp_mc10_mse
 #SBATCH --mem-per-gpu=80000
 #SBATCH --nodes=1
 #SBATCH --ntasks-per-node=1
@@ -21,4 +21,4 @@ source /gpfs/data/karczmar-lab/workspaces/rachelgordon/micromamba/etc/profile.d/
 micromamba activate recon_mri
 
 # Run the training script with srun
-python3 train.py --config configs/config_mc_lsfp.yaml --exp_name lr0001_layers3_mc10
+python3 train_aug.py --config configs/config_mc.yaml --exp_name lsfp_mc10_mse

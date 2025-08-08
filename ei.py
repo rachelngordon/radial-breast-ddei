@@ -100,3 +100,5 @@ class EILoss(Loss):
 
         loss_ei = self.weight * self.metric(x3, x2)
         return loss_ei, x2
+    
+

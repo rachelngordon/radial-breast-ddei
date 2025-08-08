@@ -11,7 +11,7 @@ data:
   samples: 640
   coils: 16
   eval_timeframes: 22
-  spf_aug: true
+  spf_aug: false
 
 # Experiment settings
 experiment:
@@ -47,12 +47,14 @@ model:
   losses:
     adj_loss:
       weight: 0.001
-    use_ei_loss: false
+    use_ei_loss: true
     mc_loss:
       weight: 10
+      metric: "MSE"
     ei_loss:
-      temporal_transform: "subsample"
-      weight: 0
+      temporal_transform: "none"
+      spatial_transform: "diffeo"
+      weight: 100
       warmup: 3
       duration: 5
       subsample_ratio_min: 0.7
@@ -64,7 +66,7 @@ model:
 
 # Training settings
 training:
-  epochs: 15
+  epochs: 25
   save_interval: 1
   plot_interval: 20
   device: "cuda"  # or "cpu"

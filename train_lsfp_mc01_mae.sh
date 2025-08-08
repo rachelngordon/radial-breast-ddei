@@ -2,11 +2,11 @@
 
 # Parameters
 #SBATCH --cpus-per-task=4
-#SBATCH --error=logs/lsfpnet_no_adj.err
-#SBATCH --output=logs/lsfpnet_no_adj.out
+#SBATCH --error=logs/lsfp_mc01_mae.err
+#SBATCH --output=logs/lsfp_mc01_mae.out
 #SBATCH --exclude=''
 #SBATCH --gpus-per-node=1
-#SBATCH --job-name=lsfpnet_no_adj
+#SBATCH --job-name=lsfp_mc01_mae
 #SBATCH --mem-per-gpu=80000
 #SBATCH --nodes=1
 #SBATCH --ntasks-per-node=1
@@ -21,4 +21,4 @@ source /gpfs/data/karczmar-lab/workspaces/rachelgordon/micromamba/etc/profile.d/
 micromamba activate recon_mri
 
 # Run the training script with srun
-python3 train.py --config configs/config_no_adj.yaml --exp_name lsfpnet_no_adj
+python3 train_aug.py --config configs/config_mc01_mae.yaml --exp_name lsfp_mc01_mae

@@ -7,8 +7,6 @@ import torch.nn.functional as F
 from lsp import Project_inf, Wxs, Wtxs
 from time import time
 from einops import rearrange
-import matplotlib.pyplot as plt
-import numpy as np
 
 dtype = torch.complex64
 
@@ -49,7 +47,7 @@ class BasicBlock(nn.Module):
         # self.gamma = nn.Parameter(torch.tensor([0.5]))
         # self.lambda_step = nn.Parameter(torch.tensor([1/10]))
 
-        self.conv1_forward_l = nn.Parameter(init.xavier_normal_(torch.Tensor(self.channels, 1, 3, 3, 3)))
+        self.conv1_forward_l = nn.Parameter(init.xavier_normal_(torch.Tensor(self.channels, 2, 3, 3, 3)))
         self.conv2_forward_l = nn.Parameter(init.xavier_normal_(torch.Tensor(self.channels, self.channels, 3, 3, 3)))
         self.conv3_forward_l = nn.Parameter(init.xavier_normal_(torch.Tensor(self.channels, self.channels, 3, 3, 3)))
 
@@ -57,7 +55,7 @@ class BasicBlock(nn.Module):
         self.conv2_backward_l = nn.Parameter(init.xavier_normal_(torch.Tensor(self.channels, self.channels, 3, 3, 3)))
         self.conv3_backward_l = nn.Parameter(init.xavier_normal_(torch.Tensor(1, self.channels, 3, 3, 3)))
 
-        self.conv1_forward_s = nn.Parameter(init.xavier_normal_(torch.Tensor(self.channels, 1, 3, 3, 3)))
+        self.conv1_forward_s = nn.Parameter(init.xavier_normal_(torch.Tensor(self.channels, 2, 3, 3, 3)))
         self.conv2_forward_s = nn.Parameter(init.xavier_normal_(torch.Tensor(self.channels, self.channels, 3, 3, 3)))
         self.conv3_forward_s = nn.Parameter(init.xavier_normal_(torch.Tensor(self.channels, self.channels, 3, 3, 3)))
 
@@ -65,7 +63,7 @@ class BasicBlock(nn.Module):
         self.conv2_backward_s = nn.Parameter(init.xavier_normal_(torch.Tensor(self.channels, self.channels, 3, 3, 3)))
         self.conv3_backward_s = nn.Parameter(init.xavier_normal_(torch.Tensor(1, self.channels, 3, 3, 3)))
 
-    def forward(self, M0, param_E, param_d, L, S, pt_L, pt_S, p_L, p_S, csmaps):
+    def forward(self, M0, param_E, param_d, L, S, pt_L, pt_S, p_L, p_S, csmaps, acceleration_factor):
 
         c = self.lambda_step / self.gamma
         nx, ny, nt = M0.size()
@@ -115,7 +113,7 @@ class BasicBlock(nn.Module):
         # noise_std = 1e-5 # A small standard deviation for the noise
         # noise = torch.randn_like(svd_input_mag) * noise_std
 
-        epsilon = 1e-7  # A small constant. Tune if necessary.
+        # epsilon = 1e-7  # A small constant. Tune if necessary.
 
         noise_std = 1e-5 # A small standard deviation for the noise
         noise = torch.randn_like(svd_input_mag) * noise_std
@@ -188,8 +186,17 @@ class BasicBlock(nn.Module):
         # pt_L = Ut.mm(temp_St).mm(Vt)
 
         # update p_L
-        temp_y_L_input = torch.cat((torch.real(y_L), torch.imag(y_L)), 0).to(torch.float32)
-        temp_y_L_input = torch.reshape(temp_y_L_input, [2, nx, ny, nt]).unsqueeze(1)
+        temp_y_L_input_orig = torch.cat((torch.real(y_L), torch.imag(y_L)), 0).to(torch.float32)
+        temp_y_L_input_orig = torch.reshape(temp_y_L_input_orig, [2, nx, ny, nt]).unsqueeze(1) # Shape: [2, 1, nx, ny, nt]
+
+        # 2. Create the acceleration factor channel with the same shape
+        accel_channel = torch.full_like(temp_y_L_input_orig, fill_value=acceleration_factor)
+
+        # 3. Concatenate along the channel dimension (dim=1) to create the 2-channel input
+        temp_y_L_input = torch.cat([temp_y_L_input_orig, accel_channel], dim=1) # Shape: [2, 2, nx, ny, nt]
+
+        # temp_y_L_input = torch.cat((torch.real(y_L), torch.imag(y_L)), 0).to(torch.float32)
+        # temp_y_L_input = torch.reshape(temp_y_L_input, [2, nx, ny, nt]).unsqueeze(1)
         temp_y_L = F.conv3d(temp_y_L_input, self.conv1_forward_l, padding=1)
         temp_y_L = F.relu(temp_y_L)
         temp_y_L = F.conv3d(temp_y_L, self.conv2_forward_l, padding=1)
@@ -216,7 +223,7 @@ class BasicBlock(nn.Module):
         L = L - self.gamma * gradient - self.gamma * pt_L - self.gamma * pb_L
 
         # adjoint loss: adjloss_L = psi * x * y - psi_t * y * x
-        adjloss_L = temp_y_L_output * p_L - pb_L_output * temp_y_L_input
+        adjloss_L = temp_y_L_output * p_L - pb_L_output * temp_y_L_input_orig
 
         # pb_S
         pb_S = F.conv3d(p_S, self.conv1_backward_s, padding=1)
@@ -235,8 +242,12 @@ class BasicBlock(nn.Module):
         pt_S = Project_inf(c * Wxs(y_S) + pt_S, self.lambda_S)
 
         # update p_S
-        temp_y_S_input = torch.cat((torch.real(y_S), torch.imag(y_S)), 0).to(torch.float32)
-        temp_y_S_input = torch.reshape(temp_y_S_input, [2, nx, ny, nt]).unsqueeze(1)
+        temp_y_S_input_orig = torch.cat((torch.real(y_S), torch.imag(y_S)), 0).to(torch.float32)
+        temp_y_S_input_orig = torch.reshape(temp_y_S_input_orig, [2, nx, ny, nt]).unsqueeze(1)
+        accel_channel_s = torch.full_like(temp_y_S_input_orig, fill_value=acceleration_factor)
+        temp_y_S_input = torch.cat([temp_y_S_input_orig, accel_channel_s], dim=1)
+        # temp_y_S_input = torch.cat((torch.real(y_S), torch.imag(y_S)), 0).to(torch.float32)
+        # temp_y_S_input = torch.reshape(temp_y_S_input, [2, nx, ny, nt]).unsqueeze(1)
         temp_y_S = F.conv3d(temp_y_S_input, self.conv1_forward_s, padding=1)
         temp_y_S = F.relu(temp_y_S)
         temp_y_S = F.conv3d(temp_y_S, self.conv2_forward_s, padding=1)
@@ -263,9 +274,9 @@ class BasicBlock(nn.Module):
         S = S - self.gamma * gradient - self.gamma * Wtxs(pt_S) - self.gamma * pb_S
 
         # adjoint loss: adjloss_S = psi * x * y - psi_t * y * x
-        adjloss_S = temp_y_S_output * p_S - pb_S_output * temp_y_S_input
+        adjloss_S = temp_y_S_output * p_S - pb_S_output * temp_y_S_input_orig
 
-        return [L, S, adjloss_L, adjloss_S, pt_L, pt_S, p_L, p_S, self.lambda_L, self.lambda_S, self.lambda_spatial_L, self.lambda_spatial_S, self.gamma, self.lambda_step]
+        return [L, S, adjloss_L, adjloss_S, pt_L, pt_S, p_L, p_S]
 
 
 # define LSFP-Net
@@ -281,44 +292,8 @@ class LSFPNet(nn.Module):
 
         self.fcs = nn.ModuleList(onelayer)
 
-    
-    def plot_block_output(self, M0, L, S, iter, epoch, output_dir):
 
-        time_frame_index = 3
-
-        nx, ny, nt = M0.size()
-        L = torch.reshape(L, [nx, ny, nt])
-        S = torch.reshape(S, [nx, ny, nt])
-
-        output_image = L + S
-
-        # Create a 1x3 plot grid
-        fig, axes = plt.subplots(1, 4, figsize=(24, 6))
-        fig.suptitle(f"Basic Block Output at Time Frame {time_frame_index} and Iteration {iter}", fontsize=20)
-
-        # --- Top Row: DL Reconstruction Comparison ---
-        axes[0].imshow(np.abs(M0[..., time_frame_index].cpu().numpy()), cmap='gray')
-        axes[0].set_title("Input Image")
-        axes[0].axis("off")
-
-        axes[1].imshow(np.abs(L[..., time_frame_index].cpu().detach().numpy()), cmap='gray')
-        axes[1].set_title("Background Component (L)")
-        axes[1].axis("off")
-
-        axes[2].imshow(np.abs(S[..., time_frame_index].cpu().detach().numpy()), cmap='gray')
-        axes[2].set_title("Dynamic Component (S)")
-        axes[2].axis("off")
-
-        axes[3].imshow(np.abs(output_image[..., time_frame_index].cpu().detach().numpy()), cmap='gray')
-        axes[3].set_title("Combined Image (L + S)")
-        axes[3].axis("off")
-
-        filename = os.path.join(output_dir, f'basic_block_output_{epoch}_iter{iter}.png')
-        plt.savefig(filename)
-        plt.close()
-
-
-    def forward(self, M0, param_E, param_d, csmap, epoch, output_dir):
+    def forward(self, M0, param_E, param_d, csmap, acceleration_factor):
 
         # M0 = M0[..., 0] + 1j * M0[..., 1]
         # param_d = param_d[..., 0] + 1j * param_d[..., 1]
@@ -335,17 +310,14 @@ class LSFPNet(nn.Module):
         layers_adj_S = []
 
         for ii in range(self.LayerNo):
-            [L, S, layer_adj_L, layer_adj_S, pt_L, pt_S, p_L, p_S, lambda_L, lambda_S, lambda_spatial_L, lambda_spatial_S, gamma, lambda_step] = self.fcs[ii](M0, param_E, param_d, L, S, pt_L, pt_S, p_L, p_S, csmap)
+            [L, S, layer_adj_L, layer_adj_S, pt_L, pt_S, p_L, p_S] = self.fcs[ii](M0, param_E, param_d, L, S, pt_L, pt_S, p_L, p_S, csmap, acceleration_factor)
             layers_adj_L.append(layer_adj_L)
             layers_adj_S.append(layer_adj_S)
-
-            self.plot_block_output(M0, L, S, iter=ii, epoch=epoch, output_dir=output_dir)
-                
 
         L = torch.reshape(L, [nx, ny, nt])
         S = torch.reshape(S, [nx, ny, nt])
 
-        return [L, S, layers_adj_L, layers_adj_S, lambda_L, lambda_S, lambda_spatial_L, lambda_spatial_S, gamma, lambda_step]
+        return [L, S, layers_adj_L, layers_adj_S]
     
 
 # class EWrapper:
@@ -372,10 +344,9 @@ class LSFPNet(nn.Module):
         
 
 class ArtifactRemovalLSFPNet(nn.Module):
-    def __init__(self, backbone_net, output_dir, **kwargs):
+    def __init__(self, backbone_net, **kwargs):
         super(ArtifactRemovalLSFPNet, self).__init__()
         self.backbone_net = backbone_net
-        self.output_dir = output_dir
 
     @staticmethod
     def _normalise_both(zf: torch.Tensor, data: torch.Tensor):
@@ -398,7 +369,7 @@ class ArtifactRemovalLSFPNet(nn.Module):
              scale = 1.0
         return x / scale, scale
 
-    def forward(self, y, E, csmap, epoch, norm="both", **kwargs):
+    def forward(self, y, E, csmap, acceleration_factor, norm="both", **kwargs):
 
         # 1. Get the initial ZF recon. This defines our target energy/scale.
         x_init = E(inv=True, data=y, smaps=csmap)
@@ -429,7 +400,7 @@ class ArtifactRemovalLSFPNet(nn.Module):
         # print("kspace max: ", torch.abs(y_norm).max())
         # print("kspace mean: ", torch.abs(y_norm).mean())
 
-        L, S, loss_layers_adj_L, loss_layers_adj_S, lambda_L, lambda_S, lambda_spatial_L, lambda_spatial_S, gamma, lambda_step  = self.backbone_net(x_init_norm, E, y_norm, csmap, epoch, self.output_dir)
+        L, S, loss_layers_adj_L, loss_layers_adj_S  = self.backbone_net(x_init_norm, E, y_norm, csmap, acceleration_factor=acceleration_factor)
 
 
         loss_constraint_L = torch.square(torch.mean(loss_layers_adj_L[0])) / self.backbone_net.LayerNo
@@ -445,4 +416,4 @@ class ArtifactRemovalLSFPNet(nn.Module):
         # 4) stack & convert back to (B,2,T,H,W) float32
         x_hat = torch.stack((recon.real, recon.imag), dim=0).unsqueeze(0)  # (B,2,H,W,T)
 
-        return x_hat, loss_constraint_L + loss_constraint_S, lambda_L, lambda_S, lambda_spatial_L, lambda_spatial_S, gamma, lambda_step
+        return x_hat, loss_constraint_L + loss_constraint_S

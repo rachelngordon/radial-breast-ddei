@@ -11,7 +11,7 @@ data:
   samples: 640
   coils: 16
   eval_timeframes: 22
-  spf_aug: false
+  spf_aug: true
 
 # Experiment settings
 experiment:

@@ -50,8 +50,10 @@ model:
     use_ei_loss: false
     mc_loss:
       weight: 10
+      metric: "MAE"
     ei_loss:
-      temporal_transform: "subsample"
+      temporal_transform: "none"
+      spatial_transform: "rotate"
       weight: 0
       warmup: 3
       duration: 5
@@ -64,7 +66,7 @@ model:
 
 # Training settings
 training:
-  epochs: 15
+  epochs: 10
   save_interval: 1
   plot_interval: 20
   device: "cuda"  # or "cpu"

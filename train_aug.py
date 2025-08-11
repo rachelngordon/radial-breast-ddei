@@ -1153,16 +1153,16 @@ MAIN_EVALUATION_PLAN = [
 
 STRESS_TEST_PLAN = [
     {
-        "spokes_per_frame": 8,
-        "num_frames": 22, # 8 * 22 = 176 total spokes
-        "slice": slice(0, 22), # The entire 22-frame duration
-        "description": "Stress test: max temporal points, 8 spokes"
-    },
-    {
         "spokes_per_frame": 4,
         "num_frames": 22, # 4 * 22 = 88 total spokes
         "slice": slice(0, 22), # The entire 22-frame duration
         "description": "Stress test: max temporal points, 4 spokes"
+    },
+    {
+        "spokes_per_frame": 8,
+        "num_frames": 22, # 8 * 22 = 176 total spokes
+        "slice": slice(0, 22), # The entire 22-frame duration
+        "description": "Stress test: max temporal points, 8 spokes"
     },
 
 ]
@@ -1256,7 +1256,7 @@ with torch.no_grad():
 
 
             x_recon, *_ = model(
-                kspace.to(device), physics, csmap, epoch, norm=config['model']['norm']
+                kspace.to(device), physics, csmap, epoch=None, norm=config['model']['norm']
             )
 
             ground_truth = torch.stack([ground_truth.real, ground_truth.imag], dim=1)
@@ -1353,8 +1353,8 @@ with torch.no_grad():
             
 
 
-            x_recon, _ = model(
-                kspace.to(device), physics, csmap, norm=config['model']['norm']
+            x_recon, *_ = model(
+                kspace.to(device), physics, csmap, epoch=None, norm=config['model']['norm']
             )
 
             ground_truth = torch.stack([ground_truth.real, ground_truth.imag], dim=1)

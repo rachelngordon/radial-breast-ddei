@@ -50,7 +50,7 @@ model:
     use_ei_loss: true
     mc_loss:
       weight: 10
-      metric: "MSE"
+      metric: "MAE"
     ei_loss:
       temporal_transform: "none"
       spatial_transform: "diffeo"

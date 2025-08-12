@@ -16,12 +16,11 @@ import numpy as np
 from transform import VideoRotate, VideoDiffeo, SubsampleTime, MonophasicTimeWarp, TemporalNoise, TimeReverse
 from ei import EILoss
 from mc import MCLoss
-from lsfpnet_encoding import LSFPNet, ArtifactRemovalLSFPNet
+from lsfpnet import LSFPNet, ArtifactRemovalLSFPNet
 from radial_lsfp import MCNUFFT
 from utils import prep_nufft, log_gradient_stats, plot_enhancement_curve, get_cosine_ei_weight, plot_reconstruction_sample, get_git_commit, save_checkpoint, load_checkpoint, to_torch_complex
 from eval import eval_grasp, eval_sample
 import csv
-import math
 
 # Parse command-line arguments
 parser = argparse.ArgumentParser(description="Train ReconResNet model.")
@@ -73,6 +72,9 @@ os.makedirs(output_dir, exist_ok=True)
 eval_dir = os.path.join(output_dir, "eval_results")
 os.makedirs(eval_dir, exist_ok=True)
 
+block_dir = os.path.join(output_dir, "block_outputs")
+os.makedirs(block_dir, exist_ok=True)
+
 
 # Save the configuration file
 if args.from_checkpoint == False:
@@ -105,8 +107,6 @@ save_interval = config["training"]["save_interval"]
 plot_interval = config["training"]["plot_interval"]
 device = torch.device(config["training"]["device"])
 start_epoch = 1
-
-N_full = config['data']['height'] * math.pi / 2
 
 model_type = config["model"]["name"]
 
@@ -210,7 +210,7 @@ eval_adjnufft_ob = eval_adjnufft_ob.to(device)
 eval_physics = MCNUFFT(eval_nufft_ob, eval_adjnufft_ob, eval_ktraj, eval_dcomp)
 
 lsfp_backbone = LSFPNet(LayerNo=config["model"]["num_layers"], lambdas=initial_lambdas, channels=config['model']['channels'])
-model = ArtifactRemovalLSFPNet(lsfp_backbone, output_dir).to(device)
+model = ArtifactRemovalLSFPNet(lsfp_backbone, block_dir).to(device)
 
 
 
@@ -368,6 +368,7 @@ if args.from_checkpoint == False and config['debugging']['calc_step_0'] == True:
         # Evaluate on training data
         for measured_kspace, csmap, grasp_img, N_samples, N_spokes, N_time in tqdm(train_loader, desc="Step 0 Training Evaluation"):
 
+            # prep physics operators
             ktraj, dcomp, nufft_ob, adjnufft_ob = prep_nufft(N_samples, N_spokes, N_time)
             ktraj = ktraj.to(device)
             dcomp = dcomp.to(device)
@@ -376,40 +377,30 @@ if args.from_checkpoint == False and config['debugging']['calc_step_0'] == True:
 
             physics = MCNUFFT(nufft_ob, adjnufft_ob, ktraj, dcomp)
 
-            acceleration = torch.tensor([N_full / int(N_spokes)], dtype=torch.float, device=device)
+            # prepare inputs
+            measured_kspace = to_torch_complex(measured_kspace).squeeze()
+            measured_kspace = rearrange(measured_kspace, 't co sp sam -> co (sp sam) t')
 
-            # with autocast(config["training"]["device"]):
+            csmap = csmap.to(device).to(measured_kspace.dtype)
 
-            if model_type == "LSFPNet":
+            x_recon, adj_loss, lambda_L, lambda_S, lambda_spatial_L, lambda_spatial_S, gamma, lambda_step = model(
+                measured_kspace.to(device), physics, csmap, epoch="train0", norm=config['model']['norm']
+            )
 
-                measured_kspace = to_torch_complex(measured_kspace).squeeze()
-                measured_kspace = rearrange(measured_kspace, 't co sp sam -> co (sp sam) t')
-
-                csmap = csmap.to(device).to(measured_kspace.dtype)
-
-                x_recon, adj_loss, lambda_L, lambda_S, lambda_spatial_L, lambda_spatial_S, gamma, lambda_step = model(
-                    measured_kspace.to(device), physics, csmap, acceleration, epoch="train0", norm=config['model']['norm']
-                )
-
-                initial_train_adj_loss += adj_loss.item()
-
-            else:
-
-                x_recon = model(
-                    measured_kspace.to(device), physics, csmap
-                )  # model output shape: (B, C, T, H, W)
+            # calculate losses
+            initial_train_adj_loss += adj_loss.item()
 
             mc_loss = mc_loss_fn(measured_kspace.to(device), x_recon, physics, csmap)
             initial_train_mc_loss += mc_loss.item()
 
             if use_ei_loss:
-                # x_recon: reconstructed image
                 ei_loss, t_img = ei_loss_fn(
                     x_recon, physics, model, csmap
                 )
 
                 initial_train_ei_loss += ei_loss.item()
 
+        # record losses
         step0_train_mc_loss = initial_train_mc_loss / len(train_loader)
         train_mc_losses.append(step0_train_mc_loss)
 
@@ -430,47 +421,25 @@ if args.from_checkpoint == False and config['debugging']['calc_step_0'] == True:
 
         # Evaluate on validation data
         for measured_kspace, csmap, ground_truth, grasp_img, *_ in tqdm(val_dro_loader, desc="Step 0 Validation Evaluation"):
-        #for measured_kspace, csmap, grasp_img in tqdm(val_dro_loader, desc="Step 0 Validation Evaluation"):
 
-            # with autocast(config["training"]["device"]):
-            N_spokes = eval_ktraj.shape[1] / config['data']['samples']
-            # acceleration = round(N_full / int(N_spokes), 1)
+            # prepare inputs
+            measured_kspace = measured_kspace.to(device)
+            csmap = csmap.to(device)
 
-            acceleration = torch.tensor([N_full / int(N_spokes)], dtype=torch.float, device=device)
+            measured_kspace = measured_kspace.squeeze(0).to(device) # Remove batch dim
+            csmap = csmap.squeeze(0).to(device)   # Remove batch dim
 
-            if model_type == "LSFPNet":
+            x_recon, adj_loss, *_ = model(
+                measured_kspace.to(device), eval_physics, csmap, epoch="val0", norm=config['model']['norm']
+            )
 
-                measured_kspace = measured_kspace.to(device)
-                csmap = csmap.to(device)
-
-                measured_kspace = measured_kspace.squeeze(0).to(device) # Remove batch dim
-                csmap = csmap.squeeze(0).to(device)   # Remove batch dim
-
-
-                # measured_kspace = to_torch_complex(measured_kspace).squeeze()
-                # measured_kspace = rearrange(measured_kspace, 't co sp sam -> co (sp sam) t')
-
-                # csmap = csmap.to(device).to(measured_kspace.dtype)
-                # al_kspace_batch:  torch.Size([16, 23040, 22])                                                                             | 0/15 [00:00<?, ?it/s]
-                # x_temp:  torch.Size([1, 1, 16, 320, 320])
-                # measured_kspace:  torch.Size([16, 23040, 22])
-
-                x_recon, adj_loss, *_ = model(
-                    measured_kspace.to(device), eval_physics, csmap, acceleration, epoch="val0", norm=config['model']['norm']
-                )
-                initial_val_adj_loss += adj_loss.item()
+            # compute losses
+            initial_val_adj_loss += adj_loss.item()
             
-            else:
-
-                x_recon = model(
-                    measured_kspace.to(device), eval_physics, csmap
-                )  # model output shape: (B, C, T, H, W)
-
             mc_loss = mc_loss_fn(measured_kspace.to(device), x_recon, eval_physics, csmap)
             initial_val_mc_loss += mc_loss.item()
 
             if use_ei_loss:
-                # x_recon: reconstructed image
                 ei_loss, t_img = ei_loss_fn(
                     x_recon, eval_physics, model, csmap
                 )
@@ -480,7 +449,8 @@ if args.from_checkpoint == False and config['debugging']['calc_step_0'] == True:
             ground_truth = ground_truth.to(device) # Shape: (1, 2, T, H, W)
             grasp_recon = grasp_img.to(device) # Shape: (1, 2, H, T, W)
 
-            ssim_grasp, psnr_grasp, mse_grasp, dc_grasp = eval_grasp(measured_kspace, csmap, ground_truth, grasp_recon, eval_physics, device)
+            # calculate grasp metrics
+            ssim_grasp, psnr_grasp, mse_grasp, dc_grasp = eval_grasp(measured_kspace, csmap, ground_truth, grasp_recon, eval_physics, device, eval_dir)
             grasp_ssims.append(ssim_grasp)
             grasp_psnrs.append(psnr_grasp)
             grasp_mses.append(mse_grasp)
@@ -514,13 +484,14 @@ else:
         epoch_eval_mses = []
         epoch_eval_dcs = []
 
-        # turn on anomaly detection for debugging but slows down training
-        # with torch.autograd.set_detect_anomaly(False):
+
         train_loader_tqdm = tqdm(
             train_loader, desc=f"Epoch {epoch}/{epochs}  Training", unit="batch"
         )
+
         for measured_kspace, csmap, grasp_img, N_samples, N_spokes, N_time in train_loader_tqdm:  # measured_kspace shape: (B, C, I, S, T)
 
+            # prepare physics operators
             ktraj, dcomp, nufft_ob, adjnufft_ob = prep_nufft(N_samples, N_spokes, N_time)
             ktraj = ktraj.to(device)
             dcomp = dcomp.to(device)
@@ -529,37 +500,27 @@ else:
 
             physics = MCNUFFT(nufft_ob, adjnufft_ob, ktraj, dcomp)
 
-            # acceleration = round(N_full / int(N_spokes), 1)
 
-            acceleration = torch.tensor([N_full / int(N_spokes)], dtype=torch.float, device=device)
-
-            # with autocast(config["training"]["device"]):
-
-            iteration_count += 1
+            # iteration_count += 1
             optimizer.zero_grad()
 
-            if model_type == "LSFPNet":
+            # prepare inputs
+            measured_kspace = to_torch_complex(measured_kspace).squeeze()
+            measured_kspace = rearrange(measured_kspace, 't co sp sam -> co (sp sam) t')
 
-                measured_kspace = to_torch_complex(measured_kspace).squeeze()
-                measured_kspace = rearrange(measured_kspace, 't co sp sam -> co (sp sam) t')
+            csmap = csmap.to(device).to(measured_kspace.dtype)
 
-                csmap = csmap.to(device).to(measured_kspace.dtype)
+            x_recon, adj_loss, lambda_L, lambda_S, lambda_spatial_L, lambda_spatial_S, gamma, lambda_step = model(
+                measured_kspace.to(device), physics, csmap, epoch=f"train{epoch}", norm=config['model']['norm']
+            )
 
-                x_recon, adj_loss, lambda_L, lambda_S, lambda_spatial_L, lambda_spatial_S, gamma, lambda_step = model(
-                    measured_kspace.to(device), physics, csmap, acceleration, epoch=f"train{epoch}", norm=config['model']['norm']
-                )
-                running_adj_loss += adj_loss.item()
-
-            else:
-                x_recon = model(
-                    measured_kspace.to(device), physics, csmap
-                )  # model output shape: (B, C, T, H, W)
+            # compute losses
+            running_adj_loss += adj_loss.item()
 
             mc_loss = mc_loss_fn(measured_kspace.to(device), x_recon, physics, csmap)
             running_mc_loss += mc_loss.item()
 
             if use_ei_loss:
-                # x_recon: reconstructed image
                 ei_loss, t_img = ei_loss_fn(
                     x_recon, physics, model, csmap
                 )
@@ -571,18 +532,14 @@ else:
                     target_weight=target_weight
                 )
 
-                # print(f"Epoch {epoch:2d}: EI Weight = {ei_loss_weight:.8f}")
-                
                 running_ei_loss += ei_loss.item()
                 total_loss = mc_loss * mc_loss_weight + ei_loss * ei_loss_weight + torch.mul(adj_loss_weight, adj_loss)
-                # total_loss = ei_loss * ei_loss_weight + torch.mul(adj_loss_weight, adj_loss)
                 train_loader_tqdm.set_postfix(
                     mc_loss=mc_loss.item(), ei_loss=ei_loss.item()
                 )
 
             else:
                 total_loss = mc_loss * mc_loss_weight + torch.mul(adj_loss_weight, adj_loss)
-                # total_loss = torch.mul(adj_loss_weight, adj_loss)
                 train_loader_tqdm.set_postfix(mc_loss=mc_loss.item())
 
             if torch.isnan(total_loss):
@@ -591,7 +548,7 @@ else:
                 )
                 raise RuntimeError("total_loss is NaN")
 
-            # scaler.scale(total_loss).backward()
+
             total_loss.backward()
 
 
@@ -608,13 +565,11 @@ else:
 
             torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
             optimizer.step()
-            # scaler.step(optimizer)
-            # scaler.update()
+
 
         # NOTE: commented out plotting until figured out how to handle variable numbers of timeframes
         # if epoch % save_interval == 0:
 
-        #     # grasp_img = torch.rot90(grasp_img, dims=[-2, -1])
         #     plot_reconstruction_sample(
         #         x_recon,
         #         f"Training Sample - Epoch {epoch}",
@@ -635,14 +590,12 @@ else:
 
         #     if use_ei_loss:
 
-        #         x_recon_flip = torch.flip(x_recon, dims=[2])
-
         #         plot_reconstruction_sample(
         #             t_img,
         #             f"Transformed Train Sample - Epoch {epoch}",
         #             f"transforms/transform_train_sample_epoch_{epoch}",
         #             output_dir,
-        #             x_recon_flip,
+        #             x_recon,
         #             transform=True
         #         )
 
@@ -658,15 +611,12 @@ else:
             # Append 0 if EI loss is not used to keep lists aligned
             train_ei_losses.append(0.0)
             weighted_train_ei_losses.append(0.0)
-        if model_type == "LSFPNet":
-            epoch_train_adj_loss = running_adj_loss / len(train_loader)
-            train_adj_losses.append(epoch_train_adj_loss)
-            weighted_train_adj_losses.append(epoch_train_adj_loss*adj_loss_weight)
-        else:
-            train_adj_losses.append(0.0)
-            weighted_train_adj_losses.append(0.0)
 
-        
+        epoch_train_adj_loss = running_adj_loss / len(train_loader)
+        train_adj_losses.append(epoch_train_adj_loss)
+        weighted_train_adj_losses.append(epoch_train_adj_loss*adj_loss_weight)
+
+
         lambda_Ls.append(lambda_L.item())
         lambda_Ss.append(lambda_S.item())
         lambda_spatial_Ls.append(lambda_spatial_L.item())
@@ -688,38 +638,21 @@ else:
         )
         with torch.no_grad():
             for val_kspace_batch, val_csmap, val_ground_truth, val_grasp_img, val_mask in tqdm(val_dro_loader):
-            # for val_kspace_batch, val_csmap, val_grasp_img in val_loader_tqdm:
 
-                # with autocast(config["training"]["device"]):
-                N_spokes = eval_ktraj.shape[1] / config['data']['samples']
-                # acceleration = round(N_full / int(N_spokes), 1)
-                acceleration = torch.tensor([N_full / int(N_spokes)], dtype=torch.float, device=device)
+                # prepare inputs
+                val_kspace_batch = val_kspace_batch.squeeze(0).to(device) # Remove batch dim
+                val_csmap = val_csmap.squeeze(0).to(device)   # Remove batch dim
+                val_ground_truth = val_ground_truth.to(device) # Shape: (1, 2, T, H, W)
 
-                if model_type == "LSFPNet":
+                val_grasp_img_tensor = val_grasp_img.to(device)
 
-                    val_kspace_batch = val_kspace_batch.squeeze(0).to(device) # Remove batch dim
-                    val_csmap = val_csmap.squeeze(0).to(device)   # Remove batch dim
-                    val_ground_truth = val_ground_truth.to(device) # Shape: (1, 2, T, H, W)
+                val_x_recon, val_adj_loss, *_ = model(
+                    val_kspace_batch.to(device), eval_physics, val_csmap, epoch=f"val{epoch}", norm=config['model']['norm']
+                )
 
-                    val_grasp_img = torch.flip(val_grasp_img, dims=[-3])
-                    val_grasp_img = torch.rot90(val_grasp_img, k=3, dims=[-3,-1])
-                    val_grasp_img_tensor = val_grasp_img.to(device)
+                # compute losses
+                val_running_adj_loss += val_adj_loss.item()
 
-                    # val_kspace_batch = to_torch_complex(val_kspace_batch).squeeze()
-                    # val_kspace_batch = rearrange(val_kspace_batch, 't co sp sam -> co (sp sam) t')
-
-                    # val_csmap = val_csmap.to(device).to(val_kspace_batch.dtype)
-
-                    val_x_recon, val_adj_loss, *_ = model(
-                        val_kspace_batch.to(device), eval_physics, val_csmap, acceleration, epoch=f"val{epoch}", norm=config['model']['norm']
-                    )
-                    val_running_adj_loss += val_adj_loss.item()
-
-                else:
-                    # The model takes the raw k-space and physics operator
-                    val_x_recon = model(val_kspace_batch.to(device), eval_physics, val_csmap)
-
-                # For MCLoss, compare the physics model's output with the measured k-space.
                 val_mc_loss = mc_loss_fn(val_kspace_batch.to(device), val_x_recon, eval_physics, val_csmap)
                 val_running_mc_loss += val_mc_loss.item()
 
@@ -757,11 +690,9 @@ else:
         
         # save a sample from the last validation batch of the epoch
         if epoch % save_interval == 0:
-
-            val_x_recon_rot = torch.rot90(val_x_recon, k=2, dims=[-3,-2])
             
             plot_reconstruction_sample(
-                val_x_recon_rot,
+                val_x_recon,
                 f"Validation Sample - Epoch {epoch}",
                 f"val_sample_epoch_{epoch}",
                 output_dir,
@@ -777,6 +708,7 @@ else:
             plot_enhancement_curve(
                 val_grasp_img,
                 output_filename = os.path.join(output_dir, 'enhancement_curves', f'val_grasp_sample_enhancement_curve_epoch_{epoch}.png'))
+
 
             if use_ei_loss:
                 plot_reconstruction_sample(
@@ -808,28 +740,6 @@ else:
 
         # --- Plotting and Logging ---
         if epoch % save_interval == 0:
-
-            # =====================================================================
-            # --- EVALUATION ON SIMULATED DATASET ---
-            # =====================================================================
-            # if config['evaluation']['num_samples'] > 0:
-
-            # with torch.no_grad():
-            #     physics_objects = {
-            #         'physics': eval_physics,
-            #         'dcomp': eval_dcomp if model_type == "LSFPNet" else None,
-            #     }
-
-            #     # if epoch != epochs:
-            #     #     eval_ssim, eval_psnr, eval_mse, eval_dc = eval_model(val_dro_dataset, model, device, config, eval_dir, physics_objects, epoch)
-            #     # else:
-            #     eval_ssim, eval_psnr, eval_mse, eval_dc = eval_model(val_dro_dataset, model, device, config, eval_dir, physics_objects, epoch)#, temporal_eval=True)
-
-            #     eval_ssims.append(eval_ssim)
-            #     eval_psnrs.append(eval_psnr)
-            #     eval_mses.append(eval_mse)
-            #     eval_dcs.append(eval_dc)
-
 
             # Save the model checkpoint
             train_curves = dict(
@@ -919,100 +829,98 @@ else:
                 plt.savefig(os.path.join(output_dir, "val_ei_losses.png"))
                 plt.close()
 
-            if model_type == "LSFPNet":
-                plt.figure()
-                plt.plot(train_adj_losses, label="Training Adjoint Loss")
-                plt.plot(val_adj_losses, label="Validation Adjoint Loss")
-                plt.xlabel("Epoch")
-                plt.ylabel("Adjoint Loss")
-                plt.title("CNN Adjoint Loss")
-                plt.legend()
-                plt.grid(True)
-                plt.savefig(os.path.join(output_dir, "adj_losses.png"))
-                plt.close()
 
-                plt.figure()
-                plt.plot(train_adj_losses)
-                plt.xlabel("Epoch")
-                plt.ylabel("Adjoint Loss")
-                plt.title("Training CNN Adjoint Loss")
-                plt.legend()
-                plt.grid(True)
-                plt.savefig(os.path.join(output_dir, "train_adj_losses.png"))
-                plt.close()
+            plt.figure()
+            plt.plot(train_adj_losses, label="Training Adjoint Loss")
+            plt.plot(val_adj_losses, label="Validation Adjoint Loss")
+            plt.xlabel("Epoch")
+            plt.ylabel("Adjoint Loss")
+            plt.title("CNN Adjoint Loss")
+            plt.legend()
+            plt.grid(True)
+            plt.savefig(os.path.join(output_dir, "adj_losses.png"))
+            plt.close()
 
-                plt.figure()
-                plt.plot(val_adj_losses)
-                plt.xlabel("Epoch")
-                plt.ylabel("Adjoint Loss")
-                plt.title("Validation CNN Adjoint Loss")
-                plt.legend()
-                plt.grid(True)
-                plt.savefig(os.path.join(output_dir, "val_adj_losses.png"))
-                plt.close()
+            plt.figure()
+            plt.plot(train_adj_losses)
+            plt.xlabel("Epoch")
+            plt.ylabel("Adjoint Loss")
+            plt.title("Training CNN Adjoint Loss")
+            plt.legend()
+            plt.grid(True)
+            plt.savefig(os.path.join(output_dir, "train_adj_losses.png"))
+            plt.close()
 
-
-                plt.figure()
-                plt.plot(lambda_Ls)
-                plt.xlabel("Epoch")
-                plt.ylabel("Lambda_L Value")
-                plt.title("Lambda_L During Training")
-                plt.legend()
-                plt.grid(True)
-                plt.savefig(os.path.join(output_dir, "lambda_L.png"))
-                plt.close()
-
-                plt.figure()
-                plt.plot(lambda_Ss)
-                plt.xlabel("Epoch")
-                plt.ylabel("Lambda_S Value")
-                plt.title("Lambda_S During Training")
-                plt.legend()
-                plt.grid(True)
-                plt.savefig(os.path.join(output_dir, "lambda_S.png"))
-                plt.close()
-
-                plt.figure()
-                plt.plot(lambda_spatial_Ls)
-                plt.xlabel("Epoch")
-                plt.ylabel("Lambda_spatial_L Value")
-                plt.title("Lambda_spatial_L During Training")
-                plt.legend()
-                plt.grid(True)
-                plt.savefig(os.path.join(output_dir, "lambda_spatial_L.png"))
-                plt.close()
-
-                plt.figure()
-                plt.plot(lambda_spatial_Ss)
-                plt.xlabel("Epoch")
-                plt.ylabel("Lambda_spatial_S Value")
-                plt.title("Lambda_spatial_S During Training")
-                plt.legend()
-                plt.grid(True)
-                plt.savefig(os.path.join(output_dir, "lambda_spatial_S.png"))
-                plt.close()
-
-                plt.figure()
-                plt.plot(gammas)
-                plt.xlabel("Epoch")
-                plt.ylabel("Gamma Value")
-                plt.title("Step Size During Training")
-                plt.legend()
-                plt.grid(True)
-                plt.savefig(os.path.join(output_dir, "gamma.png"))
-                plt.close()
-
-                plt.figure()
-                plt.plot(lambda_steps)
-                plt.xlabel("Epoch")
-                plt.ylabel("Lambda_step Value")
-                plt.title("Lambda_step During Training")
-                plt.legend()
-                plt.grid(True)
-                plt.savefig(os.path.join(output_dir, "lambda_step.png"))
-                plt.close()
+            plt.figure()
+            plt.plot(val_adj_losses)
+            plt.xlabel("Epoch")
+            plt.ylabel("Adjoint Loss")
+            plt.title("Validation CNN Adjoint Loss")
+            plt.legend()
+            plt.grid(True)
+            plt.savefig(os.path.join(output_dir, "val_adj_losses.png"))
+            plt.close()
 
 
+            plt.figure()
+            plt.plot(lambda_Ls)
+            plt.xlabel("Epoch")
+            plt.ylabel("Lambda_L Value")
+            plt.title("Lambda_L During Training")
+            plt.legend()
+            plt.grid(True)
+            plt.savefig(os.path.join(output_dir, "lambda_L.png"))
+            plt.close()
+
+            plt.figure()
+            plt.plot(lambda_Ss)
+            plt.xlabel("Epoch")
+            plt.ylabel("Lambda_S Value")
+            plt.title("Lambda_S During Training")
+            plt.legend()
+            plt.grid(True)
+            plt.savefig(os.path.join(output_dir, "lambda_S.png"))
+            plt.close()
+
+            plt.figure()
+            plt.plot(lambda_spatial_Ls)
+            plt.xlabel("Epoch")
+            plt.ylabel("Lambda_spatial_L Value")
+            plt.title("Lambda_spatial_L During Training")
+            plt.legend()
+            plt.grid(True)
+            plt.savefig(os.path.join(output_dir, "lambda_spatial_L.png"))
+            plt.close()
+
+            plt.figure()
+            plt.plot(lambda_spatial_Ss)
+            plt.xlabel("Epoch")
+            plt.ylabel("Lambda_spatial_S Value")
+            plt.title("Lambda_spatial_S During Training")
+            plt.legend()
+            plt.grid(True)
+            plt.savefig(os.path.join(output_dir, "lambda_spatial_S.png"))
+            plt.close()
+
+            plt.figure()
+            plt.plot(gammas)
+            plt.xlabel("Epoch")
+            plt.ylabel("Gamma Value")
+            plt.title("Step Size During Training")
+            plt.legend()
+            plt.grid(True)
+            plt.savefig(os.path.join(output_dir, "gamma.png"))
+            plt.close()
+
+            plt.figure()
+            plt.plot(lambda_steps)
+            plt.xlabel("Epoch")
+            plt.ylabel("Lambda_step Value")
+            plt.title("Lambda_step During Training")
+            plt.legend()
+            plt.grid(True)
+            plt.savefig(os.path.join(output_dir, "lambda_step.png"))
+            plt.close()
 
 
             # Plot Weighted Losses
@@ -1198,24 +1106,9 @@ eval_spf_loader = DataLoader(
     num_workers=config["dataloader"]["num_workers"],
 )
 
-# stress_test_path = os.path.join(os.path.dirname(config["evaluation"]["simulated_dataset_path"]), 'undersampled_sim_8spf')
 
 
-# stress_test_dataset = SimulatedSPFDataset(
-#     root_dir=stress_test_path, 
-#     model_type=model_type, 
-#     patient_ids=val_dro_patient_ids,
-#     )
 
-# stress_test_loader = DataLoader(
-#     stress_test_dataset,
-#     batch_size=config["dataloader"]["batch_size"],
-#     shuffle=config["dataloader"]["shuffle"],
-#     num_workers=config["dataloader"]["num_workers"],
-# )
-
-
-# First, run the fair comparisons
 with torch.no_grad():
 
     spf_recon_ssim = {}
@@ -1254,15 +1147,7 @@ with torch.no_grad():
 
             csmap = csmap.squeeze(0).to(device)   # Remove batch dim
             ground_truth = ground_truth.to(device) # Shape: (1, 2, T, H, W)
-
             grasp_img = grasp_img.to(device)
-            grasp_img_plot = torch.flip(grasp_img, dims=[-3])
-            grasp_img_plot = torch.rot90(grasp_img_plot, k=3, dims=[-3,-1])
-
-
-            # acceleration = round(N_full / int(spokes), 1)
-            acceleration = torch.tensor([N_full / int(spokes)], dtype=torch.float, device=device)
-
 
 
             # SIMULATE KSPACE
@@ -1273,10 +1158,8 @@ with torch.no_grad():
 
             kspace = sim_kspace.squeeze(0).to(device) # Remove batch dim
             
-
-
             x_recon, *_ = model(
-                kspace.to(device), physics, csmap, acceleration, epoch=None, norm=config['model']['norm']
+                kspace.to(device), physics, csmap, epoch=None, norm=config['model']['norm']
             )
 
             ground_truth = torch.stack([ground_truth.real, ground_truth.imag], dim=1)
@@ -1284,14 +1167,14 @@ with torch.no_grad():
 
 
             ## Evaluation
-            ssim, psnr, mse, dc = eval_sample(kspace, csmap, ground_truth, x_recon, physics, mask, grasp_img_plot, eval_dir, f"{spokes}spf", device)
+            ssim, psnr, mse, dc = eval_sample(kspace, csmap, ground_truth, x_recon, physics, mask, grasp_img, eval_dir, f"{spokes}spf", device)
             stress_test_ssims.append(ssim)
             stress_test_psnrs.append(psnr)
             stress_test_mses.append(mse)
             stress_test_dcs.append(dc)
 
 
-            ssim_grasp, psnr_grasp, mse_grasp, dc_grasp = eval_grasp(kspace, csmap, ground_truth, grasp_img, physics, device)
+            ssim_grasp, psnr_grasp, mse_grasp, dc_grasp = eval_grasp(kspace, csmap, ground_truth, grasp_img, physics, device, eval_dir)
             stress_test_grasp_ssims.append(ssim_grasp)
             stress_test_grasp_psnrs.append(psnr_grasp)
             stress_test_grasp_mses.append(mse_grasp)
@@ -1358,10 +1241,6 @@ with torch.no_grad():
             ground_truth = ground_truth.to(device) # Shape: (1, 2, T, H, W)
 
             grasp_img = grasp_img.to(device)
-            grasp_img_plot = torch.flip(grasp_img, dims=[-3])
-            grasp_img_plot = torch.rot90(grasp_img_plot, k=3, dims=[-3,-1])
-
-            acceleration = torch.tensor([N_full / int(spokes)], dtype=torch.float, device=device)
 
             # SIMULATE KSPACE
             ktraj, dcomp, nufft_ob, adjnufft_ob = prep_nufft(640, spokes, num_frames)
@@ -1372,9 +1251,8 @@ with torch.no_grad():
             kspace = sim_kspace.squeeze(0).to(device) # Remove batch dim
             
 
-
             x_recon, *_ = model(
-                kspace.to(device), physics, csmap, acceleration, epoch=None, norm=config['model']['norm']
+                kspace.to(device), physics, csmap, epoch=None, norm=config['model']['norm']
             )
 
             ground_truth = torch.stack([ground_truth.real, ground_truth.imag], dim=1)
@@ -1382,14 +1260,14 @@ with torch.no_grad():
 
 
             ## Evaluation
-            ssim, psnr, mse, dc = eval_sample(kspace, csmap, ground_truth, x_recon, physics, mask, grasp_img_plot, eval_dir, f'{spokes}spf', device)
+            ssim, psnr, mse, dc = eval_sample(kspace, csmap, ground_truth, x_recon, physics, mask, grasp_img, eval_dir, f'{spokes}spf', device)
             spf_eval_ssims.append(ssim)
             spf_eval_psnrs.append(psnr)
             spf_eval_mses.append(mse)
             spf_eval_dcs.append(dc)
 
 
-            ssim_grasp, psnr_grasp, mse_grasp, dc_grasp = eval_grasp(kspace, csmap, ground_truth, grasp_img, physics, device)
+            ssim_grasp, psnr_grasp, mse_grasp, dc_grasp = eval_grasp(kspace, csmap, ground_truth, grasp_img, physics, device, eval_dir)
             spf_grasp_ssims.append(ssim_grasp)
             spf_grasp_psnrs.append(psnr_grasp)
             spf_grasp_mses.append(mse_grasp)
@@ -1428,106 +1306,7 @@ with torch.no_grad():
     
 
     
-
-
-
-
-
-
-# # Then, run the stress test to highlight DL model's advantage
-# print("\n--- Running Stress Test (Budget: 176 spokes) ---")
-# for eval_config in STRESS_TEST_PLAN:
-
-#     spokes = eval_config["spokes_per_frame"]
-#     time_slice = eval_config["slice"]
-#     num_frames = eval_config["num_frames"]
-
-#     print(f"  Testing {spokes} spokes/frame with {num_frames} frames.")
-
-#     stress_test_ssims = []
-#     stress_test_psnrs = []
-#     stress_test_mses = []
-#     stress_test_dcs = []
-#     stress_test_grasp_ssims = []
-#     stress_test_grasp_psnrs = []
-#     stress_test_grasp_mses = []
-#     stress_test_grasp_dcs = []
-
-#     eval_spf_dataset.spokes_per_frame = spokes
-#     eval_spf_dataset.window = time_slice
-#     eval_spf_dataset.num_frames = num_frames
-
-
-#     for kspace, csmap, ground_truth, grasp_img, mask, physics in tqdm(val_dro_loader, desc="Stress Test Evaluation"):
-
-
-#         kspace = kspace.squeeze(0).to(device) # Remove batch dim
-#         csmap = csmap.squeeze(0).to(device)   # Remove batch dim
-#         ground_truth = ground_truth.to(device) # Shape: (1, 2, T, H, W)
-
-#         grasp_img = grasp_img.to(device)
-#         grasp_img_plot = torch.flip(grasp_img, dims=[-3])
-#         grasp_img_plot = torch.rot90(grasp_img_plot, k=3, dims=[-3,-1])
-        
-
-#         print("performing inference...")
-#         x_recon, _ = model(
-#             kspace.to(device), physics, csmap, norm=config['model']['norm']
-#         )
-
-
-#         print("calculating evaluation metrics...")
-
-#         ## Evaluation
-#         ssim, psnr, mse, dc = eval_sample(kspace, csmap, ground_truth, x_recon, physics, mask, grasp_img_plot, eval_dir, epoch, device)
-#         stress_test_ssims.append(ssim)
-#         stress_test_psnrs.append(psnr)
-#         stress_test_mses.append(mse)
-#         stress_test_dcs.append(dc)
-
-
-#         ssim_grasp, psnr_grasp, mse_grasp, dc_grasp = eval_grasp(kspace, csmap, ground_truth, grasp_img, physics, device)
-#         stress_test_grasp_ssims.append(ssim_grasp)
-#         stress_test_grasp_psnrs.append(psnr_grasp)
-#         stress_test_grasp_mses.append(mse_grasp)
-#         stress_test_grasp_dcs.append(dc_grasp)
-
-
-#         spf_recon_ssim[spokes] = np.mean(stress_test_ssims)
-#         spf_recon_psnr[spokes] = np.mean(stress_test_psnrs)
-#         spf_recon_mse[spokes] = np.mean(stress_test_mses)
-#         spf_recon_dc[spokes] = np.mean(stress_test_dcs)
-
-#         spf_grasp_ssim[spokes] = np.mean(stress_test_grasp_ssims)
-#         spf_grasp_psnr[spokes] = np.mean(stress_test_grasp_psnrs)
-#         spf_grasp_mse[spokes] = np.mean(stress_test_grasp_mses)
-#         spf_grasp_dc[spokes] = np.mean(stress_test_grasp_dcs)
-
-
-
-#     # Save Results
-#     spf_metrics_path = os.path.join(eval_dir, "eval_metrics.csv")
-#     with open(spf_metrics_path, 'a', newline='') as csvfile:
-#         writer = csv.writer(csvfile)
-#         writer.writerow(['Recon', 'Spokes Per Frame', 'SSIM', 'PSNR', 'MSE', 'DC'])
-
-#         writer.writerow(['DL', spokes, 
-#         f'{np.mean(stress_test_ssims):.4f} ± {np.std(stress_test_ssims):.4f}', 
-#         f'{np.mean(stress_test_psnrs):.4f} ± {np.std(stress_test_psnrs):.4f}', 
-#         f'{np.mean(stress_test_mses):.4f} ± {np.std(stress_test_mses):.4f}', 
-#         f'{np.mean(stress_test_dcs):.4f} ± {np.std(stress_test_dcs):.4f}'])
-
-#         writer.writerow(['GRASP', spokes, 
-#         f'{np.mean(stress_test_grasp_ssims):.4f} ± {np.std(stress_test_grasp_ssims):.4f}', 
-#         f'{np.mean(stress_test_grasp_psnrs):.4f} ± {np.std(stress_test_grasp_psnrs):.4f}', 
-#         f'{np.mean(stress_test_grasp_mses):.4f} ± {np.std(stress_test_grasp_mses):.4f}', 
-#         f'{np.mean(stress_test_grasp_dcs):.4f} ± {np.std(stress_test_grasp_dcs):.4f}'])
-
-
-
 # Plot Metrics vs Spokes Per Frame
-
-
 plt.figure()
 plt.plot(list(spf_recon_ssim.keys()), list(spf_recon_ssim.values()), label="DL Recon", marker='o')
 plt.plot(list(spf_grasp_ssim.keys()), list(spf_grasp_ssim.values()), label="GRASP Recon", marker='o')

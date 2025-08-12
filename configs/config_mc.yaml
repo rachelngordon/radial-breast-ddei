@@ -37,6 +37,7 @@ model:
   lambda_spatial_S: 0.05
   gamma: 0.5
   lambda_step: 0.1
+  encode_acceleration: false
   optimizer:
     name: "Adam"
     lr: 0.0005
@@ -46,17 +47,17 @@ model:
     eps: 0.000000001
   losses:
     adj_loss:
-      weight: 0.001
+      weight: 50000
     use_ei_loss: false
     mc_loss:
-      weight: 10
-      metric: "MSE"
+      weight: 1
+      metric: "MAE"
     ei_loss:
       temporal_transform: "none"
       spatial_transform: "rotate"
       weight: 0
       warmup: 3
-      duration: 5
+      duration: 30
       subsample_ratio_min: 0.7
       subsample_ratio_max: 0.95
       warp_ratio_min: 0.6
@@ -66,7 +67,7 @@ model:
 
 # Training settings
 training:
-  epochs: 10
+  epochs: 30
   save_interval: 1
   plot_interval: 20
   device: "cuda"  # or "cpu"

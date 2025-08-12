@@ -62,7 +62,7 @@ class EILoss(Loss):
         self.no_grad = no_grad
         self.model_type = model_type
 
-    def forward(self, x_net, physics, model, csmap, **kwargs):
+    def forward(self, x_net, physics, model, csmap, acceleration, **kwargs):
         r"""
         Computes the EI loss
 
@@ -77,26 +77,30 @@ class EILoss(Loss):
             # One avoids unnecessary computations and makes the code more efficient
             # while the other ensures that x2 is marked as a leaf in the computational graph.
             with torch.no_grad():
-                x2 = self.T(x_net)
+                x_net_rearranged = rearrange(x_net, 'b c h w t -> b c t h w')
+                x2_rearranged = self.T(x_net_rearranged)
+                x2 = rearrange(x2_rearranged, 'b c t h w -> b c h w t')
                 x2 = x2.detach()
         else:
-            x2 = self.T(x_net)
+            x_net_rearranged = rearrange(x_net, 'b c h w t -> b c t h w')
+            x2_rearranged = self.T(x_net_rearranged)
+            x2 = rearrange(x2_rearranged, 'b c t h w -> b c h w t')
 
-        if self.model_type == "CRNN":
-            if self.noise:
-                # NOTE: need to pass csmap for multi coil imp
-                y = physics(x2, csmap)
-            else:
-                y = physics.A(x2, csmap)
+        # if self.model_type == "CRNN":
+        #     if self.noise:
+        #         # NOTE: need to pass csmap for multi coil imp
+        #         y = physics(x2, csmap)
+        #     else:
+        #         y = physics.A(x2, csmap)
 
-            x3 = model(y, physics, csmap)
+        #     x3 = model(y, physics, csmap)
 
-        elif self.model_type == "LSFPNet":
+        # elif self.model_type == "LSFPNet":
 
-            x2_complex = to_torch_complex(x2)
-            y = physics(inv=False, data=x2_complex, smaps=csmap).to(csmap.device)
-        
-            x3, *_ = model(y, physics, csmap, epoch=None)
+        x2_complex = to_torch_complex(x2)
+        y = physics(inv=False, data=x2_complex, smaps=csmap).to(csmap.device)
+    
+        x3, *_ = model(y, physics, csmap, acceleration, epoch=None)
 
         loss_ei = self.weight * self.metric(x3, x2)
         return loss_ei, x2

@@ -67,14 +67,6 @@ class BasicBlock(nn.Module):
         self.style_injector_S = nn.Linear(self.style_dim, self.channels * 2)
 
 
-        # self.lambda_L = nn.Parameter(torch.tensor([0.0025]))
-        # self.lambda_S = nn.Parameter(torch.tensor([0.05]))
-        # self.lambda_spatial_L = nn.Parameter(torch.tensor([5e-2]))
-        # self.lambda_spatial_S = nn.Parameter(torch.tensor([5e-2]))
-
-        # self.gamma = nn.Parameter(torch.tensor([0.5]))
-        # self.lambda_step = nn.Parameter(torch.tensor([1/10]))
-
         self.conv1_forward_l = nn.Parameter(init.xavier_normal_(torch.Tensor(self.channels, 1, 3, 3, 3)))
         self.conv2_forward_l = nn.Parameter(init.xavier_normal_(torch.Tensor(self.channels, self.channels, 3, 3, 3)))
         self.conv3_forward_l = nn.Parameter(init.xavier_normal_(torch.Tensor(self.channels, self.channels, 3, 3, 3)))
@@ -91,7 +83,7 @@ class BasicBlock(nn.Module):
         self.conv2_backward_s = nn.Parameter(init.xavier_normal_(torch.Tensor(self.channels, self.channels, 3, 3, 3)))
         self.conv3_backward_s = nn.Parameter(init.xavier_normal_(torch.Tensor(1, self.channels, 3, 3, 3)))
 
-    def forward(self, M0, param_E, param_d, L, S, pt_L, pt_S, p_L, p_S, csmaps, style_embedding):
+    def forward(self, M0, param_E, param_d, L, S, pt_L, pt_S, p_L, p_S, csmaps, style_embedding=None):
 
         c = self.lambda_step / self.gamma
         nx, ny, nt = M0.size()
@@ -120,28 +112,11 @@ class BasicBlock(nn.Module):
         # --- START OF THE ROBUST COMPLEX SVD FIX ---
 
         svd_input_complex = c * y_L + pt_L
-        # print(f"Shape of svd_input_complex before processing: {svd_input_complex.shape}")
 
-        # n_frames = svd_input_complex.shape[-1]
-
-        # svd_input_complex = svd_input_complex.view(-1, n_frames, n_frames)
-        
         # 1. Store the original magnitude and phase of the complex matrix.
         #    Add a small epsilon to the magnitude to prevent division by zero when calculating phase.
         svd_input_mag = svd_input_complex.abs() + 1e-8
         original_phase = svd_input_complex / svd_input_mag
-
-        # print(f"Shape of svd_input_mag before regularization: {svd_input_mag.shape}")
-
-        # epsilon = 1e-6
-        # stable_input = svd_input_mag + epsilon * torch.eye(svd_input_mag.shape[-1], device=svd_input_mag.device)
-
-        # print(f"Shape of stable_input after regularization: {stable_input.shape}")
-
-        # noise_std = 1e-5 # A small standard deviation for the noise
-        # noise = torch.randn_like(svd_input_mag) * noise_std
-
-        epsilon = 1e-7  # A small constant. Tune if necessary.
 
         noise_std = 1e-5 # A small standard deviation for the noise
         noise = torch.randn_like(svd_input_mag) * noise_std
@@ -167,52 +142,6 @@ class BasicBlock(nn.Module):
         pt_L = pt_L_mag * original_phase
 
 
-        # --- HOOK IMPLEMENTATION START ---
-
-        # We define the hook function inside the forward pass so it has access to local variables if needed
-        # def svd_grad_hook(grad):
-        #     """
-        #     This function will be called when the gradient for `pt_L` is computed.
-        #     `grad` is the gradient tensor itself.
-        #     """
-        #     # Check if the gradient is valid
-        #     if grad is not None:
-        #         # We use .detach() to avoid modifying the computation graph during inspection
-        #         grad_norm = grad.detach().norm(2).item()
-        #         print(f"--- SVD GRADIENT HOOK ---")
-        #         print(f"  Gradient norm of pt_L output: {grad_norm:.6e}")
-        #         if grad_norm < 1e-7:
-        #             print(f"  !!! WARNING: Gradient from SVD block is vanishing!")
-        #         print(f"-------------------------")
-        #     else:
-        #         print("--- SVD GRADIENT HOOK: Gradient is None ---")
-
-        # # Register the hook on the `pt_L` tensor. 
-        # # It will be called automatically during the backward pass.
-        # # We only want to do this during training.
-        # if self.training:
-        #     pt_L.register_hook(svd_grad_hook)
-
-        # --- HOOK IMPLEMENTATION END ---
-
-
-        # --- END OF THE ROBUST COMPLEX SVD FIX ---
-
-        # svd_input = c * y_L + pt_L
-        
-        # # Add a very small amount of random noise to the input matrix.
-        # # This is a standard technique to break ties in singular values and
-        # # prevent the gradient calculation from becoming ill-defined.
-        # noise_std = 1e-5 # A small standard deviation for the noise
-        # noise = torch.randn_like(svd_input) * noise_std
-        
-        # # Perform SVD on the slightly perturbed matrix
-        # Ut, St, Vt = torch.svd(svd_input + noise)
-
-        # Ut, St, Vt = torch.linalg.svd((c * y_L + pt_L), full_matrices=False)
-        # temp_St = torch.diag(Project_inf(St, self.lambda_L))
-        # pt_L = Ut.mm(temp_St).mm(Vt)
-
         # update p_L
         temp_y_L_input = torch.cat((torch.real(y_L), torch.imag(y_L)), 0).to(torch.float32)
         temp_y_L_input = torch.reshape(temp_y_L_input, [2, nx, ny, nt]).unsqueeze(1)
@@ -220,21 +149,25 @@ class BasicBlock(nn.Module):
         temp_y_L = F.relu(temp_y_L)
         temp_y_L = F.conv3d(temp_y_L, self.conv2_forward_l, padding=1)
 
-        # Inject style here
-        style_params_L = self.style_injector_L(style_embedding)
-        # Assuming style_embedding is [1, style_dim], params will be [1, channels * 2]
-        scale_L, bias_L = style_params_L.chunk(2, dim=-1) # Split into [1, channels] each
+        if style_embedding is not None:
+            print("encoding acceleration...")
+            # Inject style here
+            style_params_L = self.style_injector_L(style_embedding)
+            # Assuming style_embedding is [1, style_dim], params will be [1, channels * 2]
+            scale_L, bias_L = style_params_L.chunk(2, dim=-1) # Split into [1, channels] each
 
-        # Reshape for broadcasting over the feature map: [2, channels, nx, ny, nt]
-        # We apply the same style to real and imaginary parts.
-        scale_L = scale_L.view(1, self.channels, 1, 1, 1)
-        bias_L = bias_L.view(1, self.channels, 1, 1, 1)
+            # Reshape for broadcasting over the feature map: [2, channels, nx, ny, nt]
+            # We apply the same style to real and imaginary parts.
+            scale_L = scale_L.view(1, self.channels, 1, 1, 1)
+            bias_L = bias_L.view(1, self.channels, 1, 1, 1)
 
-        # Modulate and then apply ReLU. Add 1 to scale to initialize near identity.
-        temp_y_L = F.relu(temp_y_L * (scale_L + 1) + bias_L)
+            # Modulate and then apply ReLU. Add 1 to scale to initialize near identity.
+            temp_y_L = F.relu(temp_y_L * (scale_L + 1) + bias_L)
+        else: 
+            temp_y_L = F.relu(temp_y_L)
         
-        temp_y_L_output = F.conv3d(temp_y_L, self.conv3_forward_l, padding=1)
 
+        temp_y_L_output = F.conv3d(temp_y_L, self.conv3_forward_l, padding=1)
 
         temp_y_L = temp_y_L_output + p_L
         temp_y_L = temp_y_L[0, :, :, :, :] + 1j * temp_y_L[1, :, :, :, :]
@@ -281,14 +214,19 @@ class BasicBlock(nn.Module):
         temp_y_S = F.relu(temp_y_S)
         temp_y_S = F.conv3d(temp_y_S, self.conv2_forward_s, padding=1)
 
-        # Inject style here
-        style_params_S = self.style_injector_S(style_embedding)
-        scale_S, bias_S = style_params_S.chunk(2, dim=-1)
-        scale_S = scale_S.view(1, self.channels, 1, 1, 1)
-        bias_S = bias_S.view(1, self.channels, 1, 1, 1)
+        if style_embedding is not None:
+            print("encoding acceleration...")
+            # Inject style here
+            style_params_S = self.style_injector_S(style_embedding)
+            scale_S, bias_S = style_params_S.chunk(2, dim=-1)
+            scale_S = scale_S.view(1, self.channels, 1, 1, 1)
+            bias_S = bias_S.view(1, self.channels, 1, 1, 1)
+
+            temp_y_S = F.relu(temp_y_S * (scale_S + 1) + bias_S)
+        else:
+            temp_y_S = F.relu(temp_y_S)
 
 
-        temp_y_S = F.relu(temp_y_S)
         temp_y_S_output = F.conv3d(temp_y_S, self.conv3_forward_s, padding=1)
 
         temp_y_Sp = temp_y_S_output + p_S
@@ -367,7 +305,7 @@ class LSFPNet(nn.Module):
         plt.close()
 
 
-    def forward(self, M0, param_E, param_d, csmap, style_embedding, epoch, output_dir):
+    def forward(self, M0, param_E, param_d, csmap, epoch, output_dir, style_embedding=None):
 
         # M0 = M0[..., 0] + 1j * M0[..., 1]
         # param_d = param_d[..., 0] + 1j * param_d[..., 1]
@@ -398,29 +336,6 @@ class LSFPNet(nn.Module):
 
         return [L, S, layers_adj_L, layers_adj_S, lambda_L, lambda_S, lambda_spatial_L, lambda_spatial_S, gamma, lambda_step]
     
-
-# class EWrapper:
-#     """
-#     Make `physics` look like the callable interface expected by LSFP-Net:
-#         E(inv=False, data=image)  -> k-space
-#         E(inv=True , data=data )  -> image
-#     Scaling is handled *outside*, so we just delegate.
-#     """
-#     def __init__(self, physics, csmap):
-#         self.physics, self.csmap = physics, csmap
-
-#     def __call__(self, *, inv: bool, data: torch.Tensor) -> torch.Tensor:
-#         if inv:   # adjoint
-#             data = from_torch_complex(data.unsqueeze(0))
-#             data = self.physics.A_adjoint(data, self.csmap)
-#             data = to_torch_complex(data).squeeze(0)
-#             return rearrange(data, 't h w -> h w t')
-        
-#         else:     # forward
-#             data = from_torch_complex(data.unsqueeze(0))
-#             data = self.physics.A(data, self.csmap)
-#             return to_torch_complex(data).squeeze(0)
-        
 
 class ArtifactRemovalLSFPNet(nn.Module):
     def __init__(self, backbone_net, output_dir, **kwargs):
@@ -453,19 +368,11 @@ class ArtifactRemovalLSFPNet(nn.Module):
              scale = 1.0
         return x / scale, scale
 
-    def forward(self, y, E, csmap, acceleration, epoch=None, norm="both", **kwargs):
+    def forward(self, y, E, csmap, acceleration=None, epoch=None, norm="both", **kwargs):
 
         # 1. Get the initial ZF recon. This defines our target energy/scale.
         x_init = E(inv=True, data=y, smaps=csmap)
 
-        # 2. Permute and normalize the input for the network
-        # print("--- Values Before Normalization --- ")
-        # print("zf image min: ", torch.abs(x_init).min())
-        # print("zf image max: ", torch.abs(x_init).max())
-        # print("zf image mean: ", torch.abs(x_init).mean())
-        # print("kspace min: ", torch.abs(y).min())
-        # print("kspace max: ", torch.abs(y).max())
-        # print("kspace mean: ", torch.abs(y).mean())
         if norm =="both":
             x_init_norm, y_norm, scale = self._normalise_both(x_init, y)
         elif norm == "independent":
@@ -476,20 +383,15 @@ class ArtifactRemovalLSFPNet(nn.Module):
             x_init_norm = x_init
             y_norm = y
             scale = 1.0
-        # print("--- Values After Normalization --- ")
-        # print("zf image min: ", torch.abs(x_init_norm).min())
-        # print("zf image max: ", torch.abs(x_init_norm).max())
-        # print("zf image mean: ", torch.abs(x_init_norm).mean())
-        # print("kspace min: ", torch.abs(y_norm).min())
-        # print("kspace max: ", torch.abs(y_norm).max())
-        # print("kspace mean: ", torch.abs(y_norm).mean())
-
 
         # Generate style embedding from the acceleration factor
-        style_embedding = self.mapping_network(acceleration)
+        if acceleration:
+            style_embedding = self.mapping_network(acceleration)
 
-        L, S, loss_layers_adj_L, loss_layers_adj_S, lambda_L, lambda_S, lambda_spatial_L, lambda_spatial_S, gamma, lambda_step  = self.backbone_net(x_init_norm, E, y_norm, csmap, style_embedding, epoch, self.output_dir)
+            L, S, loss_layers_adj_L, loss_layers_adj_S, lambda_L, lambda_S, lambda_spatial_L, lambda_spatial_S, gamma, lambda_step  = self.backbone_net(x_init_norm, E, y_norm, csmap, epoch, self.output_dir, style_embedding)
 
+        else:
+            L, S, loss_layers_adj_L, loss_layers_adj_S, lambda_L, lambda_S, lambda_spatial_L, lambda_spatial_S, gamma, lambda_step  = self.backbone_net(x_init_norm, E, y_norm, csmap, epoch, self.output_dir)
 
         loss_constraint_L = torch.square(torch.mean(loss_layers_adj_L[0])) / self.backbone_net.LayerNo
         loss_constraint_S = torch.square(torch.mean(loss_layers_adj_S[0])) / self.backbone_net.LayerNo

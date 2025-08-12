@@ -265,6 +265,8 @@ def get_cosine_ei_weight(
 
 
 
+
+
 def plot_reconstruction_sample(x_recon, title, filename, output_dir, grasp_img=None, batch_idx=0, transform=False):
     """
     Plot reconstruction sample showing magnitude images across timeframes.
@@ -326,7 +328,8 @@ def plot_reconstruction_sample(x_recon, title, filename, output_dir, grasp_img=N
             grasp_img = grasp_img_mag[batch_idx, :, t, :].cpu().detach().numpy()
 
         ax1 = axes[0, t]
-        ax1.imshow(np.rot90(img, 2), cmap="gray")
+        # ax1.imshow(np.rot90(img, 2), cmap="gray")
+        ax1.imshow(img, cmap="gray")
         ax1.set_title(f"t = {t}")
         ax1.set_xticks([])
         ax1.set_yticks([])

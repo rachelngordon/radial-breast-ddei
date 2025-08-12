@@ -262,6 +262,9 @@ class SimulatedDataset(Dataset):
         
         else:
             raise ValueError(f"Unsupported model_type for SimulatedDataset: {self.model_type}")
+        
+        grasp_recon_torch = torch.flip(grasp_recon_torch, dims=[-3])
+        grasp_recon_torch = torch.rot90(grasp_recon_torch, k=3, dims=[-3,-1])
 
         # return kspace_torch.float(), csmaps_torch.cfloat(), ground_truth_torch.float(), grasp_recon_torch.float(), parMap, aif, S0, T10, mask
         return kspace_torch, csmaps_torch, ground_truth_torch, grasp_recon_torch, mask#, parMap, aif, S0, T10, mask
@@ -388,6 +391,9 @@ class SimulatedSPFDataset(Dataset):
         
         # else:
         #     raise ValueError(f"Unsupported model_type for SimulatedDataset: {self.model_type}")
+
+        grasp_recon_torch = torch.flip(grasp_recon_torch, dims=[-3])
+        grasp_recon_torch = torch.rot90(grasp_recon_torch, k=3, dims=[-3,-1])
 
         # return kspace_torch.float(), csmaps_torch.cfloat(), ground_truth_torch.float(), grasp_recon_torch.float(), parMap, aif, S0, T10, mask
         # return csmaps_torch, ground_truth_torch, grasp_recon_torch, mask, self.physics #, parMap, aif, S0, T10, mask

@@ -791,16 +791,16 @@ MAIN_EVALUATION_PLAN = [
 ]
 STRESS_TEST_PLAN = [
     {
-        "spokes_per_frame": 8,
-        "num_frames": 22, # 8 * 22 = 176 total spokes
-        "slice": slice(0, 22), # The entire 22-frame duration
-        "description": "Stress test: max temporal points, 8 spokes"
-    },
-    {
         "spokes_per_frame": 4,
         "num_frames": 22, # 4 * 22 = 88 total spokes
         "slice": slice(0, 22), # The entire 22-frame duration
         "description": "Stress test: max temporal points, 4 spokes"
+    },
+    {
+        "spokes_per_frame": 8,
+        "num_frames": 22, # 8 * 22 = 176 total spokes
+        "slice": slice(0, 22), # The entire 22-frame duration
+        "description": "Stress test: max temporal points, 8 spokes"
     },
 ]
 eval_spf_dataset = SimulatedSPFDataset(
@@ -850,7 +850,7 @@ with torch.no_grad():
             sim_kspace = physics(False, ground_truth, csmap)
             kspace = sim_kspace.squeeze(0).to(device) # Remove batch dim
             x_recon, *_ = model(
-                kspace.to(device), physics, csmap, epoch, norm=config['model']['norm']
+                kspace.to(device), physics, csmap, epoch=None, norm=config['model']['norm']
             )
             ground_truth = torch.stack([ground_truth.real, ground_truth.imag], dim=1)
             ground_truth = rearrange(ground_truth, 'b i h w t -> b i t h w')
@@ -912,8 +912,8 @@ with torch.no_grad():
             physics = MCNUFFT(nufft_ob.to(device), adjnufft_ob.to(device), ktraj.to(device), dcomp.to(device))
             sim_kspace = physics(False, ground_truth, csmap)
             kspace = sim_kspace.squeeze(0).to(device) # Remove batch dim
-            x_recon, _ = model(
-                kspace.to(device), physics, csmap, norm=config['model']['norm']
+            x_recon, *_ = model(
+                kspace.to(device), physics, csmap, epoch=None, norm=config['model']['norm']
             )
             ground_truth = torch.stack([ground_truth.real, ground_truth.imag], dim=1)
             ground_truth = rearrange(ground_truth, 'b i h w t -> b i t h w')
@@ -990,675 +990,685 @@ plt.grid(True)
 plt.savefig(os.path.join(eval_dir, "spf_eval_dc.png"))
 plt.close()
 
-=== lsfpnet.py ===
-import os
-os.environ['KMP_DUPLICATE_LIB_OK']='True'
+=== ei.py ===
+from typing import Union
 import torch
 import torch.nn as nn
-from torch.nn import init
-import torch.nn.functional as F
-from lsp import Project_inf, Wxs, Wtxs
-from time import time
+from deepinv.loss.loss import Loss
+from deepinv.loss.metric.metric import Metric
+from deepinv.transform.base import Transform
 from einops import rearrange
+from radial import to_torch_complex
+class EILoss(Loss):
+    r"""
+    Equivariant imaging self-supervised loss.
+    Assumes that the set of signals is invariant to a group of transformations (rotations, translations, etc.)
+    in order to learn from incomplete measurement data alone https://https://arxiv.org/pdf/2103.14756.pdf.
+    The EI loss is defined as
+    .. math::
+        \| T_g \hat{x} - \inverse{\forw{T_g \hat{x}}}\|^2
+    where :math:`\hat{x}=\inverse{y}` is a reconstructed signal and
+    :math:`T_g` is a transformation sampled at random from a group :math:`g\sim\group`.
+    By default, the error is computed using the MSE metric, however any other metric (e.g., :math:`\ell_1`)
+    can be used as well.
+    :param deepinv.transform.Transform transform: Transform to generate the virtually augmented measurement.
+        It can be any torch-differentiable function (e.g., a :class:`torch.nn.Module`)
+        including `torchvision transforms <https://pytorch.org/vision/stable/transforms.html>`_.
+    :param Metric, torch.nn.Module metric: Metric used to compute the error between the reconstructed augmented measurement and the reference
+        image.
+    :param bool apply_noise: if ``True``, the augmented measurement is computed with the full sensing model
+        :math:`\sensor{\noise{\forw{\hat{x}}}}` (i.e., noise and sensor model),
+        otherwise is generated as :math:`\forw{\hat{x}}`.
+    :param float weight: Weight of the loss.
+    :param bool no_grad: if ``True``, the gradient does not propagate through :math:`T_g`. Default: ``False``.
+        This option is useful for super-resolution problems, see https://arxiv.org/abs/2312.11232.
+    """
+    def __init__(
+        self,
+        transform: Transform,
+        model_type: str,
+        metric: Union[Metric, nn.Module] = torch.nn.MSELoss(),
+        apply_noise=True,
+        weight=1.0,
+        no_grad=False,
+        *args,
+        **kwargs,
+    ):
+        super(EILoss, self).__init__(*args, **kwargs)
+        self.name = "ei"
+        self.metric = metric
+        self.weight = weight
+        self.T = transform
+        self.noise = apply_noise
+        self.no_grad = no_grad
+        self.model_type = model_type
+    def forward(self, x_net, physics, model, csmap, **kwargs):
+        r"""
+        Computes the EI loss
+        :param torch.Tensor x_net: Reconstructed image :math:`\inverse{y}`.
+        :param deepinv.physics.Physics physics: Forward operator associated with the measurements.
+        :param torch.nn.Module model: Reconstruction function.
+        :return: (:class:`torch.Tensor`) loss.
+        """
+        if self.no_grad:
+            with torch.no_grad():
+                x2 = self.T(x_net)
+                x2 = x2.detach()
+        else:
+            x2 = self.T(x_net)
+        if self.model_type == "CRNN":
+            if self.noise:
+                y = physics(x2, csmap)
+            else:
+                y = physics.A(x2, csmap)
+            x3 = model(y, physics, csmap)
+        elif self.model_type == "LSFPNet":
+            x2_complex = to_torch_complex(x2)
+            y = physics(inv=False, data=x2_complex, smaps=csmap).to(csmap.device)
+            x3, *_ = model(y, physics, csmap, epoch=None)
+        loss_ei = self.weight * self.metric(x3, x2)
+        return loss_ei, x2
+
+=== transform.py ===
+import deepinv as dinv
+import torch
+from deepinv.transform import Transform
+from einops import rearrange
+import torch.nn.functional as F
+from torchvision.transforms.functional import rotate
+from typing import Union
+class VideoRotate(Transform):
+    r"""
+    CORRECTED 2D Rotation for Videos (Handles deepinv composition).
+    This class correctly applies a single, consistent random rotation to all frames of a video.
+    It samples angles uniformly from a continuous range and is robust to being called
+    from a deepinv composition operator that pre-flattens the video tensor.
+    :param tuple[float, float] or float degrees: Range of degrees to select from.
+        If degrees is a number instead of sequence like (min, max), the range of degrees
+        will be (-degrees, +degrees).
+    :param str interpolation_mode: "bilinear" or "nearest".
+    :param bool constant_shape: if True, output has the same shape as the input.
+    """
+    def __init__(
+        self,
+        *args,
+        degrees: Union[float, tuple[float, float]] = 180.0,
+        interpolation_mode: str = "bilinear",
+        **kwargs,
+    ):
+        super().__init__(*args, **kwargs)
+        if isinstance(degrees, (int, float)):
+            if degrees < 0:
+                raise ValueError("If degrees is a single number, it must be non-negative.")
+            self.degrees = (-degrees, degrees)
+        else:
+            if len(degrees) != 2:
+                raise ValueError("If degrees is a sequence, it must be of length 2.")
+            self.degrees = degrees
+        self.interpolation_mode = interpolation_mode
+        self.flatten_video_input = False
+    def _get_params(self, x: torch.Tensor) -> dict:
+        """
+        Uniformly samples `n_trans` random angles from the specified continuous range.
+        """
+        angles = [
+            torch.empty(1).uniform_(self.degrees[0], self.degrees[1]).item()
+            for _ in range(self.n_trans)
+        ]
+        return {"theta": angles}
+    def _transform(
+        self,
+        x: torch.Tensor,
+        theta: Union[torch.Tensor, list] = [],
+        **kwargs,
+    ) -> torch.Tensor:
+        """
+        Applies the rotation transformations. This method now explicitly handles 5D video tensors.
+        """
+        if not self._check_x_5D(x):
+             raise ValueError("VideoRotate is designed for 5D video tensors (B, C, T, H, W).")
+        B, C, T, H, W = x.shape
+        if not theta:
+            params = self._get_params(x)
+            theta = params["theta"]
+        if not theta:
+            raise ValueError("Rotation angle 'theta' not provided.")
+        angle_for_video = theta[0]
+        angle_rad = -torch.tensor(angle_for_video) * (torch.pi / 180.0)
+        cos_a, sin_a = torch.cos(angle_rad), torch.sin(angle_rad)
+        matrix = torch.tensor(
+            [[cos_a, -sin_a, 0], [sin_a, cos_a, 0]], 
+            dtype=torch.float32, device=x.device
+        ).unsqueeze(0)
+        matrix = matrix.repeat(B, 1, 1)
+        grid_single = F.affine_grid(matrix, (B, C, H, W), align_corners=False)
+        grid_expanded = grid_single.repeat_interleave(T, dim=0)
+        x_flat = dinv.physics.TimeMixin.flatten(x)
+        transformed_flat = F.grid_sample(x_flat, grid_expanded, mode=self.interpolation_mode, padding_mode='zeros', align_corners=False)
+        return dinv.physics.TimeMixin.unflatten(transformed_flat, batch_size=B)
+class VideoDiffeo(dinv.transform.CPABDiffeomorphism):
+    """A Diffeomorphism transform that correctly handles 5D video tensors."""
+    def _transform(self, x: torch.Tensor, **params) -> torch.Tensor:
+        if not self._check_x_5D(x):
+            return super()._transform(x, **params)
+        B = x.shape[0]
+        x_flat = dinv.physics.TimeMixin.flatten(x)
+        flat_params = self.get_params(x_flat)
+        transformed_flat = super()._transform(x_flat, **flat_params)
+        return dinv.physics.TimeMixin.unflatten(transformed_flat, batch_size=B)
+class SubsampleTime(Transform):
+    r"""
+    Augments a video by taking a random contiguous temporal sub-sequence of a
+    RANDOM length, and then interpolating it back to the original length.
+    :param int n_trans: Number of transformed versions to generate per input image.
+    :param tuple[float, float] subsample_ratio_range: The min and max ratio of the
+                                                     total time frames to keep (e.g., (0.7, 0.95)).
+    :param torch.Generator rng: Random number generator.
+    """
+    def __init__(self, *args, subsample_ratio_range: tuple[float, float] = (0.7, 0.95), **kwargs):
+        super().__init__(*args, **kwargs)
+        self.flatten_video_input = False  # Operate on 5D tensor
+        min_r, max_r = subsample_ratio_range
+        assert 0.0 < min_r <= max_r <= 1.0, "subsample_ratio_range must be a valid range (min, max) between 0 and 1."
+        self.subsample_ratio_range = subsample_ratio_range
+    def _get_params(self, x: torch.Tensor) -> dict:
+        """
+        Generates a random ratio and a random start index for each transform.
+        """
+        total_time_frames = x.shape[2]  # Shape is (B, C, T, H, W)
+        min_r, max_r = self.subsample_ratio_range
+        ratios = min_r + (max_r - min_r) * torch.rand(self.n_trans, generator=self.rng)
+        start_indices = []
+        for ratio in ratios:
+            subsample_length = int(total_time_frames * ratio.item())
+            if subsample_length >= total_time_frames:
+                start_indices.append(0)
+                continue
+            max_start_index = total_time_frames - subsample_length
+            start_idx = torch.randint(
+                low=0, high=max_start_index + 1, size=(1,), generator=self.rng
+            ).item()
+            start_indices.append(start_idx)
+        return {"ratios": ratios, "start_indices": torch.tensor(start_indices, dtype=torch.long)}
+    def _transform(
+        self, x: torch.Tensor, ratios: torch.Tensor, start_indices: torch.Tensor, **kwargs
+    ) -> torch.Tensor:
+        """Performs the temporal subsampling and resizing for each requested transform."""
+        B, C, total_time_frames, H, W = x.shape
+        assert B == 1, "This transform implementation assumes a batch size of 1 for simplicity."
+        output_list = []
+        for i in range(self.n_trans):
+            ratio = ratios[i]
+            start_idx = start_indices[i]
+            subsample_length = int(total_time_frames * ratio.item())
+            if subsample_length >= total_time_frames:
+                output_list.append(x.clone()) # Use clone to avoid issues
+                continue
+            sub_sequence = x[:, :, start_idx : start_idx + subsample_length, :, :]
+            flat_for_interp = rearrange(sub_sequence, "b c t h w -> b (c h w) t")
+            resized_flat = torch.nn.functional.interpolate(
+                flat_for_interp,
+                size=total_time_frames,
+                mode="linear",
+                align_corners=False,
+            )
+            resized_sequence = rearrange(
+                resized_flat, "b (c h w) t -> b c t h w", c=C, h=H, w=W
+            )
+            output_list.append(resized_sequence)
+        return torch.cat(output_list, dim=0)
+class PeakAwareBiPhasicWarp(Transform):
+    r"""
+    An enhancement-peak-aware temporal augmentation that warps BOTH the wash-in
+    and wash-out phases independently with different random ratios.
+    It finds the time of peak enhancement, splits the video, and then
+    time-warps (compresses/stretches) both phases before reassembling them.
+    :param tuple[float, float] warp_ratio_range: The min/max ratio for
+                                                 compressing a phase. e.g., (0.6, 0.95).
+    """
+    def __init__(self, *args, warp_ratio_range: tuple[float, float] = (0.6, 0.95), **kwargs):
+        super().__init__(*args, **kwargs)
+        self.flatten_video_input = False
+        min_r, max_r = warp_ratio_range
+        assert 0.0 < min_r <= max_r <= 1.0, "warp_ratio_range must be valid."
+        self.warp_ratio_range = warp_ratio_range
+    def _get_params(self, x: torch.Tensor) -> dict:
+        """
+        Generate two independent warp ratios for each requested transform:
+        one for wash-in and one for wash-out.
+        """
+        params_list = []
+        min_r, max_r = self.warp_ratio_range
+        for _ in range(self.n_trans):
+            washin_ratio = min_r + (max_r - min_r) * torch.rand(1, generator=self.rng).item()
+            washout_ratio = min_r + (max_r - min_r) * torch.rand(1, generator=self.rng).item()
+            params_list.append({
+                "washin_ratio": washin_ratio,
+                "washout_ratio": washout_ratio
+            })
+        return {"params_list": params_list}
+    def _transform(self, x: torch.Tensor, params_list: list[dict], **kwargs) -> torch.Tensor:
+        """Applies the independent, bi-phasic warp."""
+        assert x.shape[0] == 1, "This transform assumes a batch size of 1 for the input."
+        mean_signal_curve = torch.mean(x, dim=(0, 1, 3, 4)) # Avg over B, C, H, W
+        peak_idx = torch.argmax(mean_signal_curve)
+        if peak_idx <= 0 or peak_idx >= x.shape[2] - 1:
+            return x.repeat(self.n_trans, 1, 1, 1, 1)
+        output_list = []
+        for params in params_list:
+            wash_in_phase = x[:, :, :peak_idx, :, :]
+            peak_frame = x[:, :, peak_idx:peak_idx+1, :, :]
+            wash_out_phase = x[:, :, peak_idx+1:, :, :]
+            warped_wash_in = self._warp_phase(wash_in_phase, params["washin_ratio"])
+            warped_wash_out = self._warp_phase(wash_out_phase, params["washout_ratio"])
+            new_x = torch.cat([warped_wash_in, peak_frame, warped_wash_out], dim=2)
+            output_list.append(new_x)
+        return torch.cat(output_list, dim=0)
+    def _warp_phase(self, phase_tensor: torch.Tensor, ratio: float) -> torch.Tensor:
+        """Helper function to subsample and interpolate a video phase."""
+        B, C, T_phase, H, W = phase_tensor.shape
+        if T_phase <= 1: # Cannot warp a single frame or empty tensor
+            return phase_tensor
+        subsample_len = max(1, int(T_phase * ratio)) # Ensure at least 1 frame
+        flat_for_interp = rearrange(phase_tensor, "b c t h w -> b (c h w) t")
+        subsampled_flat = F.interpolate(flat_for_interp, size=subsample_len, mode='linear', align_corners=False)
+        resized_flat = F.interpolate(subsampled_flat, size=T_phase, mode='linear', align_corners=False)
+        warped_phase = rearrange(resized_flat, "b (c h w) t -> b c t h w", c=C, h=H, w=W)
+        return warped_phase
+class MonophasicTimeWarp(Transform):
+    r"""
+    A temporal augmentation specifically designed for monophasic enhancement curves
+    (e.g., persistent or plateau types) where there is no wash-out phase.
+    This transform keeps the first (pre-contrast) frame fixed and applies a
+    single, smooth time-warp to the entire subsequent enhancement phase.
+    :param tuple[float, float] warp_ratio_range: The min/max ratio for
+        compressing/stretching the enhancement phase. e.g., (0.7, 1.3).
+        Values < 1 compress time, values > 1 stretch time.
+    """
+    def __init__(self, *args, warp_ratio_range: tuple[float, float] = (0.7, 1.3), **kwargs):
+        super().__init__(*args, **kwargs)
+        self.flatten_video_input = False
+        min_r, max_r = warp_ratio_range
+        assert 0.0 < min_r <= max_r, "warp_ratio_range must be a valid positive range."
+        self.warp_ratio_range = warp_ratio_range
+    def _get_params(self, x: torch.Tensor) -> dict:
+        """
+        Generates a single random warp ratio for the entire enhancement phase.
+        """
+        min_r, max_r = self.warp_ratio_range
+        ratios = [min_r + (max_r - min_r) * torch.rand(1, generator=self.rng) for _ in range(self.n_trans)]
+        return {"ratios": ratios}
+    def _transform(self, x: torch.Tensor, ratios: list[float], **kwargs) -> torch.Tensor:
+        """Applies the monophasic time warp."""
+        assert x.shape[0] == 1, "This transform assumes a batch size of 1 for the input."
+        if x.shape[2] <= 1: # Cannot warp if there's only one frame
+             return x.repeat(self.n_trans, 1, 1, 1, 1)
+        output_list = []
+        for ratio in ratios:
+            pre_contrast_frame = x[:, :, :1, :, :]
+            enhancement_phase = x[:, :, 1:, :, :]
+            warped_enhancement_phase = self._warp_phase(enhancement_phase, ratio)
+            new_x = torch.cat([pre_contrast_frame, warped_enhancement_phase], dim=2)
+            output_list.append(new_x)
+        return torch.cat(output_list, dim=0)
+    def _warp_phase(self, phase_tensor: torch.Tensor, ratio: float) -> torch.Tensor:
+        """Helper function to interpolate a video phase to a new length."""
+        B, C, T_phase, H, W = phase_tensor.shape
+        if T_phase == 0:
+            return phase_tensor
+        ratio = ratio.item()
+        new_length = int(round(T_phase * ratio))
+        if new_length == 0: new_length = 1 # Ensure at least one frame
+        flat_for_interp = rearrange(phase_tensor, "b c t h w -> b (c h w) t")
+        resized_flat = F.interpolate(flat_for_interp, size=new_length, mode='linear', align_corners=False)
+        if new_length != T_phase:
+            resized_flat = F.interpolate(resized_flat, size=T_phase, mode='linear', align_corners=False)
+        warped_phase = rearrange(resized_flat, "b (c h w) t -> b c t h w", c=C, h=H, w=W)
+        return warped_phase
+class TemporalNoise(Transform):
+    """ 
+    Adds low-frequency random noise to the temporal signal of a video.
+    This simulates smooth, slowly varying noise sources over time.
+    """
+    def __init__(self, *args, noise_strength: float = 0.5, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.flatten_video_input = False
+        self.noise_strength = noise_strength
+    def _get_params(self, x: torch.Tensor) -> dict:
+        """
+        Generates a single low-frequency noise vector for the transformation.
+        """
+        B, C, T, H, W = x.shape
+        low_res_T = max(1, T // 4) 
+        noise_low_res = torch.randn(B, 1, low_res_T, device=x.device)
+        noise_high_res = F.interpolate(noise_low_res, size=T, mode='linear', align_corners=False)
+        noise_norm = (noise_high_res - noise_high_res.mean(dim=-1, keepdim=True)) / (noise_high_res.std(dim=-1, keepdim=True) + 1e-8)
+        final_noise = noise_norm * self.noise_strength
+        return {'noise': final_noise}
+    def _transform(self, x: torch.Tensor, noise: torch.Tensor, **kwargs) -> torch.Tensor:
+        """
+        Applies the pre-generated noise to the image tensor.
+        """
+        B, C, T, H, W = x.shape
+        x_noisy = x + noise.view(B, 1, T, 1, 1)
+        return x_noisy
+class TimeReverse(Transform):
+    r"""
+    Reverses the temporal order of frames in a video tensor.
+    This transform flips the video along the time axis, effectively playing it
+    backwards. This is a deterministic transformation.
+    :param int n_trans: Number of transformed versions to generate per input image.
+                        Since this is deterministic, it will just repeat the same
+                        output if n_trans > 1.
+    """
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.flatten_video_input = False
+    def _get_params(self, x: torch.Tensor) -> dict:
+        """
+        No random parameters are needed for time reversal as it's a
+        deterministic operation.
+        """
+        return {}
+    def _transform(self, x: torch.Tensor, **kwargs) -> torch.Tensor:
+        """
+        Applies the time reversal transformation using torch.flip().
+        """
+        if len(x.shape) != 5:
+            raise ValueError(f"TimeReverse expects a 5D tensor (B, C, T, H, W), but got shape {x.shape}.")
+        return torch.flip(x, dims=[2])
+
+=== utils.py ===
+import os
+import subprocess
 import matplotlib.pyplot as plt
+import torch
 import numpy as np
-dtype = torch.complex64
+from einops import rearrange
+import torchkbnufft as tkbn
+import csv
+def log_gradient_stats(model, epoch, iteration, output_dir, log_filename="gradient_stats.csv"):
+    """
+    Computes, prints, and logs the L2 norm of gradients for each parameter and the total gradient norm.
+    Args:
+        model (torch.nn.Module): The model being trained.
+        epoch (int): The current epoch.
+        iteration (int): The current global iteration/step count.
+        output_dir (str): The main experiment output directory.
+        log_filename (str): The CSV filename for storing detailed logs.
+    """
+    total_norm = 0.0
+    param_norms = []
+    for name, p in model.named_parameters():
+        if p.grad is not None and p.requires_grad:
+            param_norm = p.grad.data.norm(2)
+            if not torch.isfinite(param_norm):
+                param_norm_item = float('inf')
+            else:
+                param_norm_item = param_norm.item()
+            param_norms.append((name, param_norm_item))
+            total_norm += param_norm_item ** 2
+    total_norm = total_norm ** 0.5
+    print(f"--- Gradient Stats (Epoch {epoch}, Iter {iteration}) ---")
+    print(f"Total Gradient Norm: {total_norm:.4e}")
+    param_norms.sort(key=lambda x: x[1], reverse=True)
+    print("Top 5 layers with largest gradients:")
+    for name, norm in param_norms[:5]:
+        print(f"  - {name}: {norm:.4e}")
+    print("Top 5 layers with smallest gradients:")
+    non_zero_norms = [p for p in param_norms if p[1] > 0]
+    for name, norm in non_zero_norms[-5:]:
+        print(f"  - {name}: {norm:.4e}")
+    print("-------------------------------------------------")
+    log_path = os.path.join(output_dir, log_filename)
+    file_exists = os.path.isfile(log_path)
+    with open(log_path, 'a', newline='') as csvfile:
+        writer = csv.writer(csvfile)
+        if not file_exists:
+            writer.writerow(['epoch', 'iteration', 'total_norm', 'param_name', 'param_norm'])
+        writer.writerow([epoch, iteration, total_norm, '---TOTAL---', total_norm])
+        for name, norm in param_norms:
+            writer.writerow([epoch, iteration, total_norm, name, norm])
+def trajGR(Nkx, Nspokes):
+    '''
+    function for generating golden-angle radial sampling trajectory
+    :param Nkx: spoke length
+    :param Nspokes: number of spokes
+    :return: ktraj: golden-angle radial sampling trajectory
+    '''
+    ga = np.pi * ((1 - np.sqrt(5)) / 2)
+    kx = np.zeros(shape=(Nkx, Nspokes))
+    ky = np.zeros(shape=(Nkx, Nspokes))
+    ky[:, 0] = np.linspace(-np.pi, np.pi, Nkx)
+    for i in range(1, Nspokes):
+        kx[:, i] = np.cos(ga) * kx[:, i - 1] - np.sin(ga) * ky[:, i - 1]
+        ky[:, i] = np.sin(ga) * kx[:, i - 1] + np.cos(ga) * ky[:, i - 1]
+    ky = np.transpose(ky)
+    kx = np.transpose(kx)
+    ktraj = np.stack((ky.flatten(), kx.flatten()), axis=0)
+    return ktraj
+def prep_nufft(Nsample, Nspokes, Ng):
+    overSmaple = 2
+    im_size = (int(Nsample/overSmaple), int(Nsample/overSmaple))
+    grid_size = (Nsample, Nsample)
+    ktraj = trajGR(Nsample, Nspokes * Ng)
+    ktraj = torch.tensor(ktraj, dtype=torch.float)
+    dcomp = tkbn.calc_density_compensation_function(ktraj=ktraj, im_size=im_size)
+    dcomp = dcomp.squeeze()
+    ktraju = np.zeros([2, Nspokes * Nsample, Ng], dtype=float)
+    dcompu = np.zeros([Nspokes * Nsample, Ng], dtype=complex)
+    for ii in range(0, Ng):
+        ktraju[:, :, ii] = ktraj[:, (ii * Nspokes * Nsample):((ii + 1) * Nspokes * Nsample)]
+        dcompu[:, ii] = dcomp[(ii * Nspokes * Nsample):((ii + 1) * Nspokes * Nsample)]
+    ktraju = torch.tensor(ktraju, dtype=torch.float)
+    dcompu = torch.tensor(dcompu, dtype=torch.complex64)
+    nufft_ob = tkbn.KbNufft(im_size=im_size, grid_size=grid_size)  # forward nufft
+    adjnufft_ob = tkbn.KbNufftAdjoint(im_size=im_size, grid_size=grid_size)  # backward nufft
+    return ktraju, dcompu, nufft_ob, adjnufft_ob
+def _calculate_top_percentile_curve(dynamic_slice: torch.Tensor, percentile: float) -> list[float]:
+    """Helper function to calculate the enhancement curve for a single dynamic slice."""
+    if dynamic_slice.dim() != 5 or dynamic_slice.shape[0] != 1 or dynamic_slice.shape[1] != 2:
+        raise ValueError(f"Expected input shape (1, 2, T, H, W), but got {dynamic_slice.shape}")
+    magnitude_video = torch.sqrt(dynamic_slice[:, 0, ...] ** 2 + dynamic_slice[:, 1, ...] ** 2).squeeze(0)
+    num_time_frames = magnitude_video.shape[0]
+    top_percentile_means = []
+    q = percentile / 100.0
+    for t in range(num_time_frames):
+        frame_t = magnitude_video[t, :, :]
+        if frame_t.max() == 0:
+            top_percentile_means.append(0)
+            continue
+        threshold = torch.quantile(frame_t.flatten(), q)
+        bright_pixels = frame_t[frame_t > threshold]
+        mean_val = torch.mean(bright_pixels) if bright_pixels.numel() > 0 else threshold
+        top_percentile_means.append(mean_val.item())
+    return top_percentile_means
+def plot_enhancement_curve(
+    model_output: torch.Tensor,
+    percentile: float = 99.0,
+    title: str = "Enhancement Curve Comparison",
+    output_filename: str = None
+):
+    """
+    Calculates and plots the enhancement curves for a model output and a benchmark
+    image on the same graph for direct comparison.
+    Args:
+        model_output (torch.Tensor): The model's reconstructed dynamic slice.
+                                     Shape (1, 2, T, H, W).
+        benchmark_image (torch.Tensor): The ground truth or benchmark dynamic slice.
+                                        Shape (1, 2, T, H, W).
+        percentile (float, optional): The percentile for defining the brightest pixels.
+                                      Defaults to 99.0.
+        title (str, optional): The title for the plot. Defaults to "Enhancement Curve Comparison".
+        output_filename (str, optional): If provided, saves the plot to this file path.
+                                         Defaults to None (displays plot).
+    """
+    if not 0 < percentile < 100:
+        raise ValueError("Percentile must be between 0 and 100.")
+    model_curve = _calculate_top_percentile_curve(model_output.detach(), percentile)
+    num_time_frames = model_output.shape[2]
+    time_axis = np.arange(num_time_frames)
+    plt.figure(figsize=(12, 7))
+    plt.plot(time_axis, model_curve, label='Model Output', marker='o', linestyle='-', color='tab:blue')
+    plt.title(title, fontsize=16)
+    plt.xlabel("Time Frame", fontsize=12)
+    plt.ylabel(f"Mean Signal of Top {100-percentile:.1f}% Pixels", fontsize=12)
+    plt.legend()
+    plt.grid(True)
+    plt.tight_layout()
+    if output_filename:
+        output_dir = os.path.dirname(output_filename)
+        if output_dir:
+            os.makedirs(output_dir, exist_ok=True)
+        plt.savefig(output_filename)
+    else:
+        plt.show()
+    plt.close()
+def get_cosine_ei_weight(
+    current_epoch,
+    warmup_epochs,
+    schedule_duration,
+    target_weight
+):
+    """
+    Calculates the EI loss weight for the current epoch using a cosine schedule.
+    This implements a curriculum learning strategy:
+    1. For `warmup_epochs`, the weight is 0 (MC loss only).
+    2. Over the next `schedule_duration` epochs, the weight smoothly ramps
+       up from 0 to `target_weight` following a cosine curve.
+    3. After the schedule is complete, the weight stays at `target_weight`.
+    Args:
+        current_epoch (int): The current training epoch (starting from 1).
+        warmup_epochs (int): Number of epochs to train with only MC loss.
+        schedule_duration (int): Number of epochs for the ramp-up.
+        target_weight (float): The final EI loss weight to reach.
+    Returns:
+        float: The EI loss weight for the current epoch.
+    """
+    if current_epoch <= warmup_epochs:
+        return 0.0
+    schedule_progress_epoch = current_epoch - warmup_epochs
+    if schedule_progress_epoch >= schedule_duration:
+        return target_weight
+    cosine_multiplier = 0.5 * (1 - np.cos(np.pi * schedule_progress_epoch / schedule_duration))
+    return target_weight * cosine_multiplier
+def plot_reconstruction_sample(x_recon, title, filename, output_dir, grasp_img=None, batch_idx=0, transform=False):
+    """
+    Plot reconstruction sample showing magnitude images across timeframes.
+    Args:
+        x_recon: Reconstructed image tensor of shape (B, C, T, H, W)
+        title: Title for the plot
+        filename: Filename for saving (without extension)
+        output_dir: Directory to save the plot
+        batch_idx: Which batch element to plot (default: 0)
+    """
+    os.makedirs(output_dir, exist_ok=True)
+    if x_recon.shape[1] == 2:
+        x_recon_mag = torch.sqrt(x_recon[:, 0, ...] ** 2 + x_recon[:, 1, ...] ** 2)
+    else:
+        x_recon_mag = x_recon
+    grasp_img_mag = torch.sqrt(grasp_img[:, 0, ...] ** 2 + grasp_img[:, 1, ...] ** 2)
+    if grasp_img_mag.shape[-1] == 320 and grasp_img_mag.shape[-2] == 320:
+        n_timeframes = grasp_img_mag.shape[1]
+    elif grasp_img_mag.shape[-1] == 320 and grasp_img_mag.shape[1] == 320:
+        n_timeframes = grasp_img_mag.shape[-2]
+    else:
+        n_timeframes = grasp_img_mag.shape[-1]
+    fig, axes = plt.subplots(
+        nrows=2,
+        ncols=n_timeframes,
+        figsize=(n_timeframes * 3, 8),
+        squeeze=False,
+    )
+    if transform:
+        axes[0, 0].set_ylabel("Transformed Image", fontsize=14, labelpad=10)
+        axes[1, 0].set_ylabel("Model Output", fontsize=14, labelpad=10)
+        os.makedirs(os.path.join(output_dir, "transforms"), exist_ok=True)
+    else:
+        axes[0, 0].set_ylabel("Model Output", fontsize=14, labelpad=10)
+        axes[1, 0].set_ylabel("GRASP Benchmark", fontsize=14, labelpad=10)
+    for t in range(n_timeframes):
+        if x_recon_mag.shape[1] == n_timeframes:
+            img = x_recon_mag[batch_idx, t, :, :].cpu().detach().numpy()
+        else:
+            img = x_recon_mag[batch_idx, ..., t].cpu().detach().numpy()
+        if grasp_img_mag.shape[1] == n_timeframes:
+            grasp_img = grasp_img_mag[batch_idx, t, :, :].cpu().detach().numpy()
+        elif grasp_img_mag.shape[-1] == n_timeframes:
+            grasp_img = grasp_img_mag[batch_idx, :, :, t].cpu().detach().numpy()
+        else:
+            grasp_img = grasp_img_mag[batch_idx, :, t, :].cpu().detach().numpy()
+        ax1 = axes[0, t]
+        ax1.imshow(np.rot90(img, 2), cmap="gray")
+        ax1.set_title(f"t = {t}")
+        ax1.set_xticks([])
+        ax1.set_yticks([])
+        ax2 = axes[1, t]
+        ax2.imshow(grasp_img, cmap="gray")
+        ax2.set_title(f"t = {t}")
+        ax2.set_xticks([])
+        ax2.set_yticks([])
+    fig.suptitle(title, fontsize=16)
+    plt.tight_layout(rect=[0, 0.03, 1, 0.95])
+    plt.savefig(os.path.join(output_dir, f"{filename}.png"))
+    plt.close(fig)
+def get_git_commit():
+    try:
+        commit_hash = (
+            subprocess.check_output(["git", "rev-parse", "HEAD"])
+            .strip()
+            .decode("utf-8")
+        )
+        return commit_hash
+    except Exception as e:
+        print(f"Error retrieving Git commit: {e}")
+        return "unknown"
+def remove_module_prefix(state_dict):
+    new_state_dict = {}
+    for k, v in state_dict.items():
+        new_key = k.replace('module.', '')  # Remove 'module.' prefix
+        new_state_dict[new_key] = v
+    return new_state_dict
+def save_checkpoint(model, optimizer, epoch,
+                    train_curves, val_curves, eval_curves, filename):
+    checkpoint = {
+        "epoch": epoch,
+        "model_state_dict": model.state_dict(),
+        "optimizer_state_dict": optimizer.state_dict(),
+        **train_curves,   # unpack the dicts
+        **val_curves,
+        **eval_curves,
+    }
+    torch.save(checkpoint, filename)
+    print(f"Checkpoint saved at epoch {epoch} to {filename}")
+def load_checkpoint(model, optimizer, filename):
+    ckpt = torch.load(filename, map_location="cpu")
+    model.load_state_dict(remove_module_prefix(ckpt["model_state_dict"]))
+    optimizer.load_state_dict(remove_module_prefix(ckpt["optimizer_state_dict"]))
+    train_curves = {
+        "train_mc_losses": ckpt.get("train_mc_losses", []),
+        "train_ei_losses": ckpt.get("train_ei_losses", []),
+        "train_adj_losses": ckpt.get("train_adj_losses", []),
+        "weighted_train_mc_losses": ckpt.get("weighted_train_mc_losses", []),
+        "weighted_train_ei_losses": ckpt.get("weighted_train_ei_losses", []),
+        "weighted_train_adj_losses": ckpt.get("weighted_train_adj_losses", []),
+    }
+    val_curves = {
+        "val_mc_losses": ckpt.get("val_mc_losses", []),
+        "val_ei_losses": ckpt.get("val_ei_losses", []),
+        "val_adj_losses": ckpt.get("val_adj_losses", []),
+    }
+    eval_curves = {
+        "eval_ssims": ckpt.get("eval_ssims", []),
+        "eval_psnrs": ckpt.get("eval_psnrs", []),
+        "eval_mses": ckpt.get("eval_mses", []),
+        "eval_dcs": ckpt.get("eval_dcs", []),
+    }
+    return model, optimizer, ckpt.get("epoch", 1), train_curves, val_curves, eval_curves
 def to_torch_complex(x: torch.Tensor):
     """(B, 2, ...) real -> (B, ...) complex"""
     assert x.shape[1] == 2, (
         f"Input tensor must have 2 channels (real, imag), but got shape {x.shape}"
     )
     return torch.view_as_complex(rearrange(x, "b c ... -> b ... c").contiguous())
-def from_torch_complex(x: torch.Tensor):
-    """(B, ...) complex -> (B, 2, ...) real"""
-    return rearrange(torch.view_as_real(x), "b ... c -> b c ...").contiguous()
-class BasicBlock(nn.Module):
-    def __init__(self, lambdas, channels=32):
-        super(BasicBlock, self).__init__()
-        self.channels = channels
-        self.lambda_L = nn.Parameter(torch.tensor([lambdas['lambda_L']]))
-        self.lambda_S = nn.Parameter(torch.tensor([lambdas['lambda_S']]))
-        self.lambda_spatial_L = nn.Parameter(torch.tensor([lambdas['lambda_spatial_L']]))
-        self.lambda_spatial_S = nn.Parameter(torch.tensor([lambdas['lambda_spatial_S']]))
-        self.gamma = nn.Parameter(torch.tensor([lambdas['gamma']]))
-        self.lambda_step = nn.Parameter(torch.tensor([lambdas['lambda_step']]))
-        self.conv1_forward_l = nn.Parameter(init.xavier_normal_(torch.Tensor(self.channels, 1, 3, 3, 3)))
-        self.conv2_forward_l = nn.Parameter(init.xavier_normal_(torch.Tensor(self.channels, self.channels, 3, 3, 3)))
-        self.conv3_forward_l = nn.Parameter(init.xavier_normal_(torch.Tensor(self.channels, self.channels, 3, 3, 3)))
-        self.conv1_backward_l = nn.Parameter(init.xavier_normal_(torch.Tensor(self.channels, self.channels, 3, 3, 3)))
-        self.conv2_backward_l = nn.Parameter(init.xavier_normal_(torch.Tensor(self.channels, self.channels, 3, 3, 3)))
-        self.conv3_backward_l = nn.Parameter(init.xavier_normal_(torch.Tensor(1, self.channels, 3, 3, 3)))
-        self.conv1_forward_s = nn.Parameter(init.xavier_normal_(torch.Tensor(self.channels, 1, 3, 3, 3)))
-        self.conv2_forward_s = nn.Parameter(init.xavier_normal_(torch.Tensor(self.channels, self.channels, 3, 3, 3)))
-        self.conv3_forward_s = nn.Parameter(init.xavier_normal_(torch.Tensor(self.channels, self.channels, 3, 3, 3)))
-        self.conv1_backward_s = nn.Parameter(init.xavier_normal_(torch.Tensor(self.channels, self.channels, 3, 3, 3)))
-        self.conv2_backward_s = nn.Parameter(init.xavier_normal_(torch.Tensor(self.channels, self.channels, 3, 3, 3)))
-        self.conv3_backward_s = nn.Parameter(init.xavier_normal_(torch.Tensor(1, self.channels, 3, 3, 3)))
-    def forward(self, M0, param_E, param_d, L, S, pt_L, pt_S, p_L, p_S, csmaps):
-        c = self.lambda_step / self.gamma
-        nx, ny, nt = M0.size()
-        temp_data = torch.reshape(L + S, [nx, ny, nt])
-        temp_data = param_E(inv=False, data=temp_data, smaps=csmaps).to(param_d.device)
-        gradient = param_E(inv=True, data=temp_data - param_d, smaps=csmaps)
-        gradient = torch.reshape(gradient, [nx * ny, nt]).to(param_d.device)
-        pb_L = F.conv3d(p_L, self.conv1_backward_l, padding=1)
-        pb_L = F.relu(pb_L)
-        pb_L = F.conv3d(pb_L, self.conv2_backward_l, padding=1)
-        pb_L = F.relu(pb_L)
-        pb_L = F.conv3d(pb_L, self.conv3_backward_l, padding=1)
-        pb_L = torch.reshape(torch.squeeze(pb_L), [2, nx * ny, nt])
-        pb_L = pb_L[0, :, :] + 1j * pb_L[1, :, :]
-        y_L = L - self.gamma * gradient - self.gamma * pt_L - self.gamma * pb_L
-        svd_input_complex = c * y_L + pt_L
-        svd_input_mag = svd_input_complex.abs() + 1e-8
-        original_phase = svd_input_complex / svd_input_mag
-        epsilon = 1e-7  # A small constant. Tune if necessary.
-        noise_std = 1e-5 # A small standard deviation for the noise
-        noise = torch.randn_like(svd_input_mag) * noise_std
-        stable_svd_input = svd_input_mag + noise #epsilon
-        Ut, St, Vt = torch.linalg.svd(stable_svd_input, full_matrices=False)
-        St_shrunk = Project_inf(St, self.lambda_L, to_complex=False)
-        pt_L_mag = Ut @ torch.diag_embed(St_shrunk) @ Vt
-        pt_L = pt_L_mag * original_phase
-        temp_y_L_input = torch.cat((torch.real(y_L), torch.imag(y_L)), 0).to(torch.float32)
-        temp_y_L_input = torch.reshape(temp_y_L_input, [2, nx, ny, nt]).unsqueeze(1)
-        temp_y_L = F.conv3d(temp_y_L_input, self.conv1_forward_l, padding=1)
-        temp_y_L = F.relu(temp_y_L)
-        temp_y_L = F.conv3d(temp_y_L, self.conv2_forward_l, padding=1)
-        temp_y_L = F.relu(temp_y_L)
-        temp_y_L_output = F.conv3d(temp_y_L, self.conv3_forward_l, padding=1)
-        temp_y_L = temp_y_L_output + p_L
-        temp_y_L = temp_y_L[0, :, :, :, :] + 1j * temp_y_L[1, :, :, :, :]
-        p_L = Project_inf(c * temp_y_L, self.lambda_spatial_L)
-        p_L = torch.cat((torch.real(p_L), torch.imag(p_L)), 0).to(torch.float32)
-        p_L = torch.reshape(p_L, [2, self.channels, nx, ny, nt])
-        pb_L = F.conv3d(p_L, self.conv1_backward_l, padding=1)
-        pb_L = F.relu(pb_L)
-        pb_L = F.conv3d(pb_L, self.conv2_backward_l, padding=1)
-        pb_L = F.relu(pb_L)
-        pb_L_output = F.conv3d(pb_L, self.conv3_backward_l, padding=1)
-        pb_L = torch.reshape(pb_L_output, [2, nx * ny, nt])
-        pb_L = pb_L[0, :, :] + 1j * pb_L[1, :, :]
-        L = L - self.gamma * gradient - self.gamma * pt_L - self.gamma * pb_L
-        adjloss_L = temp_y_L_output * p_L - pb_L_output * temp_y_L_input
-        pb_S = F.conv3d(p_S, self.conv1_backward_s, padding=1)
-        pb_S = F.relu(pb_S)
-        pb_S = F.conv3d(pb_S, self.conv2_backward_s, padding=1)
-        pb_S = F.relu(pb_S)
-        pb_S = F.conv3d(pb_S, self.conv3_backward_s, padding=1)
-        pb_S = torch.reshape(pb_S, [2, nx * ny, nt])
-        pb_S = pb_S[0, :, :] + 1j * pb_S[1, :, :]
-        y_S = S - self.gamma * gradient - self.gamma * Wtxs(pt_S) - self.gamma * pb_S
-        pt_S = Project_inf(c * Wxs(y_S) + pt_S, self.lambda_S)
-        temp_y_S_input = torch.cat((torch.real(y_S), torch.imag(y_S)), 0).to(torch.float32)
-        temp_y_S_input = torch.reshape(temp_y_S_input, [2, nx, ny, nt]).unsqueeze(1)
-        temp_y_S = F.conv3d(temp_y_S_input, self.conv1_forward_s, padding=1)
-        temp_y_S = F.relu(temp_y_S)
-        temp_y_S = F.conv3d(temp_y_S, self.conv2_forward_s, padding=1)
-        temp_y_S = F.relu(temp_y_S)
-        temp_y_S_output = F.conv3d(temp_y_S, self.conv3_forward_s, padding=1)
-        temp_y_Sp = temp_y_S_output + p_S
-        temp_y_Sp = temp_y_Sp[0, :, :, :, :] + 1j * temp_y_Sp[1, :, :, :, :]
-        p_S = Project_inf(c * temp_y_Sp, self.lambda_spatial_S)
-        p_S = torch.cat((torch.real(p_S), torch.imag(p_S)), 0).to(torch.float32)
-        p_S = torch.reshape(p_S, [2, self.channels, nx, ny, nt])
-        pb_S = F.conv3d(p_S, self.conv1_backward_s, padding=1)
-        pb_S = F.relu(pb_S)
-        pb_S = F.conv3d(pb_S, self.conv2_backward_s, padding=1)
-        pb_S = F.relu(pb_S)
-        pb_S_output = F.conv3d(pb_S, self.conv3_backward_s, padding=1)
-        pb_S = torch.reshape(pb_S_output, [2, nx * ny, nt])
-        pb_S = pb_S[0, :, :] + 1j * pb_S[1, :, :]
-        S = S - self.gamma * gradient - self.gamma * Wtxs(pt_S) - self.gamma * pb_S
-        adjloss_S = temp_y_S_output * p_S - pb_S_output * temp_y_S_input
-        return [L, S, adjloss_L, adjloss_S, pt_L, pt_S, p_L, p_S, self.lambda_L, self.lambda_S, self.lambda_spatial_L, self.lambda_spatial_S, self.gamma, self.lambda_step]
-class LSFPNet(nn.Module):
-    def __init__(self, LayerNo, lambdas, channels=32):
-        super(LSFPNet, self).__init__()
-        onelayer = []
-        self.LayerNo = LayerNo
-        self.channels = channels
-        for ii in range(LayerNo):
-            onelayer.append(BasicBlock(lambdas, channels=self.channels))
-        self.fcs = nn.ModuleList(onelayer)
-    def plot_block_output(self, M0, L, S, iter, epoch, output_dir):
-        time_frame_index = 3
-        nx, ny, nt = M0.size()
-        L = torch.reshape(L, [nx, ny, nt])
-        S = torch.reshape(S, [nx, ny, nt])
-        output_image = L + S
-        fig, axes = plt.subplots(1, 4, figsize=(24, 6))
-        fig.suptitle(f"Basic Block Output at Time Frame {time_frame_index} and Iteration {iter}", fontsize=20)
-        axes[0].imshow(np.abs(M0[..., time_frame_index].cpu().numpy()), cmap='gray')
-        axes[0].set_title("Input Image")
-        axes[0].axis("off")
-        axes[1].imshow(np.abs(L[..., time_frame_index].cpu().detach().numpy()), cmap='gray')
-        axes[1].set_title("Background Component (L)")
-        axes[1].axis("off")
-        axes[2].imshow(np.abs(S[..., time_frame_index].cpu().detach().numpy()), cmap='gray')
-        axes[2].set_title("Dynamic Component (S)")
-        axes[2].axis("off")
-        axes[3].imshow(np.abs(output_image[..., time_frame_index].cpu().detach().numpy()), cmap='gray')
-        axes[3].set_title("Combined Image (L + S)")
-        axes[3].axis("off")
-        filename = os.path.join(output_dir, f'basic_block_{iter}_output_{epoch}.png')
-        plt.savefig(filename)
-        plt.close()
-    def forward(self, M0, param_E, param_d, csmap, epoch, output_dir):
-        nx, ny, nt = M0.size()
-        L = torch.zeros([nx * ny, nt], dtype=dtype).to(param_d.device)
-        S = torch.zeros([nx * ny, nt], dtype=dtype).to(param_d.device)
-        pt_L = torch.zeros([nx * ny, nt], dtype=dtype).to(param_d.device)
-        pt_S = torch.zeros([nx * ny, nt], dtype=dtype).to(param_d.device)
-        p_L = torch.zeros([2, self.channels, nx, ny, nt], dtype=torch.float32).to(param_d.device)
-        p_S = torch.zeros([2, self.channels, nx, ny, nt], dtype=torch.float32).to(param_d.device)
-        layers_adj_L = []
-        layers_adj_S = []
-        for ii in range(self.LayerNo):
-            [L, S, layer_adj_L, layer_adj_S, pt_L, pt_S, p_L, p_S, lambda_L, lambda_S, lambda_spatial_L, lambda_spatial_S, gamma, lambda_step] = self.fcs[ii](M0, param_E, param_d, L, S, pt_L, pt_S, p_L, p_S, csmap)
-            layers_adj_L.append(layer_adj_L)
-            layers_adj_S.append(layer_adj_S)
-            self.plot_block_output(M0, L, S, iter=ii, epoch=epoch, output_dir=output_dir)
-        L = torch.reshape(L, [nx, ny, nt])
-        S = torch.reshape(S, [nx, ny, nt])
-        return [L, S, layers_adj_L, layers_adj_S, lambda_L, lambda_S, lambda_spatial_L, lambda_spatial_S, gamma, lambda_step]
-class ArtifactRemovalLSFPNet(nn.Module):
-    def __init__(self, backbone_net, output_dir, **kwargs):
-        super(ArtifactRemovalLSFPNet, self).__init__()
-        self.backbone_net = backbone_net
-        self.output_dir = output_dir
-    @staticmethod
-    def _normalise_both(zf: torch.Tensor, data: torch.Tensor):
-        """
-        Per-dynamic-series max-magnitude scaling (paper default).
-        Both `zf` (image) and `data` (k-space) share the SAME scalar.
-        """
-        scale = zf.abs().max()                       # scalar, grads OK
-        return zf / scale, data / scale, scale
-    @staticmethod
-    def _normalise_indep(x: torch.Tensor):
-        """
-        Per-dynamic-series max-magnitude scaling (paper default).
-        Both `zf` (image) and `data` (k-space) share the SAME scalar.
-        """
-        scale = torch.quantile(x.abs(), 0.99) + 1e-6
-        if scale < 1e-6: # Handle case where input is all zeros
-             scale = 1.0
-        return x / scale, scale
-    def forward(self, y, E, csmap, epoch, norm="both", **kwargs):
-        x_init = E(inv=True, data=y, smaps=csmap)
-        if norm =="both":
-            x_init_norm, y_norm, scale = self._normalise_both(x_init, y)
-        elif norm == "independent":
-            x_init_norm, scale = self._normalise_indep(x_init)
-            y_norm, scale_y = self._normalise_indep(y)
-        elif norm == "none":
-            x_init_norm = x_init
-            y_norm = y
-            scale = 1.0
-        L, S, loss_layers_adj_L, loss_layers_adj_S, lambda_L, lambda_S, lambda_spatial_L, lambda_spatial_S, gamma, lambda_step  = self.backbone_net(x_init_norm, E, y_norm, csmap, epoch, self.output_dir)
-        loss_constraint_L = torch.square(torch.mean(loss_layers_adj_L[0])) / self.backbone_net.LayerNo
-        loss_constraint_S = torch.square(torch.mean(loss_layers_adj_S[0])) / self.backbone_net.LayerNo
-        for k in range(self.backbone_net.LayerNo - 1):
-            loss_constraint_S += torch.square(torch.mean(loss_layers_adj_S[k + 1])) / self.backbone_net.LayerNo
-            loss_constraint_L += torch.square(torch.mean(loss_layers_adj_L[k + 1])) / self.backbone_net.LayerNo
-        recon = (L + S) * scale                 # rescale to original units
-        x_hat = torch.stack((recon.real, recon.imag), dim=0).unsqueeze(0)  # (B,2,H,W,T)
-        return x_hat, loss_constraint_L + loss_constraint_S, lambda_L, lambda_S, lambda_spatial_L, lambda_spatial_S, gamma, lambda_step
-
-=== dataloader.py ===
-import glob
-import os
-import h5py
-import numpy as np
-import torch
-from torch.utils.data import DataLoader, Dataset
-import nibabel as nib
-from einops import rearrange
-import random
-import sigpy as sp
-from utils import prep_nufft
-from radial_lsfp import MCNUFFT
-import time
-class SliceDataset(Dataset):
-    """
-    A Dataset that:
-      - Looks for all .h5/.hdf5 files under `root_dir`.
-      - Each file is assumed to contain a dataset at `dataset_key`, with shape (... Z),
-        where Z is the number of slices/partitions.
-      - Splits each volume into Z separate examples (one per slice).
-      - Returns each slice as a torch.Tensor.
-    """
-    def __init__(
-        self,
-        root_dir,
-        patient_ids,
-        dataset_key="kspace",
-        file_pattern="*.h5",
-        slice_idx=41,
-        N_time = 8,
-        N_coils=16
-    ):
-        """
-        Args:
-            root_dir (str): Path to the folder containing all HDF5 k-space files.
-            dataset_key (str): The key/path inside each .h5 file to the k-space dataset (e.g. "kspace").
-            file_pattern (str): Glob pattern to match your HDF5 files (default "*.h5").
-        """
-        super().__init__()
-        self.root_dir = root_dir
-        self.dataset_key = dataset_key
-        self.slice_idx = slice_idx
-        self.N_time = N_time
-        self.N_coils = N_coils
-        all_files = sorted(glob.glob(os.path.join(root_dir, file_pattern)))
-        print("Number of files in root directory: ", len(all_files))
-        if len(all_files) == 0:
-            raise RuntimeError(
-                f"No files found in {root_dir} matching pattern {file_pattern}"
-            )
-        filtered = []
-        for fp in all_files:
-            fname = os.path.basename(fp)
-            if any(pid in fname for pid in patient_ids):
-                filtered.append(fp)
-        self.file_list = filtered
-        if len(self.file_list) == 0:
-            raise RuntimeError("No files matched the provided patient_ids filter.")
-    def load_dynamic_img(self, patient_id):
-        H = W = 320
-        data = np.empty((2, self.N_time, H, W), dtype=np.float32)
-        for t in range(self.N_time):
-            img_path = f'/ess/scratch/scratch1/rachelgordon/dce-{self.N_time}tf/{patient_id}/slice_{self.slice_idx:03d}_frame_{t:03d}.nii'
-            img = nib.load(img_path)
-            img_data = img.get_fdata()
-            if img_data.shape != (2, H, W):
-                raise ValueError(f"{img_path} has shape {img_data.shape}; "
-                                f"expected (2, {H}, {W})")
-            data[:, t] = img_data.astype(np.float32)
-        return torch.from_numpy(data) 
-    def load_csmaps(self, patient_id):
-        ground_truth_dir = os.path.join(os.path.dirname(self.root_dir), 'cs_maps')
-        csmap_path = os.path.join(ground_truth_dir, patient_id + '_cs_maps', f'cs_map_slice_{self.slice_idx:03d}.npy')
-        csmap = np.load(csmap_path)
-        return csmap.squeeze()
-    def __len__(self):
-        return len(self.file_list)
-    def __getitem__(self, idx):
-        """
-        Returns a single slice of k-space as a torch.Tensor.
-        The output shape will be the standard (C=2, T, S, I) where C is [real, imag].
-        """
-        file_path = self.file_list[idx]
-        patient_id = file_path.split('/')[-1].strip('.h5')
-        grasp_img = self.load_dynamic_img(patient_id)
-        csmap = self.load_csmaps(patient_id)
-        with h5py.File(file_path, "r") as f:
-            ds = torch.tensor(f[self.dataset_key][:])
-            kspace_slice = ds[self.slice_idx]
-        if self.N_coils == 1:
-            kspace_slice = kspace_slice[:, 0, :, :]  # Shape: (T, S, I)
-        real_part = kspace_slice.real
-        imag_part = kspace_slice.imag
-        kspace_final = torch.stack([real_part, imag_part], dim=0).float()
-        N_samples = kspace_final.shape[-1]
-        spokes_per_frame = kspace_final.shape[-2]
-        return kspace_final, csmap, grasp_img, N_samples, spokes_per_frame, self.N_time
-class SimulatedDataset(Dataset):
-    """
-    Dataset for loading the simulated data generated by your script.
-    It loads the simulated k-space, coil sensitivity maps, and the
-    ground truth dynamic image (DRO).
-    """
-    def __init__(self, root_dir, model_type, patient_ids):
-        self.model_type = model_type
-        self.sample_paths = sorted(glob.glob(os.path.join(root_dir, 'sample_*')))
-        if not self.sample_paths:
-            raise FileNotFoundError(f"No sample directories found in {root_dir}. "
-                                    "Please check the path to your simulated dataset.")
-        filtered = []
-        for fp in self.sample_paths:
-            fname = os.path.basename(fp)
-            if any(pid in fname for pid in patient_ids):
-                filtered.append(fp)
-        self.sample_paths = filtered
-        print(f"Found {len(self.sample_paths)} simulated samples in {root_dir} for this dataset.")
-        self.TISSUE_NAMES = [
-            'glandular', 'benign', 'malignant', 'muscle',
-            'skin', 'liver', 'heart', 'vascular'
-        ]
-    def __len__(self):
-        return len(self.sample_paths)
-    def __getitem__(self, idx):
-        sample_dir = self.sample_paths[idx]
-        kspace_complex = np.load(os.path.join(sample_dir, 'simulated_kspace.npy'))
-        csmaps = np.load(os.path.join(sample_dir, 'csmaps.npy'))
-        dro = np.load(os.path.join(sample_dir, 'dro_ground_truth.npz'))
-        grasp_recon = np.load(os.path.join(sample_dir, 'grasp_recon.npy'))
-        ground_truth_complex = dro['ground_truth_images']
-        parMap = dro['parMap']
-        aif = dro['aif']
-        S0 = dro['S0']
-        T10 = dro['T10']
-        mask_dictionary_rebuilt = {}
-        for tissue_name in self.TISSUE_NAMES:
-            if tissue_name in dro:
-                mask_dictionary_rebuilt[tissue_name] = dro[tissue_name]
-        mask = mask_dictionary_rebuilt
-        ground_truth_torch = torch.from_numpy(ground_truth_complex).permute(2, 0, 1) # T, H, W
-        ground_truth_torch = torch.stack([ground_truth_torch.real, ground_truth_torch.imag], dim=0)
-        grasp_recon_torch = torch.from_numpy(grasp_recon).permute(2, 0, 1) # T, H, W
-        grasp_recon_torch = torch.stack([grasp_recon_torch.real, grasp_recon_torch.imag], dim=0)
-        csmaps_torch = torch.from_numpy(csmaps).permute(2, 0, 1).unsqueeze(0)
-        if self.model_type == "CRNN":
-            kspace_real_imag = np.stack([kspace_complex.real, kspace_complex.imag]) # (2, C, Samples, T)
-            kspace_torch = torch.from_numpy(kspace_real_imag)
-            kspace_torch = kspace_torch.permute(2, 0, 1, 3).unsqueeze(0) # (B, C, 2, Samples, T)
-        elif self.model_type == "LSFPNet":
-            kspace_torch = torch.from_numpy(kspace_complex)
-        else:
-            raise ValueError(f"Unsupported model_type for SimulatedDataset: {self.model_type}")
-        return kspace_torch, csmaps_torch, ground_truth_torch, grasp_recon_torch, mask#, parMap, aif, S0, T10, mask
-class SimulatedSPFDataset(Dataset):
-    """
-    Dataset for loading the simulated data generated by your script.
-    It loads the simulated k-space, coil sensitivity maps, and the
-    ground truth dynamic image (DRO).
-    """
-    def __init__(self, root_dir, model_type, patient_ids):
-        self.model_type = model_type
-        self.sample_paths = sorted(glob.glob(os.path.join(root_dir, 'sample_*')))
-        if not self.sample_paths:
-            raise FileNotFoundError(f"No sample directories found in {root_dir}. "
-                                    "Please check the path to your simulated dataset.")
-        filtered = []
-        for fp in self.sample_paths:
-            fname = os.path.basename(fp)
-            if any(pid in fname for pid in patient_ids):
-                filtered.append(fp)
-        self.sample_paths = filtered
-        print(f"Found {len(self.sample_paths)} simulated samples in {root_dir} for this dataset.")
-        self.TISSUE_NAMES = [
-            'glandular', 'benign', 'malignant', 'muscle',
-            'skin', 'liver', 'heart', 'vascular'
-        ]
-        self.spokes_per_frame = 16
-        self.num_frames = 20
-        self.window = slice(1, 21)
-    def __len__(self):
-        return len(self.sample_paths)
-    def __getitem__(self, idx):
-        sample_dir = self.sample_paths[idx]
-        print(f"  Testing {self.spokes_per_frame} spokes/frame with {self.num_frames} frames.")
-        csmaps = np.load(os.path.join(sample_dir, 'csmaps.npy'))
-        dro = np.load(os.path.join(sample_dir, 'dro_ground_truth.npz'))
-        grasp_recon = np.load(os.path.join(sample_dir, f'grasp_spf{self.spokes_per_frame}_frames{self.num_frames}.npy'))
-        ground_truth_complex = dro['ground_truth_images']
-        ground_truth_complex = ground_truth_complex[..., self.window]
-        smap_torch = rearrange(torch.tensor(csmaps), 'h w c -> c h w').unsqueeze(0)
-        simImg_torch = torch.tensor(ground_truth_complex).to(torch.cfloat)
-        parMap = dro['parMap']
-        aif = dro['aif']
-        S0 = dro['S0']
-        T10 = dro['T10']
-        mask_dictionary_rebuilt = {}
-        for tissue_name in self.TISSUE_NAMES:
-            if tissue_name in dro:
-                mask_dictionary_rebuilt[tissue_name] = dro[tissue_name]
-        mask = mask_dictionary_rebuilt
-        ground_truth_torch = torch.from_numpy(ground_truth_complex).permute(2, 0, 1) # T, H, W
-        ground_truth_torch = torch.stack([ground_truth_torch.real, ground_truth_torch.imag], dim=0)
-        grasp_recon_torch = torch.from_numpy(grasp_recon).permute(2, 0, 1) # T, H, W
-        grasp_recon_torch = torch.stack([grasp_recon_torch.real, grasp_recon_torch.imag], dim=0)
-        csmaps_torch = torch.from_numpy(csmaps).permute(2, 0, 1).unsqueeze(0)
-        return smap_torch, simImg_torch, grasp_recon_torch, mask #, parMap, aif, S0, T10, mask
-class SliceDatasetAug(Dataset):
-    """
-    A Dataset that:
-      - Looks for all .h5/.hdf5 files under `root_dir`.
-      - Each file is assumed to contain a dataset at `dataset_key`, with shape (... Z),
-        where Z is the number of slices/partitions.
-      - Splits each volume into Z separate examples (one per slice).
-      - Returns each slice as a torch.Tensor.
-    """
-    def __init__(
-        self,
-        root_dir,
-        patient_ids,
-        dataset_key="kspace",
-        file_pattern="*.h5",
-        slice_idx=41,
-        N_time = 8,
-        N_coils=16
-    ):
-        """
-        Args:
-            root_dir (str): Path to the folder containing all HDF5 k-space files.
-            dataset_key (str): The key/path inside each .h5 file to the k-space dataset (e.g. "kspace").
-            file_pattern (str): Glob pattern to match your HDF5 files (default "*.h5").
-        """
-        super().__init__()
-        self.root_dir = root_dir
-        self.dataset_key = dataset_key
-        self.slice_idx = slice_idx
-        self.N_time = N_time
-        self.N_coils = N_coils
-        all_files = sorted(glob.glob(os.path.join(root_dir, file_pattern)))
-        print("Number of files in root directory: ", len(all_files))
-        if len(all_files) == 0:
-            raise RuntimeError(
-                f"No files found in {root_dir} matching pattern {file_pattern}"
-            )
-        filtered = []
-        for fp in all_files:
-            fname = os.path.basename(fp)
-            if any(pid in fname for pid in patient_ids):
-                filtered.append(fp)
-        self.file_list = filtered
-        if len(self.file_list) == 0:
-            raise RuntimeError("No files matched the provided patient_ids filter.")
-        self.spokes_range = [12, 16, 24, 32, 36, 48]
-    def load_dynamic_img(self, patient_id):
-        H = W = 320
-        data = np.empty((2, self.N_time, H, W), dtype=np.float32)
-        for t in range(self.N_time):
-            img_path = f'/ess/scratch/scratch1/rachelgordon/dce-{self.N_time}tf/{patient_id}/slice_{self.slice_idx:03d}_frame_{t:03d}.nii'
-            img = nib.load(img_path)
-            img_data = img.get_fdata()
-            if img_data.shape != (2, H, W):
-                raise ValueError(f"{img_path} has shape {img_data.shape}; "
-                                f"expected (2, {H}, {W})")
-            data[:, t] = img_data.astype(np.float32)
-        return torch.from_numpy(data) 
-    def load_csmaps(self, patient_id):
-        ground_truth_dir = os.path.join(os.path.dirname(self.root_dir), 'cs_maps')
-        csmap_path = os.path.join(ground_truth_dir, patient_id + '_cs_maps', f'cs_map_slice_{self.slice_idx:03d}.npy')
-        csmap = np.load(csmap_path)
-        return csmap.squeeze()
-    def __len__(self):
-        return len(self.file_list)
-    def __getitem__(self, idx):
-        """
-        Returns a single slice of k-space as a torch.Tensor.
-        The output shape will be the standard (C=2, T, S, I) where C is [real, imag].
-        """
-        file_path = self.file_list[idx]
-        patient_id = file_path.split('/')[-1].strip('.h5')
-        grasp_img = self.load_dynamic_img(patient_id)
-        csmap = self.load_csmaps(patient_id)
-        with h5py.File(file_path, "r") as f:
-            ds = torch.tensor(f[self.dataset_key][:])
-            kspace_slice = ds[self.slice_idx]
-        total_spokes = kspace_slice.shape[0] * kspace_slice.shape[2]
-        N_samples = kspace_slice.shape[-1]
-        kspace = rearrange(kspace_slice, 't c sp sam -> t sp c sam')
-        kspace_flat = kspace.contiguous().view(total_spokes, self.N_coils, N_samples)
-        spokes_per_frame = random.choice(self.spokes_range)
-        N_time = total_spokes // spokes_per_frame
-        kspace_binned = kspace_flat.view(N_time, spokes_per_frame, self.N_coils, N_samples)
-        kspace_binned = rearrange(kspace_binned, 't sp c sam -> t c sp sam')
-        real_part = kspace_binned.real
-        imag_part = kspace_binned.imag
-        kspace_final = torch.stack([real_part, imag_part], dim=0).float()
-        return kspace_final, csmap, grasp_img, N_samples, spokes_per_frame, N_time
-
-=== lsp.py ===
-import torch
-import numpy as np
-from time import time
-dtype=torch.complex64
-def Project_inf(x, c, to_complex=True):
-    x_max = torch.maximum((abs(x) / c), torch.tensor(1))
-    if to_complex:
-        x_max = x_max.to(dtype)
-    s = torch.div(x, x_max)
-    return s
-def Wxs(x):
-    temp_x = torch.zeros_like(x, dtype=dtype)
-    temp_x[:, 0:x.shape[1]-2] = x[:, 1:x.shape[1]-1]
-    temp_x[:, x.shape[1]-1] = temp_x[:, x.shape[1]-1]
-    res = temp_x - x
-    return res
-def Wtxs(x):
-    temp_x = torch.zeros_like(x, dtype=dtype)
-    temp_x[:, 0] = temp_x[:, 0]
-    temp_x[:, 1:x.shape[1]-1] = x[:, 0:x.shape[1]-2]
-    res = temp_x - x
-    res[:, 0] = -x[:, 0]
-    res[:, x.shape[1]-1] = x[:, x.shape[1]-2]
-    return res
-def LSP(param_E, param_d, param_lambda_L, param_lambda_S, param_nite, param_tol):
-    '''
-    :param param_E:
-    :param param_d:
-    :param param_lambda_L:
-    :param param_lambda_S:
-    :param param_nite:
-    :param param_tol:
-    :return:
-    '''
-    M = param_E(inv=True, data=param_d)
-    nx, ny, nt = M.size()
-    L = torch.zeros([nx * ny, nt], dtype=dtype)
-    S = torch.zeros([nx * ny, nt], dtype=dtype)
-    p_L = torch.zeros([nx * ny, nt], dtype=dtype)
-    p_S = torch.zeros([nx * ny, nt], dtype=dtype)
-    gamma = 0.5
-    lambda_step = 1/10
-    c = lambda_step/gamma
-    loss = torch.zeros(param_nite, dtype=float)
-    for itr in range(0, param_nite):
-        temp_data = torch.reshape(L+S, [nx, ny, nt])
-        gradient = param_E(inv=True, data=param_E(inv=False, data=temp_data) - param_d)
-        gradient = torch.reshape(gradient, [nx * ny, nt])
-        y_L = L - gamma * gradient - gamma * p_L
-        Par_L = c * y_L + p_L
-        Ut, St, Vt = torch.svd(Par_L)
-        temp_St = torch.diag(Project_inf(St, param_lambda_L))
-        p_L = Ut.mm(temp_St).mm(Vt.T)
-        L = L - gamma * gradient - gamma * p_L
-        y_S = S - gamma * gradient - gamma * Wtxs(p_S)
-        Par_S = c * Wxs(y_S) + p_S
-        p_S = Project_inf(Par_S, param_lambda_S)
-        S = S - gamma * gradient - gamma * Wtxs(p_S)
-        loss[itr] = 0
-        print(' iteration: %d/%d, Loss: %f' % (itr+1, param_nite, loss[itr]))
-    Ut, St, Vt = torch.svd(L)
-    L = torch.matmul((Ut[:, 0]*St[0]).unsqueeze(1), Vt[:, 0].unsqueeze(0))
-    L = torch.reshape(L, [nx, ny, nt])
-    S = torch.reshape(S, [nx, ny, nt])
-    return L, S, loss
-
-=== radial_lsfp.py ===
-import torch
-import torch.nn as nn
-import numpy as np
-from time import time
-dtype = torch.complex64
-class MCNUFFT(nn.Module):
-    def __init__(self, nufft_ob, adjnufft_ob, ktraj, dcomp):
-        super(MCNUFFT, self).__init__()
-        self.nufft_ob = nufft_ob
-        self.adjnufft_ob = adjnufft_ob
-        self.ktraj = torch.squeeze(ktraj)
-        self.dcomp = torch.squeeze(dcomp)
-    def forward(self, inv, data, smaps):
-        data = torch.squeeze(data)  # delete redundant dimension
-        Nx = smaps.shape[2]
-        Ny = smaps.shape[3]
-        if inv:  # adjoint nufft
-            smaps = smaps.to(dtype)
-            if len(data.shape) > 2:  # multi-frame
-                x = torch.zeros([Nx, Ny, data.shape[2]], dtype=dtype)
-                for ii in range(0, data.shape[2]):
-                    kd = data[:, :, ii]
-                    k = self.ktraj[:, :, ii]
-                    d = self.dcomp[:, ii]
-                    kd = kd.unsqueeze(0)
-                    d = d.unsqueeze(0).unsqueeze(0)
-                    tt1 = time()
-                    x_temp = self.adjnufft_ob(kd * d, k, smaps=smaps)
-                    x[:, :, ii] = torch.squeeze(x_temp) / np.sqrt(Nx * Ny)
-                    tt2 = time()
-            else:  # single frame
-                kd = data.unsqueeze(0)
-                d = self.dcomp.unsqueeze(0).unsqueeze(0)
-                x = self.adjnufft_ob(kd * d, self.ktraj, smaps=smaps)
-                x = torch.squeeze(x) / np.sqrt(Nx * Ny)
-        else:  # forward nufft
-            if len(data.shape) > 2:  # multi-frame
-                x = torch.zeros([smaps.shape[1], self.ktraj.shape[1], data.shape[-1]], dtype=dtype)
-                for ii in range(0, data.shape[-1]):
-                    image = data[:, :, ii]
-                    k = self.ktraj[:, :, ii]
-                    image = image.unsqueeze(0).unsqueeze(0)
-                    x_temp = self.nufft_ob(image, k, smaps=smaps)
-                    x[:, :, ii] = torch.squeeze(x_temp) / np.sqrt(Nx * Ny)
-            else:  # single frame
-                image = data.unsqueeze(0).unsqueeze(0)
-                x = self.nufft_ob(image, self.ktraj, smaps=smaps)
-                x = torch.squeeze(x) / np.sqrt(Nx * Ny)
-        return x
-
-=== mc.py ===
-from typing import Union
-import torch
-from deepinv.loss.loss import Loss
-from deepinv.loss.metric.metric import Metric
-from deepinv.transform.base import Transform
-from radial import to_torch_complex
-class MCLoss(Loss):
-    r"""
-    Measurement consistency loss
-    This loss enforces that the reconstructions are measurement-consistent, i.e., :math:`y=\forw{\inverse{y}}`.
-    The measurement consistency loss is defined as
-    .. math::
-        \|y-\forw{\inverse{y}}\|^2
-    where :math:`\inverse{y}` is the reconstructed signal and :math:`A` is a forward operator.
-    By default, the error is computed using the MSE metric, however any other metric (e.g., :math:`\ell_1`)
-    can be used as well.
-    :param Metric, torch.nn.Module metric: metric used for computing data consistency, which is set as the mean squared error by default.
-    """
-    def __init__(self, model_type, metric: Union[Metric, torch.nn.Module] = torch.nn.MSELoss()):
-        super(MCLoss, self).__init__()
-        self.name = "mc"
-        self.metric = metric
-        self.device = torch.device("cuda")
-        self.model_type = model_type
-    def forward(self, y, x_net, physics, csmap, **kwargs):
-        r"""
-        Computes the measurement splitting loss
-        :param torch.Tensor y: measurements.
-        :param torch.Tensor x_net: reconstructed image :math:`\inverse{y}`.
-        :param deepinv.physics.Physics physics: forward operator associated with the measurements.
-        :return: (:class:`torch.Tensor`) loss.
-        """
-        if self.model_type == "CRNN":
-            return self.metric(physics.A(x_net, csmap), y)
-        elif self.model_type == "LSFPNet":
-            x_net = to_torch_complex(x_net)
-            y_hat = physics(inv=False, data=x_net, smaps=csmap).to(self.device)
-            y_hat = torch.stack([y_hat.real, y_hat.imag], dim=-1)
-            y = torch.stack([y.real, y.imag], dim=-1)
-            return self.metric(y_hat, y)
 

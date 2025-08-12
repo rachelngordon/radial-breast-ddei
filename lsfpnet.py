@@ -93,48 +93,48 @@ class BasicBlock(nn.Module):
 
         # --- START OF THE ROBUST COMPLEX SVD FIX ---
 
-        # svd_input_complex = c * y_L + pt_L
-        # # print(f"Shape of svd_input_complex before processing: {svd_input_complex.shape}")
+        svd_input_complex = c * y_L + pt_L
+        # print(f"Shape of svd_input_complex before processing: {svd_input_complex.shape}")
 
-        # # svd_input_complex = svd_input_complex.view(-1, n_frames, n_frames)
+        # svd_input_complex = svd_input_complex.view(-1, n_frames, n_frames)
         
-        # # 1. Store the original magnitude and phase of the complex matrix.
-        # #    Add a small epsilon to the magnitude to prevent division by zero when calculating phase.
-        # svd_input_mag = svd_input_complex.abs() + 1e-8
-        # original_phase = svd_input_complex / svd_input_mag
+        # 1. Store the original magnitude and phase of the complex matrix.
+        #    Add a small epsilon to the magnitude to prevent division by zero when calculating phase.
+        svd_input_mag = svd_input_complex.abs() + 1e-8
+        original_phase = svd_input_complex / svd_input_mag
 
-        # # print(f"Shape of svd_input_mag before regularization: {svd_input_mag.shape}")
+        # print(f"Shape of svd_input_mag before regularization: {svd_input_mag.shape}")
 
-        # # epsilon = 1e-6
-        # # stable_input = svd_input_mag + epsilon * torch.eye(svd_input_mag.shape[-1], device=svd_input_mag.device)
+        # epsilon = 1e-6
+        # stable_input = svd_input_mag + epsilon * torch.eye(svd_input_mag.shape[-1], device=svd_input_mag.device)
 
-        # # print(f"Shape of stable_input after regularization: {stable_input.shape}")
-
-        # # noise_std = 1e-5 # A small standard deviation for the noise
-        # # noise = torch.randn_like(svd_input_mag) * noise_std
+        # print(f"Shape of stable_input after regularization: {stable_input.shape}")
 
         # noise_std = 1e-5 # A small standard deviation for the noise
         # noise = torch.randn_like(svd_input_mag) * noise_std
 
-        # stable_svd_input = svd_input_mag + noise #epsilon
+        noise_std = 1e-5 # A small standard deviation for the noise
+        noise = torch.randn_like(svd_input_mag) * noise_std
+
+        stable_svd_input = svd_input_mag + noise #epsilon
 
         
 
-        # # 2. Perform SVD on the REAL-VALUED magnitude matrix. 
-        # #    This completely avoids the complex svd_backward error.
-        # #    Using linalg.svd is fine here since the input is real.
-        # Ut, St, Vt = torch.linalg.svd(stable_svd_input, full_matrices=False)
+        # 2. Perform SVD on the REAL-VALUED magnitude matrix. 
+        #    This completely avoids the complex svd_backward error.
+        #    Using linalg.svd is fine here since the input is real.
+        Ut, St, Vt = torch.linalg.svd(stable_svd_input, full_matrices=False)
 
-        # # 3. Apply the shrinkage/thresholding to the real singular values.
-        # #    (Project_inf operates on magnitudes, so this is correct).
-        # St_shrunk = Project_inf(St, self.lambda_L, to_complex=False)
+        # 3. Apply the shrinkage/thresholding to the real singular values.
+        #    (Project_inf operates on magnitudes, so this is correct).
+        St_shrunk = Project_inf(St, self.lambda_L, to_complex=False)
 
-        # # 4. Reconstruct the new, thresholded MAGNITUDE matrix.
-        # pt_L_mag = Ut @ torch.diag_embed(St_shrunk) @ Vt
+        # 4. Reconstruct the new, thresholded MAGNITUDE matrix.
+        pt_L_mag = Ut @ torch.diag_embed(St_shrunk) @ Vt
 
-        # # 5. Re-apply the original phase to our new magnitude matrix to get the
-        # #    final complex-valued update term.
-        # pt_L = pt_L_mag * original_phase
+        # 5. Re-apply the original phase to our new magnitude matrix to get the
+        #    final complex-valued update term.
+        pt_L = pt_L_mag * original_phase
 
 
         # --- HOOK IMPLEMENTATION START ---
@@ -168,21 +168,21 @@ class BasicBlock(nn.Module):
 
         # --- END OF THE ROBUST COMPLEX SVD FIX ---
 
-        svd_input = c * y_L + pt_L
+        # svd_input = c * y_L + pt_L
         
         # Add a very small amount of random noise to the input matrix.
         # This is a standard technique to break ties in singular values and
         # prevent the gradient calculation from becoming ill-defined.
-        noise_std = 1e-3 # A small standard deviation for the noise
-        noise = torch.randn_like(svd_input) * noise_std
+        # noise_std = 1e-3 # A small standard deviation for the noise
+        # noise = torch.randn_like(svd_input) * noise_std
 
         
-        # Perform SVD on the slightly perturbed matrix
-        Ut, St, Vt = torch.svd(svd_input + noise)
+        # # Perform SVD on the slightly perturbed matrix
+        # Ut, St, Vt = torch.svd(svd_input + noise)
 
-        Ut, St, Vt = torch.linalg.svd((c * y_L + pt_L), full_matrices=False)
-        temp_St = torch.diag(Project_inf(St, self.lambda_L))
-        pt_L = Ut.mm(temp_St).mm(Vt)
+        # Ut, St, Vt = torch.linalg.svd((c * y_L + pt_L), full_matrices=False)
+        # temp_St = torch.diag(Project_inf(St, self.lambda_L))
+        # pt_L = Ut.mm(temp_St).mm(Vt)
 
         # update p_L
         temp_y_L_input = torch.cat((torch.real(y_L), torch.imag(y_L)), 0).to(torch.float32)

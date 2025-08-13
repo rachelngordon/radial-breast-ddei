@@ -18,7 +18,7 @@ from skimage.metrics import structural_similarity as ssim_map_func
 import matplotlib.gridspec as gridspec
 from skimage.measure import find_contours
 from typing import List, Dict
-
+from scipy.stats import pearsonr
 
 # ==========================================================
 # EVALUATION FUNCTIONS
@@ -359,6 +359,12 @@ def plot_temporal_curves(
         recon_curve = [recon_img_stack[:, :, t][mask].mean() for t in range(recon_img_stack.shape[2])]
         grasp_curve = [grasp_img_stack[:, :, t][mask].mean() for t in range(grasp_img_stack.shape[2])]
 
+
+        if region == 'malignant':
+            recon_correlation, _ = pearsonr(recon_curve, gt_curve)
+            grasp_correlation, _ = pearsonr(grasp_curve, gt_curve)
+
+
         # Plot
         axes[i].plot(time_points, gt_curve, 'k-', label='Ground Truth', linewidth=2, marker='o')
         axes[i].plot(time_points, recon_curve, 'r--', label='DL Recon', marker='o')
@@ -373,6 +379,8 @@ def plot_temporal_curves(
     plt.tight_layout(rect=[0, 0.03, 1, 0.95])
     plt.savefig(filename)
     plt.close()
+
+    return recon_correlation, grasp_correlation
 
 
 # def plot_temporal_curves(
@@ -934,7 +942,7 @@ def eval_sample(kspace, csmap, ground_truth, x_recon, physics, mask, grasp_img, 
 
         # --- Plot Temporal Curves for Key Regions ---
         # This is the most important plot for debugging your PK results!
-        plot_temporal_curves(
+        recon_corr, grasp_corr = plot_temporal_curves(
             gt_img_stack=gt_mag_np,
             recon_img_stack=recon_mag_np,
             grasp_img_stack=grasp_mag_np,
@@ -975,9 +983,12 @@ def eval_sample(kspace, csmap, ground_truth, x_recon, physics, mask, grasp_img, 
         )
 
         print("Diagnostic plots saved.")
+
+    else:
+        recon_corr, grasp_corr = None, None
     
     
-    return ssim, psnr, mse, dc
+    return ssim, psnr, mse, dc, recon_corr, grasp_corr
 
 
 

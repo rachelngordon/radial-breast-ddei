@@ -67,7 +67,7 @@ model:
 
 # Training settings
 training:
-  epochs: 1
+  epochs: 2
   save_interval: 1
   plot_interval: 20
   device: "cuda"  # or "cpu"
@@ -77,6 +77,6 @@ evaluation:
   simulated_dataset_path: "/ess/scratch/scratch1/rachelgordon/simulated_dataset/"
 
 debugging:
-  calc_step_0: false
+  calc_step_0: true
   enable_gradient_monitoring: true
   monitoring_interval: 5

@@ -924,7 +924,7 @@ def eval_sample(kspace, csmap, ground_truth, x_recon, physics, mask, grasp_img, 
     aif_time_points = np.linspace(0, 150, num_frames)
 
     print("\nGenerating diagnostic plots...")
-    if mask['malignant'].any():
+    if mask['malignant'].any() and label is not None:
         
         # --- Plot Spatial Quality at a Peak Enhancement Frame ---
         # Find a frame around peak enhancement (e.g., 1/3 of the way through)

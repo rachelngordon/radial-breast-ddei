@@ -6,6 +6,8 @@ import numpy as np
 from einops import rearrange
 import torchkbnufft as tkbn
 import csv
+import sigpy as sp
+from sigpy.mri import app
 
 def log_gradient_stats(model, epoch, iteration, output_dir, log_filename="gradient_stats.csv"):
     """
@@ -416,3 +418,57 @@ def to_torch_complex(x: torch.Tensor):
         f"Input tensor must have 2 channels (real, imag), but got shape {x.shape}"
     )
     return torch.view_as_complex(rearrange(x, "b c ... -> b ... c").contiguous())
+
+
+
+def get_traj(N_spokes=13, N_time=1, base_res=320, gind=1):
+
+    N_tot_spokes = N_spokes * N_time
+
+    N_samples = base_res * 2
+
+    base_lin = np.arange(N_samples).reshape(1, -1) - base_res
+
+    tau = 0.5 * (1 + 5**0.5)
+    base_rad = np.pi / (gind + tau - 1)
+
+    base_rot = np.arange(N_tot_spokes).reshape(-1, 1) * base_rad
+
+    traj = np.zeros((N_tot_spokes, N_samples, 2))
+    traj[..., 0] = np.cos(base_rot) @ base_lin
+    traj[..., 1] = np.sin(base_rot) @ base_lin
+
+    traj = traj / 2
+
+    traj = traj.reshape(N_time, N_spokes, N_samples, 2)
+
+    return np.squeeze(traj)
+
+
+
+def GRASPRecon(csmaps, kspace, spokes_per_frame, num_frames, grasp_path):
+
+    traj = get_traj(N_spokes=spokes_per_frame, N_time=num_frames)
+    device = sp.Device(0 if torch.cuda.is_available() else -1)
+
+    kspace = rearrange(kspace, 'c (sp sam) t -> t c sp sam', sam=640).unsqueeze(1).unsqueeze(3).cpu().numpy()
+    csmaps = rearrange(csmaps, 'b c h w -> c b h w').cpu().numpy()
+
+    # reconstruct image
+    R1 = app.HighDimensionalRecon(kspace, csmaps,
+                            combine_echo=False,
+                            lamda=0.001,
+                            coord=traj,
+                            regu='TV', regu_axes=[0],
+                            max_iter=10,
+                            solver='ADMM', rho=0.1,
+                            device=device,
+                            show_pbar=False,
+                            verbose=False).run()
+
+    R1 = np.squeeze(R1.get())
+
+    # np.save(grasp_path, R1)
+    # print(f"GRASP Recon with {spokes_per_frame} spokes/frame and {num_frames} timeframes saved to {grasp_path}")
+
+    return R1

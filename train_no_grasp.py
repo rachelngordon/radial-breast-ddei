@@ -15,7 +15,7 @@ from ei import EILoss
 from mc import MCLoss
 from lsfpnet_encoding import LSFPNet, ArtifactRemovalLSFPNet
 from radial_lsfp import MCNUFFT
-from utils import prep_nufft, log_gradient_stats, plot_enhancement_curve, get_cosine_ei_weight, plot_reconstruction_sample, get_git_commit, save_checkpoint, load_checkpoint, to_torch_complex, GRASPRecon
+from utils import prep_nufft, log_gradient_stats, plot_enhancement_curve, get_cosine_ei_weight, plot_reconstruction_sample, get_git_commit, save_checkpoint, load_checkpoint, to_torch_complex
 from eval import eval_grasp, eval_sample, plot_time_series
 import csv
 import math
@@ -570,7 +570,6 @@ else:
                 acceleration = torch.tensor([N_full / int(N_spokes)], dtype=torch.float, device=device)
             else: 
                 acceleration = None
-
 
             x_recon, adj_loss, lambda_L, lambda_S, lambda_spatial_L, lambda_spatial_S, gamma, lambda_step = model(
                 measured_kspace.to(device), physics, csmap, acceleration, epoch=f"train{epoch}", norm=config['model']['norm']
@@ -1197,11 +1196,12 @@ with torch.no_grad():
         eval_spf_dataset.num_frames = num_frames
 
 
-        for csmap, ground_truth, grasp_img, mask, grasp_path in tqdm(eval_spf_loader, desc="Variable Spokes Per Frame Evaluation"):
+        for csmap, ground_truth, grasp_img, mask in tqdm(eval_spf_loader, desc="Variable Spokes Per Frame Evaluation"):
 
 
             csmap = csmap.squeeze(0).to(device)   # Remove batch dim
             ground_truth = ground_truth.to(device) # Shape: (1, 2, T, H, W)
+            grasp_img = grasp_img.to(device)
 
 
             # SIMULATE KSPACE
@@ -1217,21 +1217,6 @@ with torch.no_grad():
                 acceleration = torch.tensor([N_full / int(spokes)], dtype=torch.float, device=device)
             else: 
                 acceleration = None
-
-            # check if GRASP image exists or if we need to perform GRASP recon
-            if grasp_img is None:
-                print(f"No GRASP file found, performing reconstruction with {spokes} spokes/frame and {num_frames} frames.")
-
-                grasp_img = GRASPRecon(csmap, sim_kspace, spokes, num_frames, grasp_path)
-
-                grasp_recon_torch = torch.from_numpy(grasp_img).permute(2, 0, 1) # T, H, W
-                grasp_recon_torch = torch.stack([grasp_recon_torch.real, grasp_recon_torch.imag], dim=0)
-
-                grasp_img = torch.flip(grasp_recon_torch, dims=[-3])
-                grasp_img = torch.rot90(grasp_img, k=3, dims=[-3,-1]).unsqueeze(0)
-
-            grasp_img = grasp_img.to(device)
-
             
             x_recon, *_ = model(
                 kspace.to(device), physics, csmap, acceleration, epoch=None, norm=config['model']['norm']
@@ -1268,20 +1253,24 @@ with torch.no_grad():
 
 
         # plot an example image comparison at the given temporal resolution
-        # ground_truth = ground_truth.squeeze()
-        # ground_truth = torch.abs(ground_truth[0] + 1j * ground_truth[1])
-        # ground_truth = rearrange(ground_truth, 't h w -> h w t')
+        print("ground_truth: ", ground_truth.shape)
+        print("x_recon: ", x_recon.shape)
+        print("grasp_img: ", grasp_img.shape)
 
-        # x_recon = x_recon.squeeze()
-        # x_recon = torch.abs(x_recon[0] + 1j * x_recon[1])
+        ground_truth = ground_truth.squeeze()
+        ground_truth = torch.abs(ground_truth[0] + 1j * ground_truth[1])
+        ground_truth = rearrange(ground_truth, 't h w -> h w t')
 
-        # grasp_img = grasp_img.squeeze()
-        # grasp_img = torch.abs(grasp_img[0] + 1j * grasp_img[1])
-        # grasp_img = rearrange(grasp_img, 'h t w -> h w t')
+        x_recon = x_recon.squeeze()
+        x_recon = torch.abs(x_recon[0] + 1j * x_recon[1])
+
+        grasp_img = grasp_img.squeeze()
+        grasp_img = torch.abs(grasp_img[0] + 1j * grasp_img[1])
+        grasp_img = rearrange(grasp_img, 'h t w -> h w t')
 
         
-        # filename = os.path.join(eval_dir, f'{spokes}spf_time_series.png')
-        # plot_time_series(ground_truth.cpu().numpy(), x_recon.cpu().numpy(), grasp_img.cpu().numpy(), filename)
+        filename = os.path.join(eval_dir, f'{spokes}spf_time_series.png')
+        plot_time_series(ground_truth.cpu().numpy(), x_recon.cpu().numpy(), grasp_img.cpu().numpy(), filename)
 
 
 
@@ -1326,11 +1315,13 @@ with torch.no_grad():
         eval_spf_dataset.num_frames = num_frames
 
 
-        for csmap, ground_truth, grasp_img, mask, grasp_path in tqdm(eval_spf_loader, desc="Variable Spokes Per Frame Evaluation"):
+        for csmap, ground_truth, grasp_img, mask in tqdm(eval_spf_loader, desc="Variable Spokes Per Frame Evaluation"):
 
 
             csmap = csmap.squeeze(0).to(device)   # Remove batch dim
             ground_truth = ground_truth.to(device) # Shape: (1, 2, T, H, W)
+
+            grasp_img = grasp_img.to(device)
 
             # SIMULATE KSPACE
             ktraj, dcomp, nufft_ob, adjnufft_ob = prep_nufft(640, spokes, num_frames)
@@ -1345,19 +1336,6 @@ with torch.no_grad():
                 acceleration = torch.tensor([N_full / int(spokes)], dtype=torch.float, device=device)
             else: 
                 acceleration = None
-
-            # check if GRASP image exists or if we need to perform GRASP recon
-            if grasp_img is None:
-                print(f"No GRASP file found, performing reconstruction with {spokes} spokes/frame and {num_frames} frames.")
-                grasp_img = GRASPRecon(csmap, sim_kspace, spokes, num_frames, grasp_path)
-
-                grasp_recon_torch = torch.from_numpy(grasp_img).permute(2, 0, 1) # T, H, W
-                grasp_recon_torch = torch.stack([grasp_recon_torch.real, grasp_recon_torch.imag], dim=0)
-
-                grasp_img = torch.flip(grasp_recon_torch, dims=[-3])
-                grasp_img = torch.rot90(grasp_img, k=3, dims=[-3,-1]).unsqueeze(0)
-
-            grasp_img = grasp_img.to(device)
 
 
             x_recon, *_ = model(
@@ -1384,19 +1362,23 @@ with torch.no_grad():
 
 
         # plot an example image comparison at the given temporal resolution
-        # ground_truth = ground_truth.squeeze()
-        # ground_truth = torch.abs(ground_truth[0] + 1j * ground_truth[1])
-        # ground_truth = rearrange(ground_truth, 't h w -> h w t')
+        print("ground_truth: ", ground_truth.shape)
+        print("x_recon: ", x_recon.shape)
+        print("grasp_img: ", grasp_img.shape)
 
-        # x_recon = x_recon.squeeze()
-        # x_recon = torch.abs(x_recon[0] + 1j * x_recon[1])
+        ground_truth = ground_truth.squeeze()
+        ground_truth = torch.abs(ground_truth[0] + 1j * ground_truth[1])
+        ground_truth = rearrange(ground_truth, 't h w -> h w t')
 
-        # grasp_img = grasp_img.squeeze()
-        # grasp_img = torch.abs(grasp_img[0] + 1j * grasp_img[1])
-        # grasp_img = rearrange(grasp_img, 'h t w -> h w t')
+        x_recon = x_recon.squeeze()
+        x_recon = torch.abs(x_recon[0] + 1j * x_recon[1])
 
-        # filename = os.path.join(eval_dir, f'{spokes}spf_time_series.png')
-        # plot_time_series(ground_truth.cpu().numpy(), x_recon.cpu().numpy(), grasp_img.cpu().numpy(), filename)
+        grasp_img = grasp_img.squeeze()
+        grasp_img = torch.abs(grasp_img[0] + 1j * grasp_img[1])
+        grasp_img = rearrange(grasp_img, 'h t w -> h w t')
+
+        filename = os.path.join(eval_dir, f'{spokes}spf_time_series.png')
+        plot_time_series(ground_truth.cpu().numpy(), x_recon.cpu().numpy(), grasp_img.cpu().numpy(), filename)
 
 
         spf_recon_ssim[spokes] = np.mean(spf_eval_ssims)

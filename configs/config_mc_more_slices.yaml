@@ -11,7 +11,7 @@ data:
   samples: 640
   coils: 16
   eval_timeframes: 22
-  spf_aug: false
+  spf_aug: true
 
 # Experiment settings
 experiment:
@@ -22,8 +22,10 @@ dataloader:
   batch_size: 1
   shuffle: false
   num_workers: 2
-  max_subjects: 2
-  slice_idx: 41
+  max_subjects: 3
+  slice_idx: None
+  slice_range_start: 20
+  slice_range_end: 60
 
 # Model settings
 model:
@@ -47,7 +49,7 @@ model:
     eps: 0.000000001
   losses:
     adj_loss:
-      weight: 100000
+      weight: 50000
     use_ei_loss: false
     mc_loss:
       weight: 1
@@ -67,7 +69,7 @@ model:
 
 # Training settings
 training:
-  epochs: 3
+  epochs: 2
   save_interval: 1
   plot_interval: 20
   device: "cuda"  # or "cpu"

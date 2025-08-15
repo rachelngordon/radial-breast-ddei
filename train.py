@@ -4,7 +4,7 @@ import os
 import matplotlib.pyplot as plt
 import torch
 import yaml
-from dataloader import SliceDataset, SimulatedDataset, SimulatedSPFDataset, SliceDatasetAug
+from dataloader import SliceDataset, SimulatedDataset, SimulatedSPFDataset
 from deepinv.transform import Transform
 from einops import rearrange
 from torch.utils.data import DataLoader
@@ -139,16 +139,17 @@ else:
 val_patient_ids = splits["val"]
 val_dro_patient_ids = splits["val_dro"]
 
-if config['data']['spf_aug']:
-    train_dataset = SliceDatasetAug(
-        root_dir=config["data"]["root_dir"],
-        patient_ids=train_patient_ids,
-        dataset_key=config["data"]["dataset_key"],
-        file_pattern="*.h5",
-        slice_idx=config["dataloader"]["slice_idx"],
-        N_coils=N_coils
-    )
-else:
+# if config['data']['spf_aug']:
+#     train_dataset = SliceDatasetAug(
+#         root_dir=config["data"]["root_dir"],
+#         patient_ids=train_patient_ids,
+#         dataset_key=config["data"]["dataset_key"],
+#         file_pattern="*.h5",
+#         slice_idx=config["dataloader"]["slice_idx"],
+#         N_coils=N_coils
+#     )
+
+if config['dataloader']['slice_range_start'] == "None" or config['dataloader']['slice_range_end'] == "None":
     train_dataset = SliceDataset(
         root_dir=config["data"]["root_dir"],
         patient_ids=train_patient_ids,
@@ -156,17 +157,31 @@ else:
         file_pattern="*.h5",
         slice_idx=config["dataloader"]["slice_idx"],
         N_time=N_time,
-        N_coils=N_coils
+        N_coils=N_coils,
+        spf_aug=config['data']['spf_aug'],
+    )
+else:
+    train_dataset = SliceDataset(
+        root_dir=config["data"]["root_dir"],
+        patient_ids=train_patient_ids,
+        dataset_key=config["data"]["dataset_key"],
+        file_pattern="*.h5",
+        slice_idx=range(config['dataloader']['slice_range_start'], config['dataloader']['slice_range_end']),
+        N_time=N_time,
+        N_coils=N_coils,
+        spf_aug=config['data']['spf_aug'],
     )
 
-val_dataset = SliceDataset(
-    root_dir=config["data"]["root_dir"],
-    patient_ids=val_patient_ids,
-    dataset_key=config["data"]["dataset_key"],
-    file_pattern="*.h5",
-    slice_idx=config["dataloader"]["slice_idx"],
-    N_coils=N_coils
-)
+
+
+# val_dataset = SliceDataset(
+#     root_dir=config["data"]["root_dir"],
+#     patient_ids=val_patient_ids,
+#     dataset_key=config["data"]["dataset_key"],
+#     file_pattern="*.h5",
+#     slice_idx=config["dataloader"]["slice_idx"],
+#     N_coils=N_coils
+# )
 
 val_dro_dataset = SimulatedDataset(
     root_dir=config["evaluation"]["simulated_dataset_path"], 
@@ -182,12 +197,12 @@ train_loader = DataLoader(
 )
 
 
-val_loader = DataLoader(
-    val_dataset,
-    batch_size=config["dataloader"]["batch_size"],
-    shuffle=config["dataloader"]["shuffle"],
-    num_workers=config["dataloader"]["num_workers"],
-)
+# val_loader = DataLoader(
+#     val_dataset,
+#     batch_size=config["dataloader"]["batch_size"],
+#     shuffle=config["dataloader"]["shuffle"],
+#     num_workers=config["dataloader"]["num_workers"],
+# )
 
 val_dro_loader = DataLoader(
     val_dro_dataset,
@@ -317,11 +332,12 @@ if args.from_checkpoint:
     weighted_train_mc_losses = train_curves["weighted_train_mc_losses"]
     weighted_train_ei_losses = train_curves["weighted_train_ei_losses"]
     weighted_train_adj_losses = train_curves["weighted_train_adj_losses"]
-    eval_ssims = eval_curves["ssim"]
-    eval_psnrs = eval_curves["psnr"]
-    eval_mses = eval_curves["mse"]
-    eval_dcs = eval_curves["dc"]
-    eval_curve_corrs = eval_curves["correlation"]
+    eval_ssims = eval_curves["eval_ssims"]
+    eval_psnrs = eval_curves["eval_psnrs"]
+    eval_mses = eval_curves["eval_mses"]
+    eval_dc_mses = eval_curves["eval_dc_mses"]
+    eval_dc_maes = eval_curves["eval_dc_maes"]
+    eval_curve_corrs = eval_curves["eval_curve_corrs"]
 else:
     train_mc_losses = []
     val_mc_losses = []
@@ -335,14 +351,16 @@ else:
     eval_ssims = []
     eval_psnrs = []
     eval_mses = []
-    eval_dcs = []
+    eval_dc_mses = []
+    eval_dc_maes = []
     eval_curve_corrs = []
 
 
 grasp_ssims = []
 grasp_psnrs = []
 grasp_mses = []
-grasp_dcs = []
+grasp_dc_mses = []
+grasp_dc_maes = []
 grasp_curve_corrs = []
 
 lambda_Ls = []
@@ -369,7 +387,8 @@ if args.from_checkpoint == False and config['debugging']['calc_step_0'] == True:
     initial_eval_ssims = []
     initial_eval_psnrs = []
     initial_eval_mses = []
-    initial_eval_dcs = []
+    initial_eval_dc_mses = []
+    initial_eval_dc_maes = []
     initial_eval_curve_corrs = []
 
 
@@ -470,17 +489,19 @@ if args.from_checkpoint == False and config['debugging']['calc_step_0'] == True:
             grasp_recon = grasp_img.to(device) # Shape: (1, 2, H, T, W)
 
             # calculate grasp metrics
-            ssim_grasp, psnr_grasp, mse_grasp, dc_grasp = eval_grasp(measured_kspace, csmap, ground_truth, grasp_recon, eval_physics, device, eval_dir)
+            ssim_grasp, psnr_grasp, mse_grasp, dc_mse_grasp, dc_mae_grasp = eval_grasp(measured_kspace, csmap, ground_truth, grasp_recon, eval_physics, device, eval_dir)
             grasp_ssims.append(ssim_grasp)
             grasp_psnrs.append(psnr_grasp)
             grasp_mses.append(mse_grasp)
-            grasp_dcs.append(dc_grasp)
+            grasp_dc_mses.append(dc_mse_grasp)
+            grasp_dc_maes.append(dc_mae_grasp)
 
-            ssim, psnr, mse, dc, recon_corr, grasp_corr = eval_sample(measured_kspace, csmap, ground_truth, x_recon, eval_physics, mask, grasp_recon, eval_dir, label=None, device=device)
+            ssim, psnr, mse, dc_mse, dc_mae, recon_corr, grasp_corr = eval_sample(measured_kspace, csmap, ground_truth, x_recon, eval_physics, mask, grasp_recon, eval_dir, label=None, device=device)
             initial_eval_ssims.append(ssim)
             initial_eval_psnrs.append(psnr)
             initial_eval_mses.append(mse)
-            initial_eval_dcs.append(dc)
+            initial_eval_dc_mses.append(dc_mse)
+            initial_eval_dc_maes.append(dc_mae)
 
             if recon_corr is not None:
                 initial_eval_curve_corrs.append(recon_corr)
@@ -500,13 +521,15 @@ if args.from_checkpoint == False and config['debugging']['calc_step_0'] == True:
         initial_eval_ssim = np.mean(initial_eval_ssims)
         initial_eval_psnr = np.mean(initial_eval_psnrs)
         initial_eval_mse = np.mean(initial_eval_mses)
-        initial_eval_dc = np.mean(initial_eval_dcs)
+        initial_eval_dc_mse = np.mean(initial_eval_dc_mses)
+        initial_eval_dc_mae = np.mean(initial_eval_dc_maes)
         initial_eval_curve_corr = np.mean(initial_eval_curve_corrs)
 
         eval_ssims.append(initial_eval_ssim)
         eval_psnrs.append(initial_eval_psnr)
         eval_mses.append(initial_eval_mse)
-        eval_dcs.append(initial_eval_dc) 
+        eval_dc_mses.append(initial_eval_dc_mse) 
+        eval_dc_maes.append(initial_eval_dc_mae) 
         eval_curve_corrs.append(initial_eval_curve_corr)
 
     print(f"Step 0 Train Losses: MC: {step0_train_mc_loss}, EI: {step0_train_ei_loss}, Adj: {step0_train_adj_loss}")
@@ -526,7 +549,8 @@ else:
         epoch_eval_ssims = []
         epoch_eval_psnrs = []
         epoch_eval_mses = []
-        epoch_eval_dcs = []
+        epoch_eval_dc_mses = []
+        epoch_eval_dc_maes = []
         epoch_eval_curve_corrs = []
 
 
@@ -751,11 +775,12 @@ else:
 
 
                 ## Evaluation
-                ssim, psnr, mse, dc, recon_corr, _ = eval_sample(val_kspace_batch, val_csmap, val_ground_truth, val_x_recon, eval_physics, val_mask, val_grasp_img_tensor, eval_dir, f'epoch{epoch}', device)
+                ssim, psnr, mse, dc_mse, dc_mae, recon_corr, _ = eval_sample(val_kspace_batch, val_csmap, val_ground_truth, val_x_recon, eval_physics, val_mask, val_grasp_img_tensor, eval_dir, f'epoch{epoch}', device)
                 epoch_eval_ssims.append(ssim)
                 epoch_eval_psnrs.append(psnr)
                 epoch_eval_mses.append(mse)
-                epoch_eval_dcs.append(dc)
+                epoch_eval_dc_mses.append(dc_mse)
+                epoch_eval_dc_maes.append(dc_mae)
 
                 if recon_corr is not None:
                     epoch_eval_curve_corrs.append(recon_corr)
@@ -766,13 +791,15 @@ else:
         epoch_eval_ssim = np.mean(epoch_eval_ssims)
         epoch_eval_psnr = np.mean(epoch_eval_psnrs)
         epoch_eval_mse = np.mean(epoch_eval_mses)
-        epoch_eval_dc = np.mean(epoch_eval_dcs)
+        epoch_eval_dc_mse = np.mean(epoch_eval_dc_mses)
+        epoch_eval_dc_mae = np.mean(epoch_eval_dc_maes)
         epoch_eval_curve_corr = np.mean(epoch_eval_curve_corrs)
 
         eval_ssims.append(epoch_eval_ssim)
         eval_psnrs.append(epoch_eval_psnr)
         eval_mses.append(epoch_eval_mse)
-        eval_dcs.append(epoch_eval_dc)    
+        eval_dc_mses.append(epoch_eval_dc_mse) 
+        eval_dc_maes.append(epoch_eval_dc_mae)    
         eval_curve_corrs.append(epoch_eval_curve_corr)  
         
         # save a sample from the last validation batch of the epoch
@@ -843,7 +870,8 @@ else:
                 eval_ssims=eval_ssims,
                 eval_psnrs=eval_psnrs,
                 eval_mses=eval_mses,
-                eval_dcs=eval_dcs,
+                eval_dc_mses=eval_dc_mses,
+                eval_dc_maes=eval_dc_maes,
                 eval_curve_corrs=eval_curve_corrs
             )
             model_save_path = os.path.join(output_dir, f'{exp_name}_model.pth')
@@ -1042,19 +1070,29 @@ else:
             plt.close()
 
             plt.figure()
-            plt.plot(eval_dcs)
+            plt.plot(eval_dc_mses)
             plt.xlabel("Epoch")
-            plt.ylabel("DC")
-            plt.title("Evaluation DC")
+            plt.ylabel("k-space MSE")
+            plt.title("Evaluation Data Consistency (MSE)")
             plt.grid(True)
-            plt.savefig(os.path.join(eval_dir, "eval_dcs.png"))
+            plt.savefig(os.path.join(eval_dir, "eval_dc_mses.png"))
+            plt.close()
+
+
+            plt.figure()
+            plt.plot(eval_dc_maes)
+            plt.xlabel("Epoch")
+            plt.ylabel("k-space MAE")
+            plt.title("Evaluation Data Consistency (MAE)")
+            plt.grid(True)
+            plt.savefig(os.path.join(eval_dir, "eval_dc_maes.png"))
             plt.close()
 
 
             plt.figure()
             plt.plot(eval_curve_corrs)
             plt.xlabel("Epoch")
-            plt.ylabel("Pearson Correlation of Enhancement Curve")
+            plt.ylabel("Pearson Correlation of Tumor Enhancement Curve")
             plt.title("Pearson Correlation")
             plt.grid(True)
             plt.savefig(os.path.join(eval_dir, "eval_curve_correlations.png"))
@@ -1078,12 +1116,14 @@ else:
         print(f"Recon SSIM: {epoch_eval_ssim:.4f} ± {np.std(epoch_eval_ssims):.4f}")
         print(f"Recon PSNR: {epoch_eval_psnr:.4f} ± {np.std(epoch_eval_psnrs):.4f}")
         print(f"Recon MSE: {epoch_eval_mse:.4f} ± {np.std(epoch_eval_mses):.4f}")
-        print(f"Recon DC: {epoch_eval_dc:.4f} ± {np.std(epoch_eval_dcs):.4f}")
+        print(f"Recon DC MSE: {epoch_eval_dc_mse:.4f} ± {np.std(epoch_eval_dc_mses):.4f}")
+        print(f"Recon DC MAE: {epoch_eval_dc_mae:.4f} ± {np.std(epoch_eval_dc_maes):.4f}")
         print(f"Recon Enhancement Curve Correlation: {epoch_eval_curve_corr:.4f} ± {np.std(epoch_eval_curve_corrs):.4f}")
         print(f"GRASP SSIM: {np.mean(grasp_ssims):.4f} ± {np.std(grasp_ssims):.4f}")
         print(f"GRASP PSNR: {np.mean(grasp_psnrs):.4f} ± {np.std(grasp_psnrs):.4f}")
         print(f"GRASP MSE: {np.mean(grasp_mses):.4f} ± {np.std(grasp_mses):.4f}")
-        print(f"GRASP DC: {np.mean(grasp_dcs):.6f} ± {np.std(grasp_dcs):.4f}")
+        print(f"GRASP DC MSE: {np.mean(grasp_dc_mses):.6f} ± {np.std(grasp_dc_mses):.4f}")
+        print(f"GRASP DC MAE: {np.mean(grasp_dc_maes):.6f} ± {np.std(grasp_dc_maes):.4f}")
         print(f"GRASP Enhancement Curve Correlation: {np.mean(grasp_curve_corrs):.6f} ± {np.std(grasp_curve_corrs):.4f}")
 
 
@@ -1106,7 +1146,8 @@ eval_curves = dict(
     eval_ssims=eval_ssims,
     eval_psnrs=eval_psnrs,
     eval_mses=eval_mses,
-    eval_dcs=eval_dcs,
+    eval_dc_mses=eval_dc_mses,
+    eval_dc_maes=eval_dc_maes,
     eval_curve_corrs=eval_curve_corrs,
 )
 model_save_path = os.path.join(output_dir, f'{exp_name}_model.pth')
@@ -1119,9 +1160,9 @@ metrics_path = os.path.join(eval_dir, "eval_metrics.csv")
 
 with open(metrics_path, 'w', newline='') as csvfile:
     writer = csv.writer(csvfile)
-    writer.writerow(['Recon', 'SSIM', 'PSNR', 'MSE', 'DC', 'EC Correlation'])
-    writer.writerow(['DL', f'{epoch_eval_ssim:.4f} ± {np.std(epoch_eval_ssims):.4f}', f'{epoch_eval_psnr:.4f} ± {np.std(epoch_eval_psnrs):.4f}', f'{epoch_eval_mse:.4f} ± {np.std(epoch_eval_mses):.4f}', f'{epoch_eval_dc:.4f} ± {np.std(epoch_eval_dcs):.4f}', f'{epoch_eval_curve_corr:.4f} ± {np.std(epoch_eval_curve_corrs):.4f}'])
-    writer.writerow(['GRASP', f'{np.mean(grasp_ssims):.4f} ± {np.std(grasp_ssims):.4f}', f'{np.mean(grasp_psnrs):.4f} ± {np.std(grasp_psnrs):.4f}', f'{np.mean(grasp_mses):.4f} ± {np.std(grasp_mses):.4f}', f'{np.mean(grasp_dcs):.4f} ± {np.std(grasp_dcs):.4f}', f'{np.mean(grasp_curve_corrs):.4f} ± {np.std(grasp_curve_corrs):.4f}'])
+    writer.writerow(['Recon', 'SSIM', 'PSNR', 'MSE', 'DC MSE', 'DC MAE', 'EC Correlation'])
+    writer.writerow(['DL', f'{epoch_eval_ssim:.4f} ± {np.std(epoch_eval_ssims):.4f}', f'{epoch_eval_psnr:.4f} ± {np.std(epoch_eval_psnrs):.4f}', f'{epoch_eval_mse:.4f} ± {np.std(epoch_eval_mses):.4f}', f'{epoch_eval_dc_mse:.4f} ± {np.std(epoch_eval_dc_mses):.4f}', f'{epoch_eval_dc_mae:.4f} ± {np.std(epoch_eval_dc_maes):.4f}', f'{epoch_eval_curve_corr:.4f} ± {np.std(epoch_eval_curve_corrs):.4f}'])
+    writer.writerow(['GRASP', f'{np.mean(grasp_ssims):.4f} ± {np.std(grasp_ssims):.4f}', f'{np.mean(grasp_psnrs):.4f} ± {np.std(grasp_psnrs):.4f}', f'{np.mean(grasp_mses):.4f} ± {np.std(grasp_mses):.4f}', f'{np.mean(grasp_dc_mses):.4f} ± {np.std(grasp_dc_mses):.4f}', f'{np.mean(grasp_dc_maes):.4f} ± {np.std(grasp_dc_maes):.4f}', f'{np.mean(grasp_curve_corrs):.4f} ± {np.std(grasp_curve_corrs):.4f}'])
 
 
 
@@ -1162,6 +1203,12 @@ MAIN_EVALUATION_PLAN = [
 
 STRESS_TEST_PLAN = [
     {
+        "spokes_per_frame": 2,
+        "num_frames": 22, # 4 * 22 = 88 total spokes
+        "slice": slice(0, 22), # The entire 22-frame duration
+        "description": "Stress test: max temporal points, 2 spokes"
+    },
+    {
         "spokes_per_frame": 4,
         "num_frames": 22, # 4 * 22 = 88 total spokes
         "slice": slice(0, 22), # The entire 22-frame duration
@@ -1199,12 +1246,14 @@ with torch.no_grad():
     spf_recon_ssim = {}
     spf_recon_psnr = {}
     spf_recon_mse = {}
-    spf_recon_dc = {}
+    spf_recon_dc_mse = {}
+    spf_recon_dc_mae = {}
     spf_recon_corr = {}
     spf_grasp_ssim = {}
     spf_grasp_psnr = {}
     spf_grasp_mse = {}
-    spf_grasp_dc = {}
+    spf_grasp_dc_mse = {}
+    spf_grasp_dc_mae = {}
     spf_grasp_corr = {}
 
 
@@ -1214,12 +1263,14 @@ with torch.no_grad():
         stress_test_ssims = []
         stress_test_psnrs = []
         stress_test_mses = []
-        stress_test_dcs = []
+        stress_test_dc_mses = []
+        stress_test_dc_maes = []
         stress_test_corrs = []
         stress_test_grasp_ssims = []
         stress_test_grasp_psnrs = []
         stress_test_grasp_mses = []
-        stress_test_grasp_dcs = []
+        stress_test_grasp_dc_mses = []
+        stress_test_grasp_dc_maes = []
         stress_test_grasp_corrs = []
 
         spokes = eval_config["spokes_per_frame"]
@@ -1276,34 +1327,38 @@ with torch.no_grad():
 
 
             ## Evaluation
-            ssim, psnr, mse, dc, recon_corr, grasp_corr = eval_sample(kspace, csmap, ground_truth, x_recon, physics, mask, grasp_img, eval_dir, f"{spokes}spf", device)
+            ssim, psnr, mse, dc_mse, dc_mae, recon_corr, grasp_corr = eval_sample(kspace, csmap, ground_truth, x_recon, physics, mask, grasp_img, eval_dir, f"{spokes}spf", device)
             stress_test_ssims.append(ssim)
             stress_test_psnrs.append(psnr)
             stress_test_mses.append(mse)
-            stress_test_dcs.append(dc)
+            stress_test_dc_mses.append(dc_mse)
+            stress_test_dc_maes.append(dc_mae)
 
             if recon_corr is not None:
                 stress_test_corrs.append(recon_corr)
                 stress_test_grasp_corrs.append(grasp_corr)
 
 
-            ssim_grasp, psnr_grasp, mse_grasp, dc_grasp = eval_grasp(kspace, csmap, ground_truth, grasp_img, physics, device, eval_dir)
+            ssim_grasp, psnr_grasp, mse_grasp, dc_mse_grasp, dc_mae_grasp = eval_grasp(kspace, csmap, ground_truth, grasp_img, physics, device, eval_dir)
             stress_test_grasp_ssims.append(ssim_grasp)
             stress_test_grasp_psnrs.append(psnr_grasp)
             stress_test_grasp_mses.append(mse_grasp)
-            stress_test_grasp_dcs.append(dc_grasp)
+            stress_test_grasp_dc_mses.append(dc_mse_grasp)
+            stress_test_grasp_dc_maes.append(dc_mae_grasp)
 
 
             spf_recon_ssim[spokes] = np.mean(stress_test_ssims)
             spf_recon_psnr[spokes] = np.mean(stress_test_psnrs)
             spf_recon_mse[spokes] = np.mean(stress_test_mses)
-            spf_recon_dc[spokes] = np.mean(stress_test_dcs)
+            spf_recon_dc_mse[spokes] = np.mean(stress_test_dc_mses)
+            spf_recon_dc_mae[spokes] = np.mean(stress_test_dc_maes)
             spf_recon_corr[spokes] = np.mean(stress_test_corrs)
 
             spf_grasp_ssim[spokes] = np.mean(stress_test_grasp_ssims)
             spf_grasp_psnr[spokes] = np.mean(stress_test_grasp_psnrs)
             spf_grasp_mse[spokes] = np.mean(stress_test_grasp_mses)
-            spf_grasp_dc[spokes] = np.mean(stress_test_grasp_dcs)
+            spf_grasp_dc_mse[spokes] = np.mean(stress_test_grasp_dc_mses)
+            spf_grasp_dc_mae[spokes] = np.mean(stress_test_grasp_dc_maes)
             spf_grasp_corr[spokes] = np.mean(stress_test_grasp_corrs)
 
 
@@ -1329,13 +1384,14 @@ with torch.no_grad():
         spf_metrics_path = os.path.join(eval_dir, "eval_metrics.csv")
         with open(spf_metrics_path, 'a', newline='') as csvfile:
             writer = csv.writer(csvfile)
-            writer.writerow(['Recon', 'Spokes Per Frame', 'SSIM', 'PSNR', 'MSE', 'DC'])
+            writer.writerow(['Recon', 'Spokes Per Frame', 'SSIM', 'PSNR', 'MSE', 'DC MSE'])
 
             writer.writerow(['DL', spokes, 
             f'{np.mean(stress_test_ssims):.4f} ± {np.std(stress_test_ssims):.4f}', 
             f'{np.mean(stress_test_psnrs):.4f} ± {np.std(stress_test_psnrs):.4f}', 
             f'{np.mean(stress_test_mses):.4f} ± {np.std(stress_test_mses):.4f}', 
-            f'{np.mean(stress_test_dcs):.4f} ± {np.std(stress_test_dcs):.4f}',
+            f'{np.mean(stress_test_dc_mses):.4f} ± {np.std(stress_test_dc_mses):.4f}',
+            f'{np.mean(stress_test_dc_maes):.4f} ± {np.std(stress_test_dc_maes):.4f}',
             f'{np.mean(stress_test_corrs):.4f} ± {np.std(stress_test_corrs):.4f}'
             ])
 
@@ -1343,7 +1399,8 @@ with torch.no_grad():
             f'{np.mean(stress_test_grasp_ssims):.4f} ± {np.std(stress_test_grasp_ssims):.4f}', 
             f'{np.mean(stress_test_grasp_psnrs):.4f} ± {np.std(stress_test_grasp_psnrs):.4f}', 
             f'{np.mean(stress_test_grasp_mses):.4f} ± {np.std(stress_test_grasp_mses):.4f}', 
-            f'{np.mean(stress_test_grasp_dcs):.4f} ± {np.std(stress_test_grasp_dcs):.4f}',
+            f'{np.mean(stress_test_grasp_dc_mses):.4f} ± {np.std(stress_test_grasp_dc_mses):.4f}',
+            f'{np.mean(stress_test_grasp_dc_maes):.4f} ± {np.std(stress_test_grasp_dc_maes):.4f}',
             f'{np.mean(stress_test_grasp_corrs):.4f} ± {np.std(stress_test_grasp_corrs):.4f}',
             ])
 
@@ -1355,12 +1412,14 @@ with torch.no_grad():
         spf_eval_ssims = []
         spf_eval_psnrs = []
         spf_eval_mses = []
-        spf_eval_dcs = []
+        spf_eval_dc_mses = []
+        spf_eval_dc_maes = []
         spf_eval_curve_corrs = []
         spf_grasp_ssims = []
         spf_grasp_psnrs = []
         spf_grasp_mses = []
-        spf_grasp_dcs = []
+        spf_grasp_dc_mses = []
+        spf_grasp_dc_maes = []
         spf_grasp_curve_corrs = []
 
         spokes = eval_config["spokes_per_frame"]
@@ -1415,22 +1474,24 @@ with torch.no_grad():
 
 
             ## Evaluation
-            ssim, psnr, mse, dc, recon_corr, grasp_corr = eval_sample(kspace, csmap, ground_truth, x_recon, physics, mask, grasp_img, eval_dir, f'{spokes}spf', device)
+            ssim, psnr, mse, dc_mse, dc_mae, recon_corr, grasp_corr = eval_sample(kspace, csmap, ground_truth, x_recon, physics, mask, grasp_img, eval_dir, f'{spokes}spf', device)
             spf_eval_ssims.append(ssim)
             spf_eval_psnrs.append(psnr)
             spf_eval_mses.append(mse)
-            spf_eval_dcs.append(dc)
+            spf_eval_dc_mses.append(dc_mse)
+            spf_eval_dc_maes.append(dc_mae)
 
             if recon_corr is not None:
                 spf_eval_curve_corrs.append(recon_corr)
                 spf_grasp_curve_corrs.append(grasp_corr)
 
 
-            ssim_grasp, psnr_grasp, mse_grasp, dc_grasp = eval_grasp(kspace, csmap, ground_truth, grasp_img, physics, device, eval_dir)
+            ssim_grasp, psnr_grasp, mse_grasp, dc_mse_grasp, dc_mae_grasp = eval_grasp(kspace, csmap, ground_truth, grasp_img, physics, device, eval_dir)
             spf_grasp_ssims.append(ssim_grasp)
             spf_grasp_psnrs.append(psnr_grasp)
             spf_grasp_mses.append(mse_grasp)
-            spf_grasp_dcs.append(dc_grasp)
+            spf_grasp_dc_mses.append(dc_mse_grasp)
+            spf_grasp_dc_maes.append(dc_mae_grasp)
 
 
         # plot an example image comparison at the given temporal resolution
@@ -1452,13 +1513,15 @@ with torch.no_grad():
         spf_recon_ssim[spokes] = np.mean(spf_eval_ssims)
         spf_recon_psnr[spokes] = np.mean(spf_eval_psnrs)
         spf_recon_mse[spokes] = np.mean(spf_eval_mses)
-        spf_recon_dc[spokes] = np.mean(spf_eval_dcs)
+        spf_recon_dc_mse[spokes] = np.mean(spf_eval_dc_mses)
+        spf_recon_dc_mae[spokes] = np.mean(spf_eval_dc_maes)
         spf_recon_corr[spokes] = np.mean(spf_eval_curve_corrs)
 
         spf_grasp_ssim[spokes] = np.mean(spf_grasp_ssims)
         spf_grasp_psnr[spokes] = np.mean(spf_grasp_psnrs)
         spf_grasp_mse[spokes] = np.mean(spf_grasp_mses)
-        spf_grasp_dc[spokes] = np.mean(spf_grasp_dcs)
+        spf_grasp_dc_mse[spokes] = np.mean(spf_grasp_dc_mses)
+        spf_grasp_dc_mae[spokes] = np.mean(spf_grasp_dc_maes)
         spf_grasp_corr[spokes] = np.mean(spf_grasp_curve_corrs)
 
 
@@ -1472,7 +1535,8 @@ with torch.no_grad():
             f'{np.mean(spf_eval_ssims):.4f} ± {np.std(spf_eval_ssims):.4f}', 
             f'{np.mean(spf_eval_psnrs):.4f} ± {np.std(spf_eval_psnrs):.4f}', 
             f'{np.mean(spf_eval_mses):.4f} ± {np.std(spf_eval_mses):.4f}', 
-            f'{np.mean(spf_eval_dcs):.4f} ± {np.std(spf_eval_dcs):.4f}',
+            f'{np.mean(spf_eval_dc_mses):.4f} ± {np.std(spf_eval_dc_mses):.4f}',
+            f'{np.mean(spf_eval_dc_maes):.4f} ± {np.std(spf_eval_dc_maes):.4f}',
             f'{np.mean(spf_eval_curve_corrs):.4f} ± {np.std(spf_eval_curve_corrs):.4f}'
             ])
 
@@ -1480,7 +1544,8 @@ with torch.no_grad():
             f'{np.mean(spf_grasp_ssims):.4f} ± {np.std(spf_grasp_ssims):.4f}', 
             f'{np.mean(spf_grasp_psnrs):.4f} ± {np.std(spf_grasp_psnrs):.4f}', 
             f'{np.mean(spf_grasp_mses):.4f} ± {np.std(spf_grasp_mses):.4f}', 
-            f'{np.mean(spf_grasp_dcs):.4f} ± {np.std(spf_grasp_dcs):.4f}',
+            f'{np.mean(spf_grasp_dc_mses):.4f} ± {np.std(spf_grasp_dc_mses):.4f}',
+            f'{np.mean(spf_grasp_dc_maes):.4f} ± {np.std(spf_grasp_dc_maes):.4f}',
             f'{np.mean(spf_grasp_curve_corrs):.4f} ± {np.std(spf_grasp_curve_corrs):.4f}'
             ])
 
@@ -1525,14 +1590,25 @@ plt.close()
 
 
 plt.figure()
-plt.plot(list(spf_recon_dc.keys()), list(spf_recon_dc.values()), label="DL Recon", marker='o')
-plt.plot(list(spf_grasp_dc.keys()), list(spf_grasp_dc.values()), label="GRASP Recon", marker='o')
+plt.plot(list(spf_recon_dc_mse.keys()), list(spf_recon_dc_mse.values()), label="DL Recon", marker='o')
+plt.plot(list(spf_grasp_dc_mse.keys()), list(spf_grasp_dc_mse.values()), label="GRASP Recon", marker='o')
 plt.xlabel("Spokes per Frame")
 plt.ylabel("k-space MSE")
 plt.title("Data Consistency Evaluation (MSE) vs Spokes per Frame")
 plt.legend()
 plt.grid(True)
-plt.savefig(os.path.join(eval_dir, "spf_eval_dc.png"))
+plt.savefig(os.path.join(eval_dir, "spf_eval_dc_mse.png"))
+plt.close()
+
+plt.figure()
+plt.plot(list(spf_recon_dc_mae.keys()), list(spf_recon_dc_mae.values()), label="DL Recon", marker='o')
+plt.plot(list(spf_grasp_dc_mae.keys()), list(spf_grasp_dc_mae.values()), label="GRASP Recon", marker='o')
+plt.xlabel("Spokes per Frame")
+plt.ylabel("k-space MAE")
+plt.title("Data Consistency Evaluation (MAE) vs Spokes per Frame")
+plt.legend()
+plt.grid(True)
+plt.savefig(os.path.join(eval_dir, "spf_eval_dc_mae.png"))
 plt.close()
 
 
@@ -1540,9 +1616,9 @@ plt.figure()
 plt.plot(list(spf_recon_corr.keys()), list(spf_recon_corr.values()), label="DL Recon", marker='o')
 plt.plot(list(spf_grasp_corr.keys()), list(spf_grasp_corr.values()), label="GRASP Recon", marker='o')
 plt.xlabel("Spokes per Frame")
-plt.ylabel("k-space MSE")
-plt.title("Data Consistency Evaluation (MSE) vs Spokes per Frame")
+plt.ylabel("Pearson Correlation")
+plt.title("Pearson Correlation of Tumor Enhancement Curve vs Spokes per Frame")
 plt.legend()
 plt.grid(True)
-plt.savefig(os.path.join(eval_dir, "spf_eval_dc.png"))
+plt.savefig(os.path.join(eval_dir, "spf_eval_curve_correlations.png"))
 plt.close()

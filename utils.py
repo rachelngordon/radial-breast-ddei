@@ -407,7 +407,9 @@ def load_checkpoint(model, optimizer, filename):
         "eval_ssims": ckpt.get("eval_ssims", []),
         "eval_psnrs": ckpt.get("eval_psnrs", []),
         "eval_mses": ckpt.get("eval_mses", []),
-        "eval_dcs": ckpt.get("eval_dcs", []),
+        "eval_dc_mses": ckpt.get("eval_dc_mses", []),
+        "eval_dc_maes": ckpt.get("eval_dc_maes", []),
+        "eval_curve_corrs": ckpt.get("eval_curve_corrs", []),
     }
 
     return model, optimizer, ckpt.get("epoch", 1), train_curves, val_curves, eval_curves

@@ -65,13 +65,15 @@ def calc_dc(input, reference, device):
     """
 
     mse = torchmetrics.MeanSquaredError().to(device)
+    mae = torchmetrics.MeanAbsoluteError().to(device)
 
-    input = from_torch_complex(input)
-    reference = from_torch_complex(reference)
+    input = from_torch_complex(input).to(device)
+    reference = from_torch_complex(reference).to(device)
 
-    mse = mse(input.to(device), reference.to(device))
+    mse = mse(input, reference)
+    mae = mae(input, reference)
 
-    return mse.item()
+    return mse.item(), mae.item()
 
 
 
@@ -738,7 +740,7 @@ def eval_grasp(kspace, csmap, ground_truth, grasp_recon, physics, device, output
 
 
     # Compute MSE
-    dc_grasp = calc_dc(grasp_kspace, kspace, device)
+    dc_mse_grasp, dc_mae_grasp = calc_dc(grasp_kspace, kspace, device)
 
 
     # ==========================================================
@@ -813,7 +815,7 @@ def eval_grasp(kspace, csmap, ground_truth, grasp_recon, physics, device, output
 
     
     # return np.mean(ssims), np.mean(psnrs), np.mean(mses), dc_grasp
-    return ssim_grasp, psnr_grasp, mse_grasp, dc_grasp
+    return ssim_grasp, psnr_grasp, mse_grasp, dc_mse_grasp, dc_mae_grasp
 
 
 def eval_sample(kspace, csmap, ground_truth, x_recon, physics, mask, grasp_img, output_dir, label, device):
@@ -835,7 +837,7 @@ def eval_sample(kspace, csmap, ground_truth, x_recon, physics, mask, grasp_img, 
 
 
     # Compute MSE
-    dc = calc_dc(recon_kspace, kspace, device)
+    dc_mse, dc_mae = calc_dc(recon_kspace, kspace, device)
 
 
     # ==========================================================
@@ -988,7 +990,7 @@ def eval_sample(kspace, csmap, ground_truth, x_recon, physics, mask, grasp_img, 
         recon_corr, grasp_corr = None, None
     
     
-    return ssim, psnr, mse, dc, recon_corr, grasp_corr
+    return ssim, psnr, mse, dc_mse, dc_mae, recon_corr, grasp_corr
 
 
 

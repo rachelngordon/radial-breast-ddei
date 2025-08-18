@@ -50,36 +50,38 @@ def calc_image_metrics(input, reference, data_range, device, filename):
     psnr = psnr(input, reference)
     mse = mse(input, reference)
 
-    # # --- Handle 5D Volumetric Data by averaging over slices ---
-    # if input.dim() == 5:
-    #     # Input shape: [N, C, D, H, W]
-    #     num_slices = input.shape[2]
+    # --- Handle 5D Volumetric Data by averaging over slices ---
+    if input.dim() == 5:
+        # Input shape: [N, C, D, H, W]
+        num_slices = input.shape[2]
         
-    #     lpips_scores = []
+        lpips_scores = []
 
-    #     for i in range(num_slices):
-    #         # Extract the i-th slice from both tensors
-    #         # Resulting shape is [N, C, H, W] which is a valid 4D tensor
-    #         input_slice = input[:, :, i, :, :]
-    #         reference_slice = reference[:, :, i, :, :]
+        for i in range(num_slices):
+            # Extract the i-th slice from both tensors
+            # Resulting shape is [N, C, H, W] which is a valid 4D tensor
+            input_slice = input[:, :, i, :, :]
+            reference_slice = reference[:, :, i, :, :]
 
-    #         # --- Prepare the slice for LPIPS ---
-    #         input_lpips = normalize_for_lpips(input_slice.clone(), data_range)
-    #         reference_lpips = normalize_for_lpips(reference_slice.clone(), data_range)
+            # --- Prepare the slice for LPIPS ---
+            input_lpips = normalize_for_lpips(input_slice.clone(), data_range)
+            reference_lpips = normalize_for_lpips(reference_slice.clone(), data_range)
 
-    #         # LPIPS expects 3 channels. Since the slice is now 4D, this repeat will work.
-    #         if input_lpips.shape[1] == 1:
-    #             input_lpips = input_lpips.repeat(1, 3, 1, 1)
-    #             reference_lpips = reference_lpips.repeat(1, 3, 1, 1)
+            # LPIPS expects 3 channels. Since the slice is now 4D, this repeat will work.
+            if input_lpips.shape[1] == 1:
+                input_lpips = input_lpips.repeat(1, 3, 1, 1)
+                reference_lpips = reference_lpips.repeat(1, 3, 1, 1)
+
+            input_lpips = input_lpips.to(reference_lpips.dtype)
             
-    #         lpips_scores.append(lpips_metric(input_lpips, reference_lpips).item())
+            lpips_scores.append(lpips_metric(input_lpips, reference_lpips).item())
 
-    #     # Average the scores from all slices
-    #     final_lpips = sum(lpips_scores) / len(lpips_scores)
+        # Average the scores from all slices
+        final_lpips = sum(lpips_scores) / len(lpips_scores)
 
 
 
-    final_lpips = 0
+    # final_lpips = 0
 
     # Plot input images
     # fig, axes = plt.subplots(1, 2, figsize=(12, 6))

@@ -16,7 +16,7 @@ from mc import MCLoss
 from lsfpnet_encoding import LSFPNet, ArtifactRemovalLSFPNet
 from radial_lsfp import MCNUFFT
 from utils import prep_nufft, log_gradient_stats, plot_enhancement_curve, get_cosine_ei_weight, plot_reconstruction_sample, get_git_commit, save_checkpoint, load_checkpoint, to_torch_complex, GRASPRecon
-from eval import eval_grasp, eval_sample
+from eval import eval_grasp, eval_sample, plot_time_series
 import csv
 import math
 
@@ -411,17 +411,13 @@ if args.from_checkpoint == False and config['debugging']['calc_step_0'] == True:
 
             csmap = csmap.to(device).to(measured_kspace.dtype)
 
-            acceleration = torch.tensor([N_full / int(N_spokes)], dtype=torch.float, device=device)
-
             if config['model']['encode_acceleration']:
-                acceleration_encoding = acceleration
+                acceleration = torch.tensor([N_full / int(N_spokes)], dtype=torch.float, device=device)
             else: 
-                acceleration_encoding = None
-
-            print(acceleration_encoding)
+                acceleration = None
 
             x_recon, adj_loss, lambda_L, lambda_S, lambda_spatial_L, lambda_spatial_S, gamma, lambda_step = model(
-                measured_kspace.to(device), physics, csmap, acceleration_encoding, epoch="train0", norm=config['model']['norm']
+                measured_kspace.to(device), physics, csmap, acceleration, epoch="train0", norm=config['model']['norm']
             )
 
             # calculate losses
@@ -432,46 +428,10 @@ if args.from_checkpoint == False and config['debugging']['calc_step_0'] == True:
 
             if use_ei_loss:
                 ei_loss, t_img = ei_loss_fn(
-                    x_recon, physics, model, csmap, acceleration_encoding
+                    x_recon, physics, model, csmap, acceleration
                 )
 
-                # # 1. Apply the image transform
-                # x_net_rearranged = rearrange(x_recon, 'b c h w t -> b c t h w')
-                # x2_rearranged = ei_loss_fn.T(x_net_rearranged) # This calls VideoRotate
-                # x2 = rearrange(x2_rearranged, 'b c t h w -> b c h w t')
-                # x2_complex = to_torch_complex(x2)
-
-                # # 2. Get the rotation angle used
-                # #    (assuming you've modified VideoRotate to store it)
-                # angle_deg = ei_loss_fn.T.last_angle # Access it from the composed transform
-                # angle_rad = torch.deg2rad(torch.tensor(angle_deg, device=device))
-
-                # # 3. Create a 2D rotation matrix
-                # cos_a, sin_a = torch.cos(angle_rad), torch.sin(angle_rad)
-                # # Note: k-space rotation is often the transpose of image rotation
-                # rot_matrix = torch.tensor([[cos_a, sin_a],
-                #                         [-sin_a, cos_a]], dtype=torch.float32, device=device)
-
-                # # 4. Rotate the k-space trajectory
-                # # ktraj shape is likely (2, n_points, n_time), so we permute for matmul
-                # ktraj_permuted = ktraj.permute(1, 2, 0) # (n_points, n_time, 2)
-                # ktraj_rot_permuted = torch.matmul(ktraj_permuted, rot_matrix)
-                # ktraj_rot = ktraj_rot_permuted.permute(2, 0, 1) # Back to (2, n_points, n_time)
-                
-                # # 5. Create a new, temporary physics operator for the EI loss
-                # #    Crucially, we reuse the original dcomp, as discussed.
-                # physics_rot = MCNUFFT(nufft_ob, adjnufft_ob, ktraj_rot, dcomp)
-                
-                # # 6. Calculate the EI loss with the rotated physics
-                # y_rot = physics_rot(inv=False, data=x2_complex, smaps=csmap).to(csmap.device)
-                
-                # # For the reconstruction step, you MUST use the rotated physics again
-                # x3, *_ = model(y_rot, physics_rot, csmap, acceleration_encoding, epoch=None)
-
-                # ei_loss = ei_loss_fn.metric(x3, x2)
-
                 initial_train_ei_loss += ei_loss.item()
-                
 
         # record losses
         step0_train_mc_loss = initial_train_mc_loss / len(train_loader)
@@ -502,17 +462,14 @@ if args.from_checkpoint == False and config['debugging']['calc_step_0'] == True:
             measured_kspace = measured_kspace.squeeze(0).to(device) # Remove batch dim
             csmap = csmap.squeeze(0).to(device)   # Remove batch dim
 
-            # if config['model']['encode_acceleration']:
-            N_spokes = eval_ktraj.shape[1] / config['data']['samples']
-            acceleration = torch.tensor([N_full / int(N_spokes)], dtype=torch.float, device=device)
-
             if config['model']['encode_acceleration']:
-                acceleration_encoding = acceleration
+                N_spokes = eval_ktraj.shape[1] / config['data']['samples']
+                acceleration = torch.tensor([N_full / int(N_spokes)], dtype=torch.float, device=device)
             else: 
-                acceleration_encoding = None
+                acceleration = None
 
             x_recon, adj_loss, *_ = model(
-                measured_kspace.to(device), eval_physics, csmap, acceleration_encoding, epoch="val0", norm=config['model']['norm']
+                measured_kspace.to(device), eval_physics, csmap, acceleration, epoch="val0", norm=config['model']['norm']
             )
 
             # compute losses
@@ -523,43 +480,8 @@ if args.from_checkpoint == False and config['debugging']['calc_step_0'] == True:
 
             if use_ei_loss:
                 ei_loss, t_img = ei_loss_fn(
-                    x_recon, eval_physics, model, csmap, acceleration_encoding
+                    x_recon, eval_physics, model, csmap, acceleration
                 )
-
-                # # 1. Apply the image transform
-                # x_net_rearranged = rearrange(x_recon, 'b c h w t -> b c t h w')
-                # x2_rearranged = ei_loss_fn.T(x_net_rearranged) # This calls VideoRotate
-                # x2 = rearrange(x2_rearranged, 'b c t h w -> b c h w t')
-                # x2_complex = to_torch_complex(x2)
-
-                # # 2. Get the rotation angle used
-                # #    (assuming you've modified VideoRotate to store it)
-                # angle_deg = ei_loss_fn.T.last_angle # Access it from the composed transform
-                # angle_rad = torch.deg2rad(torch.tensor(angle_deg, device=device))
-
-                # # 3. Create a 2D rotation matrix
-                # cos_a, sin_a = torch.cos(angle_rad), torch.sin(angle_rad)
-                # # Note: k-space rotation is often the transpose of image rotation
-                # rot_matrix = torch.tensor([[cos_a, sin_a],
-                #                         [-sin_a, cos_a]], dtype=torch.float32, device=device)
-
-                # # 4. Rotate the k-space trajectory
-                # # ktraj shape is likely (2, n_points, n_time), so we permute for matmul
-                # ktraj_permuted = eval_ktraj.permute(1, 2, 0) # (n_points, n_time, 2)
-                # ktraj_rot_permuted = torch.matmul(ktraj_permuted, rot_matrix)
-                # ktraj_rot = ktraj_rot_permuted.permute(2, 0, 1) # Back to (2, n_points, n_time)
-                
-                # # 5. Create a new, temporary physics operator for the EI loss
-                # #    Crucially, we reuse the original dcomp, as discussed.
-                # physics_rot = MCNUFFT(eval_nufft_ob, eval_adjnufft_ob, ktraj_rot, eval_dcomp)
-                
-                # # 6. Calculate the EI loss with the rotated physics
-                # y_rot = physics_rot(inv=False, data=x2_complex, smaps=csmap).to(csmap.device)
-                
-                # # For the reconstruction step, you MUST use the rotated physics again
-                # x3, *_ = model(y_rot, physics_rot, csmap, acceleration_encoding, epoch=None)
-
-                # ei_loss = ei_loss_fn.metric(x3, x2)
 
                 initial_val_ei_loss += ei_loss.item()
 
@@ -567,14 +489,14 @@ if args.from_checkpoint == False and config['debugging']['calc_step_0'] == True:
             grasp_recon = grasp_img.to(device) # Shape: (1, 2, H, T, W)
 
             # calculate grasp metrics
-            ssim_grasp, psnr_grasp, mse_grasp, lpips_grasp, dc_mse_grasp, dc_mae_grasp = eval_grasp(measured_kspace, csmap, ground_truth, grasp_recon, eval_physics, device, eval_dir)
+            ssim_grasp, psnr_grasp, mse_grasp, dc_mse_grasp, dc_mae_grasp = eval_grasp(measured_kspace, csmap, ground_truth, grasp_recon, eval_physics, device, eval_dir)
             grasp_ssims.append(ssim_grasp)
             grasp_psnrs.append(psnr_grasp)
             grasp_mses.append(mse_grasp)
             grasp_dc_mses.append(dc_mse_grasp)
             grasp_dc_maes.append(dc_mae_grasp)
 
-            ssim, psnr, mse, lpips, dc_mse, dc_mae, recon_corr, grasp_corr = eval_sample(measured_kspace, csmap, ground_truth, x_recon, eval_physics, mask, grasp_recon, acceleration, eval_dir, label=None, device=device)
+            ssim, psnr, mse, dc_mse, dc_mae, recon_corr, grasp_corr = eval_sample(measured_kspace, csmap, ground_truth, x_recon, eval_physics, mask, grasp_recon, eval_dir, label=None, device=device)
             initial_eval_ssims.append(ssim)
             initial_eval_psnrs.append(psnr)
             initial_eval_mses.append(mse)
@@ -679,16 +601,14 @@ else:
             csmap = csmap.to(device).to(measured_kspace.dtype)
 
             # calculate acceleration factor
-            acceleration = torch.tensor([N_full / int(N_spokes)], dtype=torch.float, device=device)
-
             if config['model']['encode_acceleration']:
-                acceleration_encoding = acceleration
+                acceleration = torch.tensor([N_full / int(N_spokes)], dtype=torch.float, device=device)
             else: 
-                acceleration_encoding = None
+                acceleration = None
 
 
             x_recon, adj_loss, lambda_L, lambda_S, lambda_spatial_L, lambda_spatial_S, gamma, lambda_step = model(
-                measured_kspace.to(device), physics, csmap, acceleration_encoding, epoch=f"train{epoch}", norm=config['model']['norm']
+                measured_kspace.to(device), physics, csmap, acceleration, epoch=f"train{epoch}", norm=config['model']['norm']
             )
 
             # compute losses
@@ -699,43 +619,8 @@ else:
 
             if use_ei_loss:
                 ei_loss, t_img = ei_loss_fn(
-                    x_recon, physics, model, csmap, acceleration_encoding
+                    x_recon, physics, model, csmap, acceleration
                 )
-
-                # # 1. Apply the image transform
-                # x_net_rearranged = rearrange(x_recon, 'b c h w t -> b c t h w')
-                # x2_rearranged = ei_loss_fn.T(x_net_rearranged) # This calls VideoRotate
-                # x2 = rearrange(x2_rearranged, 'b c t h w -> b c h w t')
-                # x2_complex = to_torch_complex(x2)
-
-                # # 2. Get the rotation angle used
-                # #    (assuming you've modified VideoRotate to store it)
-                # angle_deg = ei_loss_fn.T.last_angle # Access it from the composed transform
-                # angle_rad = torch.deg2rad(torch.tensor(angle_deg, device=device))
-
-                # # 3. Create a 2D rotation matrix
-                # cos_a, sin_a = torch.cos(angle_rad), torch.sin(angle_rad)
-                # # Note: k-space rotation is often the transpose of image rotation
-                # rot_matrix = torch.tensor([[cos_a, sin_a],
-                #                         [-sin_a, cos_a]], dtype=torch.float32, device=device)
-
-                # # 4. Rotate the k-space trajectory
-                # # ktraj shape is likely (2, n_points, n_time), so we permute for matmul
-                # ktraj_permuted = ktraj.permute(1, 2, 0) # (n_points, n_time, 2)
-                # ktraj_rot_permuted = torch.matmul(ktraj_permuted, rot_matrix)
-                # ktraj_rot = ktraj_rot_permuted.permute(2, 0, 1) # Back to (2, n_points, n_time)
-                
-                # # 5. Create a new, temporary physics operator for the EI loss
-                # #    Crucially, we reuse the original dcomp, as discussed.
-                # physics_rot = MCNUFFT(nufft_ob, adjnufft_ob, ktraj_rot, dcomp)
-                
-                # # 6. Calculate the EI loss with the rotated physics
-                # y_rot = physics_rot(inv=False, data=x2_complex, smaps=csmap).to(csmap.device)
-                
-                # # For the reconstruction step, you MUST use the rotated physics again
-                # x3, *_ = model(y_rot, physics_rot, csmap, acceleration_encoding, epoch=None)
-
-                # ei_loss = ei_loss_fn.metric(x3, x2)
 
 
                 ei_loss_weight = get_cosine_ei_weight(
@@ -861,17 +746,14 @@ else:
                 val_grasp_img_tensor = val_grasp_img.to(device)
 
                 # calculate acceleration factor
-                N_spokes = eval_ktraj.shape[1] / config['data']['samples']
-                acceleration = torch.tensor([N_full / int(N_spokes)], dtype=torch.float, device=device)
-
                 if config['model']['encode_acceleration']:
-                    acceleration_encoding = acceleration
+                    N_spokes = eval_ktraj.shape[1] / config['data']['samples']
+                    acceleration = torch.tensor([N_full / int(N_spokes)], dtype=torch.float, device=device)
                 else: 
-                    acceleration_encoding = None
-                    
+                    acceleration = None
 
                 val_x_recon, val_adj_loss, *_ = model(
-                    val_kspace_batch.to(device), eval_physics, val_csmap, acceleration_encoding, epoch=f"val{epoch}", norm=config['model']['norm']
+                    val_kspace_batch.to(device), eval_physics, val_csmap, acceleration, epoch=f"val{epoch}", norm=config['model']['norm']
                 )
 
                 # compute losses
@@ -882,44 +764,8 @@ else:
 
                 if use_ei_loss:
                     val_ei_loss, val_t_img = ei_loss_fn(
-                        val_x_recon, eval_physics, model, val_csmap, acceleration_encoding
+                        val_x_recon, eval_physics, model, val_csmap, acceleration
                     )
-
-                    # # 1. Apply the image transform
-                    # x_net_rearranged = rearrange(val_x_recon, 'b c h w t -> b c t h w')
-                    # x2_rearranged = ei_loss_fn.T(x_net_rearranged) # This calls VideoRotate
-                    # val_t_img = rearrange(x2_rearranged, 'b c t h w -> b c h w t')
-                    # x2_complex = to_torch_complex(val_t_img)
-
-                    # # 2. Get the rotation angle used
-                    # #    (assuming you've modified VideoRotate to store it)
-                    # angle_deg = ei_loss_fn.T.last_angle # Access it from the composed transform
-                    # angle_rad = torch.deg2rad(torch.tensor(angle_deg, device=device))
-
-                    # # 3. Create a 2D rotation matrix
-                    # cos_a, sin_a = torch.cos(angle_rad), torch.sin(angle_rad)
-                    # # Note: k-space rotation is often the transpose of image rotation
-                    # rot_matrix = torch.tensor([[cos_a, sin_a],
-                    #                         [-sin_a, cos_a]], dtype=torch.float32, device=device)
-
-                    # # 4. Rotate the k-space trajectory
-                    # # ktraj shape is likely (2, n_points, n_time), so we permute for matmul
-                    # ktraj_permuted = eval_ktraj.permute(1, 2, 0) # (n_points, n_time, 2)
-                    # ktraj_rot_permuted = torch.matmul(ktraj_permuted, rot_matrix)
-                    # ktraj_rot = ktraj_rot_permuted.permute(2, 0, 1) # Back to (2, n_points, n_time)
-                    
-                    # # 5. Create a new, temporary physics operator for the EI loss
-                    # #    Crucially, we reuse the original dcomp, as discussed.
-                    # physics_rot = MCNUFFT(eval_nufft_ob, eval_adjnufft_ob, ktraj_rot, eval_dcomp)
-                    
-                    # # 6. Calculate the EI loss with the rotated physics
-                    # y_rot = physics_rot(inv=False, data=x2_complex, smaps=val_csmap).to(val_csmap.device)
-                    
-                    # # For the reconstruction step, you MUST use the rotated physics again
-                    # x3, *_ = model(y_rot, physics_rot, val_csmap, acceleration_encoding, epoch=None)
-
-                    # val_ei_loss = ei_loss_fn.metric(x3, val_t_img)
-
                     val_running_ei_loss += val_ei_loss.item()
                     val_loader_tqdm.set_postfix(
                         val_mc_loss=val_mc_loss.item(), val_ei_loss=val_ei_loss.item()
@@ -929,7 +775,7 @@ else:
 
 
                 ## Evaluation
-                ssim, psnr, mse, lpips, dc_mse, dc_mae, recon_corr, _ = eval_sample(val_kspace_batch, val_csmap, val_ground_truth, val_x_recon, eval_physics, val_mask, val_grasp_img_tensor, acceleration, eval_dir, f'epoch{epoch}', device)
+                ssim, psnr, mse, dc_mse, dc_mae, recon_corr, _ = eval_sample(val_kspace_batch, val_csmap, val_ground_truth, val_x_recon, eval_physics, val_mask, val_grasp_img_tensor, eval_dir, f'epoch{epoch}', device)
                 epoch_eval_ssims.append(ssim)
                 epoch_eval_psnrs.append(psnr)
                 epoch_eval_mses.append(mse)
@@ -1452,19 +1298,16 @@ with torch.no_grad():
             kspace = sim_kspace.squeeze(0).to(device) # Remove batch dim
 
             # calculate acceleration factor
-            acceleration = torch.tensor([N_full / int(spokes)], dtype=torch.float, device=device)
-
             if config['model']['encode_acceleration']:
-                acceleration_encoding = acceleration
+                acceleration = torch.tensor([N_full / int(spokes)], dtype=torch.float, device=device)
             else: 
-                acceleration_encoding = None
-
+                acceleration = None
 
             # check if GRASP image exists or if we need to perform GRASP recon
-            if type(grasp_img) is int or len(grasp_img.shape) == 1:
+            if grasp_img is None:
                 print(f"No GRASP file found, performing reconstruction with {spokes} spokes/frame and {num_frames} frames.")
 
-                grasp_img = GRASPRecon(csmap, sim_kspace, spokes, num_frames, grasp_path[0])
+                grasp_img = GRASPRecon(csmap, sim_kspace, spokes, num_frames, grasp_path)
 
                 grasp_recon_torch = torch.from_numpy(grasp_img).permute(2, 0, 1) # T, H, W
                 grasp_recon_torch = torch.stack([grasp_recon_torch.real, grasp_recon_torch.imag], dim=0)
@@ -1476,7 +1319,7 @@ with torch.no_grad():
 
             
             x_recon, *_ = model(
-                kspace.to(device), physics, csmap, acceleration_encoding, epoch=None, norm=config['model']['norm']
+                kspace.to(device), physics, csmap, acceleration, epoch=None, norm=config['model']['norm']
             )
 
             ground_truth = torch.stack([ground_truth.real, ground_truth.imag], dim=1)
@@ -1484,7 +1327,7 @@ with torch.no_grad():
 
 
             ## Evaluation
-            ssim, psnr, mse, lpips, dc_mse, dc_mae, recon_corr, grasp_corr = eval_sample(kspace, csmap, ground_truth, x_recon, physics, mask, grasp_img, acceleration, eval_dir, f"{spokes}spf", device)
+            ssim, psnr, mse, dc_mse, dc_mae, recon_corr, grasp_corr = eval_sample(kspace, csmap, ground_truth, x_recon, physics, mask, grasp_img, eval_dir, f"{spokes}spf", device)
             stress_test_ssims.append(ssim)
             stress_test_psnrs.append(psnr)
             stress_test_mses.append(mse)
@@ -1496,7 +1339,7 @@ with torch.no_grad():
                 stress_test_grasp_corrs.append(grasp_corr)
 
 
-            ssim_grasp, psnr_grasp, mse_grasp, lpips_grasp, dc_mse_grasp, dc_mae_grasp = eval_grasp(kspace, csmap, ground_truth, grasp_img, physics, device, eval_dir)
+            ssim_grasp, psnr_grasp, mse_grasp, dc_mse_grasp, dc_mae_grasp = eval_grasp(kspace, csmap, ground_truth, grasp_img, physics, device, eval_dir)
             stress_test_grasp_ssims.append(ssim_grasp)
             stress_test_grasp_psnrs.append(psnr_grasp)
             stress_test_grasp_mses.append(mse_grasp)
@@ -1603,19 +1446,15 @@ with torch.no_grad():
             kspace = sim_kspace.squeeze(0).to(device) # Remove batch dim
             
             # calculate acceleration factor
-            acceleration = torch.tensor([N_full / int(spokes)], dtype=torch.float, device=device)
-
             if config['model']['encode_acceleration']:
-                acceleration_encoding = acceleration
+                acceleration = torch.tensor([N_full / int(spokes)], dtype=torch.float, device=device)
             else: 
-                acceleration_encoding = None
-
+                acceleration = None
 
             # check if GRASP image exists or if we need to perform GRASP recon
-            if type(grasp_img) is int or len(grasp_img.shape) == 1:
+            if grasp_img is None:
                 print(f"No GRASP file found, performing reconstruction with {spokes} spokes/frame and {num_frames} frames.")
-
-                grasp_img = GRASPRecon(csmap, sim_kspace, spokes, num_frames, grasp_path[0])
+                grasp_img = GRASPRecon(csmap, sim_kspace, spokes, num_frames, grasp_path)
 
                 grasp_recon_torch = torch.from_numpy(grasp_img).permute(2, 0, 1) # T, H, W
                 grasp_recon_torch = torch.stack([grasp_recon_torch.real, grasp_recon_torch.imag], dim=0)
@@ -1627,7 +1466,7 @@ with torch.no_grad():
 
 
             x_recon, *_ = model(
-                kspace.to(device), physics, csmap, acceleration_encoding, epoch=None, norm=config['model']['norm']
+                kspace.to(device), physics, csmap, acceleration, epoch=None, norm=config['model']['norm']
             )
 
             ground_truth = torch.stack([ground_truth.real, ground_truth.imag], dim=1)
@@ -1635,7 +1474,7 @@ with torch.no_grad():
 
 
             ## Evaluation
-            ssim, psnr, mse, lpips, dc_mse, dc_mae, recon_corr, grasp_corr = eval_sample(kspace, csmap, ground_truth, x_recon, physics, mask, grasp_img, acceleration, eval_dir, f'{spokes}spf', device)
+            ssim, psnr, mse, dc_mse, dc_mae, recon_corr, grasp_corr = eval_sample(kspace, csmap, ground_truth, x_recon, physics, mask, grasp_img, eval_dir, f'{spokes}spf', device)
             spf_eval_ssims.append(ssim)
             spf_eval_psnrs.append(psnr)
             spf_eval_mses.append(mse)
@@ -1647,7 +1486,7 @@ with torch.no_grad():
                 spf_grasp_curve_corrs.append(grasp_corr)
 
 
-            ssim_grasp, psnr_grasp, mse_grasp, lpips_grasp, dc_mse_grasp, dc_mae_grasp = eval_grasp(kspace, csmap, ground_truth, grasp_img, physics, device, eval_dir)
+            ssim_grasp, psnr_grasp, mse_grasp, dc_mse_grasp, dc_mae_grasp = eval_grasp(kspace, csmap, ground_truth, grasp_img, physics, device, eval_dir)
             spf_grasp_ssims.append(ssim_grasp)
             spf_grasp_psnrs.append(psnr_grasp)
             spf_grasp_mses.append(mse_grasp)

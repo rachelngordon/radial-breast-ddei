@@ -2,11 +2,11 @@
 
 # Parameters
 #SBATCH --cpus-per-task=4
-#SBATCH --error=logs/lsfp_mc_10slices.err
-#SBATCH --output=logs/lsfp_mc_10slices.out
+#SBATCH --error=logs/lsfp_mc_single_aug_encoding.err
+#SBATCH --output=logs/lsfp_mc_single_aug_encoding.out
 #SBATCH --exclude=''
 #SBATCH --gpus-per-node=1
-#SBATCH --job-name=lsfp_mc_10slices
+#SBATCH --job-name=lsfp_mc_single_aug_encoding
 #SBATCH --mem-per-gpu=80000
 #SBATCH --nodes=1
 #SBATCH --ntasks-per-node=1
@@ -21,4 +21,4 @@ source /gpfs/data/karczmar-lab/workspaces/rachelgordon/micromamba/etc/profile.d/
 micromamba activate recon_mri
 
 # Run the training script with srun
-python3 train.py --config configs/config_mc_slices.yaml --exp_name lsfp_mc_10slices
+python3 train.py --config configs/config_mc_aug_encoding.yaml --exp_name lsfp_mc_single_aug_encoding

@@ -24,6 +24,16 @@ from scipy.stats import pearsonr
 # EVALUATION FUNCTIONS
 # ==========================================================
 
+def normalize_for_lpips(image, data_range):
+    """Normalizes an image tensor to the [-1, 1] range for LPIPS."""
+    min_val, max_val = data_range
+    # Scale to [0, 1]
+    image_0_1 = (image - min_val) / (max_val - min_val)
+    # Scale to [-1, 1]
+    image_minus1_1 = 2 * image_0_1 - 1
+    return image_minus1_1
+
+
 def calc_image_metrics(input, reference, data_range, device, filename):
     """
     Calculates image metrics for a given input and reference image.
@@ -34,10 +44,42 @@ def calc_image_metrics(input, reference, data_range, device, filename):
     ssim = torchmetrics.image.StructuralSimilarityIndexMeasure(data_range=data_range).to(device)
     psnr = torchmetrics.image.PeakSignalNoiseRatio(data_range=data_range).to(device)
     mse = torchmetrics.MeanSquaredError().to(device)
+    lpips_metric = torchmetrics.image.LearnedPerceptualImagePatchSimilarity(net_type='alex', normalize=False).to(device)
 
     ssim = ssim(input, reference)
     psnr = psnr(input, reference)
     mse = mse(input, reference)
+
+    # # --- Handle 5D Volumetric Data by averaging over slices ---
+    # if input.dim() == 5:
+    #     # Input shape: [N, C, D, H, W]
+    #     num_slices = input.shape[2]
+        
+    #     lpips_scores = []
+
+    #     for i in range(num_slices):
+    #         # Extract the i-th slice from both tensors
+    #         # Resulting shape is [N, C, H, W] which is a valid 4D tensor
+    #         input_slice = input[:, :, i, :, :]
+    #         reference_slice = reference[:, :, i, :, :]
+
+    #         # --- Prepare the slice for LPIPS ---
+    #         input_lpips = normalize_for_lpips(input_slice.clone(), data_range)
+    #         reference_lpips = normalize_for_lpips(reference_slice.clone(), data_range)
+
+    #         # LPIPS expects 3 channels. Since the slice is now 4D, this repeat will work.
+    #         if input_lpips.shape[1] == 1:
+    #             input_lpips = input_lpips.repeat(1, 3, 1, 1)
+    #             reference_lpips = reference_lpips.repeat(1, 3, 1, 1)
+            
+    #         lpips_scores.append(lpips_metric(input_lpips, reference_lpips).item())
+
+    #     # Average the scores from all slices
+    #     final_lpips = sum(lpips_scores) / len(lpips_scores)
+
+
+
+    final_lpips = 0
 
     # Plot input images
     # fig, axes = plt.subplots(1, 2, figsize=(12, 6))
@@ -53,7 +95,7 @@ def calc_image_metrics(input, reference, data_range, device, filename):
     # plt.savefig(filename)
     # plt.close()
 
-    return ssim.item(), psnr.item(), mse.item()
+    return ssim.item(), psnr.item(), mse.item(), final_lpips
     
 
 
@@ -217,7 +259,8 @@ def plot_spatial_quality(
     time_frame_index: int,
     filename: str,
     grasp_comparison_filename: str,
-    data_range: float
+    data_range: float, 
+    acceleration: float,
 ):
     """
     Generates a comparison plot for a single time frame in a 2x4 grid.
@@ -241,7 +284,7 @@ def plot_spatial_quality(
 
     # Create a 2x4 plot grid
     fig, axes = plt.subplots(2, 4, figsize=(24, 12))
-    fig.suptitle(f"Spatial Quality Comparison at Time Frame {time_frame_index}", fontsize=20)
+    fig.suptitle(f"Spatial Quality Comparison at Time Frame {time_frame_index} with AF {acceleration}", fontsize=20)
 
     # --- Top Row: DL Reconstruction Comparison ---
     axes[0, 0].imshow(gt_img, cmap='gray')
@@ -292,7 +335,7 @@ def plot_spatial_quality(
 
     # Create a 1x4 plot grid
     fig, axes = plt.subplots(1, 4, figsize=(24, 6))
-    fig.suptitle(f"DL vs GRASP Comparison at Time Frame {time_frame_index}", fontsize=20)
+    fig.suptitle(f"DL vs GRASP Comparison at Time Frame {time_frame_index} with AF {acceleration}", fontsize=20)
 
     # --- Top Row: DL Reconstruction Comparison ---
     axes[0].imshow(grasp_img, cmap='gray')
@@ -306,7 +349,7 @@ def plot_spatial_quality(
     fig.colorbar(im_err_dl, ax=axes[2], fraction=0.046, pad=0.04)
 
     im_ssim_dl = axes[3].imshow(ssim_map, cmap='viridis', vmin=0, vmax=1)
-    axes[3].set_title(f"SSIM Map (SSIM: {round(ssim, 3)})")
+    axes[3].set_title(f"SSIM Map (SSIM between DL and GRASP Recons: {round(ssim, 3)})")
     fig.colorbar(im_ssim_dl, ax=axes[3], fraction=0.046, pad=0.04)
     
     # Turn off axes for all plots
@@ -329,7 +372,8 @@ def plot_temporal_curves(
     grasp_img_stack: np.ndarray,
     masks: dict,
     time_points: np.ndarray,
-    filename: str
+    filename: str, 
+    acceleration: float,
 ):
     """
     Plots the mean signal intensity vs. time for different tissue regions.
@@ -351,7 +395,7 @@ def plot_temporal_curves(
 
     fig, axes = plt.subplots(1, len(regions), figsize=(7 * len(regions), 5), sharey=True)
     if len(regions) == 1: axes = [axes] # Ensure axes is always a list
-    fig.suptitle("Temporal Fidelity: Mean Signal vs. Time", fontsize=16)
+    fig.suptitle(f"Temporal Fidelity: Mean Signal vs. Time (AF = {acceleration})", fontsize=16)
 
     for i, region in enumerate(regions):
         mask = masks[region]
@@ -444,8 +488,9 @@ def plot_single_temporal_curve(
     time_points: np.ndarray,
     num_frames: int,
     filename: str,
+    acceleration: float,
     # New arguments required for this specific plot style:
-    frames_to_show: List[int] = None
+    frames_to_show: List[int] = None,
 ):
     """
     Generates a comprehensive analysis plot for a single sample, showing the
@@ -485,6 +530,7 @@ def plot_single_temporal_curve(
 
     # --- 1. Setup Figure and Layout ---
     fig = plt.figure(figsize=(20, 8.5))
+    fig.suptitle(f"Tumor Enhancement Over Time (AF = {acceleration})")
     gs = gridspec.GridSpec(2, 4, figure=fig, hspace=0.1, wspace=0.1)
 
     ax_curve = fig.add_subplot(gs[:, 0:2])
@@ -548,7 +594,8 @@ def plot_time_series(
     gt_img_stack: np.ndarray,
     recon_img_stack: np.ndarray,
     grasp_img_stack: np.ndarray,
-    filename: str
+    filename: str,
+    acceleration: float,
 ):
     """
     Plots the middle 5 time points for Ground Truth, DL Recon, and GRASP.
@@ -565,7 +612,7 @@ def plot_time_series(
     indices = np.linspace(0, num_frames - 1, 5, dtype=int)
     
     fig, axes = plt.subplots(3, 5, figsize=(25, 15))
-    fig.suptitle("Temporal Series Comparison", fontsize=20)
+    fig.suptitle(f"Temporal Series Comparison (AF = {acceleration})", fontsize=20)
 
     # --- Row 1: Ground Truth ---
     for i, frame_idx in enumerate(indices):
@@ -764,10 +811,13 @@ def eval_grasp(kspace, csmap, ground_truth, grasp_recon, physics, device, output
     gt_mag = rearrange(gt_mag, 'c t h w -> c t h w').unsqueeze(0)
 
     # calculate data range from ground truth
-    data_range = gt_mag.max() - gt_mag.min()
+    # data_range = gt_mag.max() - gt_mag.min()
+    min_val = torch.min(gt_mag).item()
+    max_val = torch.max(gt_mag).item()
+    data_range = (min_val, max_val)
 
     filename=os.path.join(output_dir, f"grasp_metric_inputs.png")
-    ssim_grasp, psnr_grasp, mse_grasp = calc_image_metrics(grasp_mag.contiguous(), gt_mag.contiguous(), data_range, device, filename)
+    ssim_grasp, psnr_grasp, mse_grasp, lpips_grasp = calc_image_metrics(grasp_mag.contiguous(), gt_mag.contiguous(), data_range, device, filename)
 
 
     # ssims = []
@@ -815,10 +865,12 @@ def eval_grasp(kspace, csmap, ground_truth, grasp_recon, physics, device, output
 
     
     # return np.mean(ssims), np.mean(psnrs), np.mean(mses), dc_grasp
-    return ssim_grasp, psnr_grasp, mse_grasp, dc_mse_grasp, dc_mae_grasp
+    return ssim_grasp, psnr_grasp, mse_grasp, lpips_grasp, dc_mse_grasp, dc_mae_grasp
 
 
-def eval_sample(kspace, csmap, ground_truth, x_recon, physics, mask, grasp_img, output_dir, label, device):
+def eval_sample(kspace, csmap, ground_truth, x_recon, physics, mask, grasp_img, acceleration, output_dir, label, device):
+
+    acceleration = round(acceleration.item(), 1)
 
     # ground_truth = ground_truth.to(device) # Shape: (1, 2, T, H, W)
     # grasp_recon = grasp_recon.to(device) # Shape: (1, 2, H, T, W)
@@ -868,10 +920,13 @@ def eval_sample(kspace, csmap, ground_truth, x_recon, physics, mask, grasp_img, 
     gt_mag = rearrange(gt_mag, 'c t h w -> c t h w').unsqueeze(0)
 
     # calculate data range from ground truth
-    data_range = gt_mag.max() - gt_mag.min()
+    # data_range = gt_mag.max() - gt_mag.min()
+    min_val = torch.min(gt_mag).item()
+    max_val = torch.max(gt_mag).item()
+    data_range = (min_val, max_val)
 
     filename=os.path.join(output_dir, f"grasp_metric_inputs.png")
-    ssim, psnr, mse = calc_image_metrics(recon_mag_scaled.contiguous(), gt_mag.contiguous(), data_range, device, filename)
+    ssim, psnr, mse, lpips = calc_image_metrics(recon_mag_scaled.contiguous(), gt_mag.contiguous(), data_range, device, filename)
 
 
     # ssims = []
@@ -939,7 +994,8 @@ def eval_sample(kspace, csmap, ground_truth, x_recon, physics, mask, grasp_img, 
             time_frame_index=peak_frame,
             filename=os.path.join(output_dir, f"spatial_quality_{label}.png"),
             grasp_comparison_filename=os.path.join(output_dir, f"grasp_comparison_{label}.png"),
-            data_range=data_range
+            data_range=data_range,
+            acceleration=acceleration,
         )
 
         # --- Plot Temporal Curves for Key Regions ---
@@ -950,7 +1006,8 @@ def eval_sample(kspace, csmap, ground_truth, x_recon, physics, mask, grasp_img, 
             grasp_img_stack=grasp_mag_np,
             masks=masks_np,
             time_points=aif_time_points,
-            filename=os.path.join(output_dir, f"temporal_curves_{label}.png")
+            filename=os.path.join(output_dir, f"temporal_curves_{label}.png"),
+            acceleration=acceleration,
         )
 
         plot_single_temporal_curve(
@@ -958,7 +1015,8 @@ def eval_sample(kspace, csmap, ground_truth, x_recon, physics, mask, grasp_img, 
             masks=masks_np,
             time_points=aif_time_points,
             num_frames=num_frames,
-            filename=os.path.join(output_dir, f"recon_temporal_curve_{label}.png")
+            filename=os.path.join(output_dir, f"recon_temporal_curve_{label}.png"),
+            acceleration=acceleration,
         )
 
         # plot_single_temporal_curve(
@@ -981,7 +1039,8 @@ def eval_sample(kspace, csmap, ground_truth, x_recon, physics, mask, grasp_img, 
             gt_img_stack=gt_mag_np,
             recon_img_stack=recon_mag_np,
             grasp_img_stack=grasp_mag_np,
-            filename=os.path.join(output_dir, f"time_points_{label}.png")
+            filename=os.path.join(output_dir, f"time_points_{label}.png"),
+            acceleration=acceleration,
         )
 
         print("Diagnostic plots saved.")
@@ -990,7 +1049,7 @@ def eval_sample(kspace, csmap, ground_truth, x_recon, physics, mask, grasp_img, 
         recon_corr, grasp_corr = None, None
     
     
-    return ssim, psnr, mse, dc_mse, dc_mae, recon_corr, grasp_corr
+    return ssim, psnr, mse, lpips, dc_mse, dc_mae, recon_corr, grasp_corr
 
 
 

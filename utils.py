@@ -470,7 +470,7 @@ def GRASPRecon(csmaps, kspace, spokes_per_frame, num_frames, grasp_path):
 
     R1 = np.squeeze(R1.get())
 
-    # np.save(grasp_path, R1)
-    # print(f"GRASP Recon with {spokes_per_frame} spokes/frame and {num_frames} timeframes saved to {grasp_path}")
+    np.save(grasp_path, R1)
+    print(f"GRASP Recon with {spokes_per_frame} spokes/frame and {num_frames} timeframes saved to {grasp_path}")
 
     return R1

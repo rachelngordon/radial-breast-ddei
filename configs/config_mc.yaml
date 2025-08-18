@@ -24,6 +24,8 @@ dataloader:
   num_workers: 2
   max_subjects: 300
   slice_idx: 41
+  slice_range_start: None
+  slice_range_end: None
 
 # Model settings
 model:

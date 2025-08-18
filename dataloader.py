@@ -393,7 +393,8 @@ class SimulatedSPFDataset(Dataset):
             grasp_recon_torch = torch.rot90(grasp_recon_torch, k=3, dims=[-3,-1])
 
         else:
-            grasp_recon_torch = None
+            print("setting grasp img to zero")
+            grasp_recon_torch = 0
 
 
         ground_truth_complex = dro['ground_truth_images']

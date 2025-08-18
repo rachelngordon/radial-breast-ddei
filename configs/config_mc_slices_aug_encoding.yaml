@@ -11,7 +11,7 @@ data:
   samples: 640
   coils: 16
   eval_timeframes: 22
-  spf_aug: false
+  spf_aug: true
 
 # Experiment settings
 experiment:
@@ -22,10 +22,10 @@ dataloader:
   batch_size: 1
   shuffle: false
   num_workers: 2
-  max_subjects: 2
-  slice_idx: 41
-  slice_range_start: None
-  slice_range_end: None
+  max_subjects: 300
+  slice_idx: None
+  slice_range_start: 35
+  slice_range_end: 45
 
 # Model settings
 model:
@@ -39,7 +39,7 @@ model:
   lambda_spatial_S: 0.05
   gamma: 0.5
   lambda_step: 0.1
-  encode_acceleration: false
+  encode_acceleration: true
   optimizer:
     name: "Adam"
     lr: 0.0005
@@ -50,16 +50,16 @@ model:
   losses:
     adj_loss:
       weight: 50000
-    use_ei_loss: true
+    use_ei_loss: false
     mc_loss:
       weight: 1
       metric: "MAE"
     ei_loss:
       temporal_transform: "none"
       spatial_transform: "rotate"
-      weight: 1
-      warmup: 1
-      duration: 5
+      weight: 0
+      warmup: 3
+      duration: 30
       subsample_ratio_min: 0.7
       subsample_ratio_max: 0.95
       warp_ratio_min: 0.6
@@ -69,7 +69,7 @@ model:
 
 # Training settings
 training:
-  epochs: 1
+  epochs: 10
   save_interval: 1
   plot_interval: 20
   device: "cuda"  # or "cpu"
@@ -79,6 +79,6 @@ evaluation:
   simulated_dataset_path: "/ess/scratch/scratch1/rachelgordon/simulated_dataset/"
 
 debugging:
-  calc_step_0: false
+  calc_step_0: true
   enable_gradient_monitoring: true
   monitoring_interval: 5

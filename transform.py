@@ -107,6 +107,8 @@ class VideoRotate(Transform):
         # Create affine matrix for the rotation
         angle_rad = -torch.tensor(angle_for_video) * (torch.pi / 180.0)
         cos_a, sin_a = torch.cos(angle_rad), torch.sin(angle_rad)
+
+        self.last_angle = angle_for_video
         
         # Matrix for a single rotation. Shape: (1, 2, 3)
         matrix = torch.tensor(

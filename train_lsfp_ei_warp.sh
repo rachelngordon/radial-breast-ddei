@@ -2,11 +2,11 @@
 
 # Parameters
 #SBATCH --cpus-per-task=4
-#SBATCH --error=logs/lsfp_ei_warp_dynamic_weight.err
-#SBATCH --output=logs/lsfp_ei_warp_dynamic_weight.out
+#SBATCH --error=logs/lsfp_ei_warp_10slices.err
+#SBATCH --output=logs/lsfp_ei_warp_10slices.out
 #SBATCH --exclude=''
 #SBATCH --gpus-per-node=1
-#SBATCH --job-name=lsfp_ei_warp_dynamic_weight
+#SBATCH --job-name=lsfp_ei_warp_10slices
 #SBATCH --mem-per-gpu=80000
 #SBATCH --nodes=1
 #SBATCH --ntasks-per-node=1
@@ -21,4 +21,4 @@ source /gpfs/data/karczmar-lab/workspaces/rachelgordon/micromamba/etc/profile.d/
 micromamba activate recon_mri
 
 # Run the training script with srun
-python3 train.py --config configs/config_ei_warp.yaml --exp_name lsfp_ei_warp_dynamic_weight
+python3 train.py --config configs/config_ei_warp_slices.yaml --exp_name lsfp_ei_warp_10slices

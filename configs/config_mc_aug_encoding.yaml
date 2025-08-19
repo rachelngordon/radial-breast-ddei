@@ -12,6 +12,7 @@ data:
   coils: 16
   eval_timeframes: 22
   spf_aug: true
+  fpg: 24
 
 # Experiment settings
 experiment:
@@ -58,8 +59,8 @@ model:
       temporal_transform: "none"
       spatial_transform: "rotate"
       weight: 0
-      warmup: 3
-      duration: 30
+      warmup: 1
+      duration: 5
       subsample_ratio_min: 0.7
       subsample_ratio_max: 0.95
       warp_ratio_min: 0.6

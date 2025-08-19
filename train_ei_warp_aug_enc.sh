@@ -2,11 +2,11 @@
 
 # Parameters
 #SBATCH --cpus-per-task=4
-#SBATCH --error=logs/lsfp_mc_aug_group.err
-#SBATCH --output=logs/lsfp_mc_aug_group.out
+#SBATCH --error=logs/lsfp_ei_warp_aug_enc_group.err
+#SBATCH --output=logs/lsfp_ei_warp_aug_enc_group.out
 #SBATCH --exclude=''
 #SBATCH --gpus-per-node=1
-#SBATCH --job-name=lsfp_mc_aug_group
+#SBATCH --job-name=lsfp_ei_warp_aug_enc_group
 #SBATCH --mem-per-gpu=80000
 #SBATCH --nodes=1
 #SBATCH --ntasks-per-node=1
@@ -21,4 +21,4 @@ source /gpfs/data/karczmar-lab/workspaces/rachelgordon/micromamba/etc/profile.d/
 micromamba activate recon_mri
 
 # Run the training script with srun
-python3 train_fpg.py --config configs/config_mc_aug.yaml --exp_name lsfp_mc_aug_group
+python3 train_fpg.py --config configs/config_ei_warp_aug_enc.yaml --exp_name lsfp_ei_warp_aug_enc_group

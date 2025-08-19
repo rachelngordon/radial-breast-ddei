@@ -23,7 +23,7 @@ dataloader:
   batch_size: 1
   shuffle: false
   num_workers: 2
-  max_subjects: 2
+  max_subjects: 300
   slice_idx: 41
   slice_range_start: None
   slice_range_end: None
@@ -40,7 +40,7 @@ model:
   lambda_spatial_S: 0.05
   gamma: 0.5
   lambda_step: 0.1
-  encode_acceleration: false
+  encode_acceleration: true
   optimizer:
     name: "Adam"
     lr: 0.0005
@@ -56,11 +56,11 @@ model:
       weight: 1
       metric: "MAE"
     ei_loss:
-      temporal_transform: "none"
-      spatial_transform: "rotate"
-      weight: 0
-      warmup: 1
-      duration: 5
+      temporal_transform: "warp"
+      spatial_transform: "none"
+      weight: 1
+      warmup: 6
+      duration: 50
       subsample_ratio_min: 0.7
       subsample_ratio_max: 0.95
       warp_ratio_min: 0.6
@@ -70,7 +70,7 @@ model:
 
 # Training settings
 training:
-  epochs: 1
+  epochs: 30
   save_interval: 1
   plot_interval: 20
   device: "cuda"  # or "cpu"

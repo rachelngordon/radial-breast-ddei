@@ -407,6 +407,7 @@ def load_checkpoint(model, optimizer, filename):
         "eval_ssims": ckpt.get("eval_ssims", []),
         "eval_psnrs": ckpt.get("eval_psnrs", []),
         "eval_mses": ckpt.get("eval_mses", []),
+        "eval_lpipses": ckpt.get("eval_lpipses", []),
         "eval_dc_mses": ckpt.get("eval_dc_mses", []),
         "eval_dc_maes": ckpt.get("eval_dc_maes", []),
         "eval_curve_corrs": ckpt.get("eval_curve_corrs", []),

@@ -16,9 +16,11 @@ from mc import MCLoss
 from lsfpnet_encoding import LSFPNet, ArtifactRemovalLSFPNet
 from radial_lsfp import MCNUFFT
 from utils import prep_nufft, log_gradient_stats, plot_enhancement_curve, get_cosine_ei_weight, plot_reconstruction_sample, get_git_commit, save_checkpoint, load_checkpoint, to_torch_complex, GRASPRecon
-from eval import eval_grasp, eval_sample, plot_time_series
+from eval import eval_grasp, eval_sample
 import csv
 import math
+import random
+import time 
 
 # Parse command-line arguments
 parser = argparse.ArgumentParser(description="Train ReconResNet model.")
@@ -115,6 +117,12 @@ N_time, N_samples, N_coils, N_time_eval = (
     config["data"]["coils"],
     config["data"]["eval_timeframes"]
 )
+Ng = config["data"]["fpg"] 
+# Mg = N_time // Ng  
+# indG = np.arange(0, N_time, 1, dtype=int)
+# indG = np.reshape(indG, [Mg, Ng])
+
+
 N_spokes = int(config["data"]["total_spokes"] / N_time)
 
 N_full = config['data']['height'] * math.pi / 2
@@ -194,6 +202,7 @@ train_loader = DataLoader(
     batch_size=config["dataloader"]["batch_size"],
     shuffle=config["dataloader"]["shuffle"],
     num_workers=config["dataloader"]["num_workers"],
+    pin_memory=True,
 )
 
 
@@ -209,6 +218,7 @@ val_dro_loader = DataLoader(
     batch_size=config["dataloader"]["batch_size"],
     shuffle=config["dataloader"]["shuffle"],
     num_workers=config["dataloader"]["num_workers"],
+    pin_memory=True,
 )
 
 
@@ -335,6 +345,7 @@ if args.from_checkpoint:
     eval_ssims = eval_curves["eval_ssims"]
     eval_psnrs = eval_curves["eval_psnrs"]
     eval_mses = eval_curves["eval_mses"]
+    eval_lpipses = eval_curves["eval_lpipses"]
     eval_dc_mses = eval_curves["eval_dc_mses"]
     eval_dc_maes = eval_curves["eval_dc_maes"]
     eval_curve_corrs = eval_curves["eval_curve_corrs"]
@@ -349,6 +360,7 @@ else:
     weighted_train_ei_losses = []
     weighted_train_adj_losses = []
     eval_ssims = []
+    eval_lpipses = []
     eval_psnrs = []
     eval_mses = []
     eval_dc_mses = []
@@ -359,6 +371,7 @@ else:
 grasp_ssims = []
 grasp_psnrs = []
 grasp_mses = []
+grasp_lpipses = []
 grasp_dc_mses = []
 grasp_dc_maes = []
 grasp_curve_corrs = []
@@ -387,6 +400,7 @@ if args.from_checkpoint == False and config['debugging']['calc_step_0'] == True:
     initial_eval_ssims = []
     initial_eval_psnrs = []
     initial_eval_mses = []
+    initial_eval_lpipses = []
     initial_eval_dc_mses = []
     initial_eval_dc_maes = []
     initial_eval_curve_corrs = []
@@ -396,28 +410,61 @@ if args.from_checkpoint == False and config['debugging']['calc_step_0'] == True:
         # Evaluate on training data
         for measured_kspace, csmap, grasp_img, N_samples, N_spokes, N_time in tqdm(train_loader, desc="Step 0 Training Evaluation"):
 
-            # prep physics operators
-            ktraj, dcomp, nufft_ob, adjnufft_ob = prep_nufft(N_samples, N_spokes, N_time)
-            ktraj = ktraj.to(device)
-            dcomp = dcomp.to(device)
-            nufft_ob = nufft_ob.to(device)
-            adjnufft_ob = adjnufft_ob.to(device)
-
-            physics = MCNUFFT(nufft_ob, adjnufft_ob, ktraj, dcomp)
-
             # prepare inputs
             measured_kspace = to_torch_complex(measured_kspace).squeeze()
             measured_kspace = rearrange(measured_kspace, 't co sp sam -> co (sp sam) t')
+            
+            if N_time > Ng:
+
+                # Mg = N_time // Ng  
+                # print("Mg: ", Mg)
+                # indG = np.arange(0, N_time, 1, dtype=int)
+                # print("indG: ", indG)
+                # indG = np.reshape(indG, [Mg, Ng])
+                # print("indG reshaped: ", indG)
+
+                # prep physics operators
+                ktraj, dcomp, nufft_ob, adjnufft_ob = prep_nufft(N_samples, N_spokes, Ng)
+                ktraj = ktraj.to(device)
+                dcomp = dcomp.to(device)
+                nufft_ob = nufft_ob.to(device)
+                adjnufft_ob = adjnufft_ob.to(device)
+
+                physics = MCNUFFT(nufft_ob, adjnufft_ob, ktraj, dcomp)
+
+
+                # random_group = torch.randperm(Mg)
+
+                # for p in random_group[0:1]:
+
+                max_idx = N_time - Ng
+                random_index = random.randint(0, max_idx - 1) 
+
+                measured_kspace = measured_kspace[..., random_index:random_index + Ng]
+
+            else:
+                # prep physics operators
+                ktraj, dcomp, nufft_ob, adjnufft_ob = prep_nufft(N_samples, N_spokes, N_time)
+                ktraj = ktraj.to(device)
+                dcomp = dcomp.to(device)
+                nufft_ob = nufft_ob.to(device)
+                adjnufft_ob = adjnufft_ob.to(device)
+
+                physics = MCNUFFT(nufft_ob, adjnufft_ob, ktraj, dcomp)
+
 
             csmap = csmap.to(device).to(measured_kspace.dtype)
 
+            acceleration = torch.tensor([N_full / int(N_spokes)], dtype=torch.float, device=device)
+
             if config['model']['encode_acceleration']:
-                acceleration = torch.tensor([N_full / int(N_spokes)], dtype=torch.float, device=device)
+                acceleration_encoding = acceleration
             else: 
-                acceleration = None
+                acceleration_encoding = None
+
 
             x_recon, adj_loss, lambda_L, lambda_S, lambda_spatial_L, lambda_spatial_S, gamma, lambda_step = model(
-                measured_kspace.to(device), physics, csmap, acceleration, epoch="train0", norm=config['model']['norm']
+                measured_kspace.to(device), physics, csmap, acceleration_encoding, epoch="train0", norm=config['model']['norm']
             )
 
             # calculate losses
@@ -428,10 +475,46 @@ if args.from_checkpoint == False and config['debugging']['calc_step_0'] == True:
 
             if use_ei_loss:
                 ei_loss, t_img = ei_loss_fn(
-                    x_recon, physics, model, csmap, acceleration
+                    x_recon, physics, model, csmap, acceleration_encoding
                 )
 
+                # # 1. Apply the image transform
+                # x_net_rearranged = rearrange(x_recon, 'b c h w t -> b c t h w')
+                # x2_rearranged = ei_loss_fn.T(x_net_rearranged) # This calls VideoRotate
+                # x2 = rearrange(x2_rearranged, 'b c t h w -> b c h w t')
+                # x2_complex = to_torch_complex(x2)
+
+                # # 2. Get the rotation angle used
+                # #    (assuming you've modified VideoRotate to store it)
+                # angle_deg = ei_loss_fn.T.last_angle # Access it from the composed transform
+                # angle_rad = torch.deg2rad(torch.tensor(angle_deg, device=device))
+
+                # # 3. Create a 2D rotation matrix
+                # cos_a, sin_a = torch.cos(angle_rad), torch.sin(angle_rad)
+                # # Note: k-space rotation is often the transpose of image rotation
+                # rot_matrix = torch.tensor([[cos_a, sin_a],
+                #                         [-sin_a, cos_a]], dtype=torch.float32, device=device)
+
+                # # 4. Rotate the k-space trajectory
+                # # ktraj shape is likely (2, n_points, n_time), so we permute for matmul
+                # ktraj_permuted = ktraj.permute(1, 2, 0) # (n_points, n_time, 2)
+                # ktraj_rot_permuted = torch.matmul(ktraj_permuted, rot_matrix)
+                # ktraj_rot = ktraj_rot_permuted.permute(2, 0, 1) # Back to (2, n_points, n_time)
+                
+                # # 5. Create a new, temporary physics operator for the EI loss
+                # #    Crucially, we reuse the original dcomp, as discussed.
+                # physics_rot = MCNUFFT(nufft_ob, adjnufft_ob, ktraj_rot, dcomp)
+                
+                # # 6. Calculate the EI loss with the rotated physics
+                # y_rot = physics_rot(inv=False, data=x2_complex, smaps=csmap).to(csmap.device)
+                
+                # # For the reconstruction step, you MUST use the rotated physics again
+                # x3, *_ = model(y_rot, physics_rot, csmap, acceleration_encoding, epoch=None)
+
+                # ei_loss = ei_loss_fn.metric(x3, x2)
+
                 initial_train_ei_loss += ei_loss.item()
+            
 
         # record losses
         step0_train_mc_loss = initial_train_mc_loss / len(train_loader)
@@ -462,14 +545,17 @@ if args.from_checkpoint == False and config['debugging']['calc_step_0'] == True:
             measured_kspace = measured_kspace.squeeze(0).to(device) # Remove batch dim
             csmap = csmap.squeeze(0).to(device)   # Remove batch dim
 
+            # if config['model']['encode_acceleration']:
+            N_spokes = eval_ktraj.shape[1] / config['data']['samples']
+            acceleration = torch.tensor([N_full / int(N_spokes)], dtype=torch.float, device=device)
+
             if config['model']['encode_acceleration']:
-                N_spokes = eval_ktraj.shape[1] / config['data']['samples']
-                acceleration = torch.tensor([N_full / int(N_spokes)], dtype=torch.float, device=device)
+                acceleration_encoding = acceleration
             else: 
-                acceleration = None
+                acceleration_encoding = None
 
             x_recon, adj_loss, *_ = model(
-                measured_kspace.to(device), eval_physics, csmap, acceleration, epoch="val0", norm=config['model']['norm']
+                measured_kspace.to(device), eval_physics, csmap, acceleration_encoding, epoch="val0", norm=config['model']['norm']
             )
 
             # compute losses
@@ -480,8 +566,43 @@ if args.from_checkpoint == False and config['debugging']['calc_step_0'] == True:
 
             if use_ei_loss:
                 ei_loss, t_img = ei_loss_fn(
-                    x_recon, eval_physics, model, csmap, acceleration
+                    x_recon, eval_physics, model, csmap, acceleration_encoding
                 )
+
+                # # 1. Apply the image transform
+                # x_net_rearranged = rearrange(x_recon, 'b c h w t -> b c t h w')
+                # x2_rearranged = ei_loss_fn.T(x_net_rearranged) # This calls VideoRotate
+                # x2 = rearrange(x2_rearranged, 'b c t h w -> b c h w t')
+                # x2_complex = to_torch_complex(x2)
+
+                # # 2. Get the rotation angle used
+                # #    (assuming you've modified VideoRotate to store it)
+                # angle_deg = ei_loss_fn.T.last_angle # Access it from the composed transform
+                # angle_rad = torch.deg2rad(torch.tensor(angle_deg, device=device))
+
+                # # 3. Create a 2D rotation matrix
+                # cos_a, sin_a = torch.cos(angle_rad), torch.sin(angle_rad)
+                # # Note: k-space rotation is often the transpose of image rotation
+                # rot_matrix = torch.tensor([[cos_a, sin_a],
+                #                         [-sin_a, cos_a]], dtype=torch.float32, device=device)
+
+                # # 4. Rotate the k-space trajectory
+                # # ktraj shape is likely (2, n_points, n_time), so we permute for matmul
+                # ktraj_permuted = eval_ktraj.permute(1, 2, 0) # (n_points, n_time, 2)
+                # ktraj_rot_permuted = torch.matmul(ktraj_permuted, rot_matrix)
+                # ktraj_rot = ktraj_rot_permuted.permute(2, 0, 1) # Back to (2, n_points, n_time)
+                
+                # # 5. Create a new, temporary physics operator for the EI loss
+                # #    Crucially, we reuse the original dcomp, as discussed.
+                # physics_rot = MCNUFFT(eval_nufft_ob, eval_adjnufft_ob, ktraj_rot, eval_dcomp)
+                
+                # # 6. Calculate the EI loss with the rotated physics
+                # y_rot = physics_rot(inv=False, data=x2_complex, smaps=csmap).to(csmap.device)
+                
+                # # For the reconstruction step, you MUST use the rotated physics again
+                # x3, *_ = model(y_rot, physics_rot, csmap, acceleration_encoding, epoch=None)
+
+                # ei_loss = ei_loss_fn.metric(x3, x2)
 
                 initial_val_ei_loss += ei_loss.item()
 
@@ -489,17 +610,19 @@ if args.from_checkpoint == False and config['debugging']['calc_step_0'] == True:
             grasp_recon = grasp_img.to(device) # Shape: (1, 2, H, T, W)
 
             # calculate grasp metrics
-            ssim_grasp, psnr_grasp, mse_grasp, dc_mse_grasp, dc_mae_grasp = eval_grasp(measured_kspace, csmap, ground_truth, grasp_recon, eval_physics, device, eval_dir)
+            ssim_grasp, psnr_grasp, mse_grasp, lpips_grasp, dc_mse_grasp, dc_mae_grasp = eval_grasp(measured_kspace, csmap, ground_truth, grasp_recon, eval_physics, device, eval_dir)
             grasp_ssims.append(ssim_grasp)
             grasp_psnrs.append(psnr_grasp)
             grasp_mses.append(mse_grasp)
+            grasp_lpipses.append(lpips_grasp)
             grasp_dc_mses.append(dc_mse_grasp)
             grasp_dc_maes.append(dc_mae_grasp)
 
-            ssim, psnr, mse, dc_mse, dc_mae, recon_corr, grasp_corr = eval_sample(measured_kspace, csmap, ground_truth, x_recon, eval_physics, mask, grasp_recon, eval_dir, label=None, device=device)
+            ssim, psnr, mse, lpips, dc_mse, dc_mae, recon_corr, grasp_corr = eval_sample(measured_kspace, csmap, ground_truth, x_recon, eval_physics, mask, grasp_recon, acceleration, eval_dir, label=None, device=device)
             initial_eval_ssims.append(ssim)
             initial_eval_psnrs.append(psnr)
             initial_eval_mses.append(mse)
+            initial_eval_lpipses.append(lpips)
             initial_eval_dc_mses.append(dc_mse)
             initial_eval_dc_maes.append(dc_mae)
 
@@ -521,6 +644,7 @@ if args.from_checkpoint == False and config['debugging']['calc_step_0'] == True:
         initial_eval_ssim = np.mean(initial_eval_ssims)
         initial_eval_psnr = np.mean(initial_eval_psnrs)
         initial_eval_mse = np.mean(initial_eval_mses)
+        initial_eval_lpips = np.mean(initial_eval_lpipses)
         initial_eval_dc_mse = np.mean(initial_eval_dc_mses)
         initial_eval_dc_mae = np.mean(initial_eval_dc_maes)
         initial_eval_curve_corr = np.mean(initial_eval_curve_corrs)
@@ -528,6 +652,7 @@ if args.from_checkpoint == False and config['debugging']['calc_step_0'] == True:
         eval_ssims.append(initial_eval_ssim)
         eval_psnrs.append(initial_eval_psnr)
         eval_mses.append(initial_eval_mse)
+        eval_lpipses.append(initial_eval_lpips)
         eval_dc_mses.append(initial_eval_dc_mse) 
         eval_dc_maes.append(initial_eval_dc_mae) 
         eval_curve_corrs.append(initial_eval_curve_corr)
@@ -549,6 +674,7 @@ else:
         epoch_eval_ssims = []
         epoch_eval_psnrs = []
         epoch_eval_mses = []
+        epoch_eval_lpipses = []
         epoch_eval_dc_mses = []
         epoch_eval_dc_maes = []
         epoch_eval_curve_corrs = []
@@ -580,35 +706,57 @@ else:
 
 
         for measured_kspace, csmap, grasp_img, N_samples, N_spokes, N_time in train_loader_tqdm:  # measured_kspace shape: (B, C, I, S, T)
-
-            # prepare physics operators
-            ktraj, dcomp, nufft_ob, adjnufft_ob = prep_nufft(N_samples, N_spokes, N_time)
-            ktraj = ktraj.to(device)
-            dcomp = dcomp.to(device)
-            nufft_ob = nufft_ob.to(device)
-            adjnufft_ob = adjnufft_ob.to(device)
-
-            physics = MCNUFFT(nufft_ob, adjnufft_ob, ktraj, dcomp)
-
-
-            # iteration_count += 1
-            optimizer.zero_grad()
+            
+            start = time.time()
 
             # prepare inputs
             measured_kspace = to_torch_complex(measured_kspace).squeeze()
             measured_kspace = rearrange(measured_kspace, 't co sp sam -> co (sp sam) t')
 
+            if N_time > Ng:
+
+                # prep physics operators
+                ktraj, dcomp, nufft_ob, adjnufft_ob = prep_nufft(N_samples, N_spokes, Ng)
+                ktraj = ktraj.to(device)
+                dcomp = dcomp.to(device)
+                nufft_ob = nufft_ob.to(device)
+                adjnufft_ob = adjnufft_ob.to(device)
+
+                physics = MCNUFFT(nufft_ob, adjnufft_ob, ktraj, dcomp)
+
+                max_idx = N_time - Ng
+                random_index = random.randint(0, max_idx - 1) 
+
+                measured_kspace = measured_kspace[..., random_index:random_index + Ng]
+                
+
+            else:
+                # prep physics operators
+                ktraj, dcomp, nufft_ob, adjnufft_ob = prep_nufft(N_samples, N_spokes, N_time)
+                ktraj = ktraj.to(device)
+                dcomp = dcomp.to(device)
+                nufft_ob = nufft_ob.to(device)
+                adjnufft_ob = adjnufft_ob.to(device)
+
+                physics = MCNUFFT(nufft_ob, adjnufft_ob, ktraj, dcomp)
+
+
+            # iteration_count += 1
+            optimizer.zero_grad()
+
             csmap = csmap.to(device).to(measured_kspace.dtype)
 
             # calculate acceleration factor
+            acceleration = torch.tensor([N_full / int(N_spokes)], dtype=torch.float, device=device)
+
             if config['model']['encode_acceleration']:
-                acceleration = torch.tensor([N_full / int(N_spokes)], dtype=torch.float, device=device)
+                acceleration_encoding = acceleration
             else: 
-                acceleration = None
+                acceleration_encoding = None
 
 
             x_recon, adj_loss, lambda_L, lambda_S, lambda_spatial_L, lambda_spatial_S, gamma, lambda_step = model(
-                measured_kspace.to(device), physics, csmap, acceleration, epoch=f"train{epoch}", norm=config['model']['norm']
+                measured_kspace.to(device), physics, csmap, acceleration_encoding, epoch=f"train{epoch}", norm=config['model']['norm']
             )
 
             # compute losses
@@ -619,8 +767,43 @@ else:
 
             if use_ei_loss:
                 ei_loss, t_img = ei_loss_fn(
-                    x_recon, physics, model, csmap, acceleration
+                    x_recon, physics, model, csmap, acceleration_encoding
                 )
+
+                # # 1. Apply the image transform
+                # x_net_rearranged = rearrange(x_recon, 'b c h w t -> b c t h w')
+                # x2_rearranged = ei_loss_fn.T(x_net_rearranged) # This calls VideoRotate
+                # x2 = rearrange(x2_rearranged, 'b c t h w -> b c h w t')
+                # x2_complex = to_torch_complex(x2)
+
+                # # 2. Get the rotation angle used
+                # #    (assuming you've modified VideoRotate to store it)
+                # angle_deg = ei_loss_fn.T.last_angle # Access it from the composed transform
+                # angle_rad = torch.deg2rad(torch.tensor(angle_deg, device=device))
+
+                # # 3. Create a 2D rotation matrix
+                # cos_a, sin_a = torch.cos(angle_rad), torch.sin(angle_rad)
+                # # Note: k-space rotation is often the transpose of image rotation
+                # rot_matrix = torch.tensor([[cos_a, sin_a],
+                #                         [-sin_a, cos_a]], dtype=torch.float32, device=device)
+
+                # # 4. Rotate the k-space trajectory
+                # # ktraj shape is likely (2, n_points, n_time), so we permute for matmul
+                # ktraj_permuted = ktraj.permute(1, 2, 0) # (n_points, n_time, 2)
+                # ktraj_rot_permuted = torch.matmul(ktraj_permuted, rot_matrix)
+                # ktraj_rot = ktraj_rot_permuted.permute(2, 0, 1) # Back to (2, n_points, n_time)
+                
+                # # 5. Create a new, temporary physics operator for the EI loss
+                # #    Crucially, we reuse the original dcomp, as discussed.
+                # physics_rot = MCNUFFT(nufft_ob, adjnufft_ob, ktraj_rot, dcomp)
+                
+                # # 6. Calculate the EI loss with the rotated physics
+                # y_rot = physics_rot(inv=False, data=x2_complex, smaps=csmap).to(csmap.device)
+                
+                # # For the reconstruction step, you MUST use the rotated physics again
+                # x3, *_ = model(y_rot, physics_rot, csmap, acceleration_encoding, epoch=None)
+
+                # ei_loss = ei_loss_fn.metric(x3, x2)
 
 
                 ei_loss_weight = get_cosine_ei_weight(
@@ -651,19 +834,22 @@ else:
             total_loss.backward()
 
 
-            if config["debugging"]["enable_gradient_monitoring"] == True and iteration_count % config["debugging"]["monitoring_interval"] == 0:
+            # if config["debugging"]["enable_gradient_monitoring"] == True and iteration_count % config["debugging"]["monitoring_interval"] == 0:
             
-                log_gradient_stats(
-                    model=model,
-                    epoch=epoch,
-                    iteration=iteration_count,
-                    output_dir=output_dir,
-                    log_filename="gradient_stats.csv"
-                )
+            #     log_gradient_stats(
+            #         model=model,
+            #         epoch=epoch,
+            #         iteration=iteration_count,
+            #         output_dir=output_dir,
+            #         log_filename="gradient_stats.csv"
+            #     )
 
 
             torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
             optimizer.step()
+
+            end = time.time()
+            print("time for one iteration: ", end-start)
 
 
         # NOTE: commented out plotting until figured out how to handle variable numbers of timeframes
@@ -746,14 +932,17 @@ else:
                 val_grasp_img_tensor = val_grasp_img.to(device)
 
                 # calculate acceleration factor
+                N_spokes = eval_ktraj.shape[1] / config['data']['samples']
+                acceleration = torch.tensor([N_full / int(N_spokes)], dtype=torch.float, device=device)
+
                 if config['model']['encode_acceleration']:
-                    N_spokes = eval_ktraj.shape[1] / config['data']['samples']
-                    acceleration = torch.tensor([N_full / int(N_spokes)], dtype=torch.float, device=device)
+                    acceleration_encoding = acceleration
                 else: 
-                    acceleration = None
+                    acceleration_encoding = None
+                    
 
                 val_x_recon, val_adj_loss, *_ = model(
-                    val_kspace_batch.to(device), eval_physics, val_csmap, acceleration, epoch=f"val{epoch}", norm=config['model']['norm']
+                    val_kspace_batch.to(device), eval_physics, val_csmap, acceleration_encoding, epoch=f"val{epoch}", norm=config['model']['norm']
                 )
 
                 # compute losses
@@ -764,8 +953,44 @@ else:
 
                 if use_ei_loss:
                     val_ei_loss, val_t_img = ei_loss_fn(
-                        val_x_recon, eval_physics, model, val_csmap, acceleration
+                        val_x_recon, eval_physics, model, val_csmap, acceleration_encoding
                     )
+
+                    # # 1. Apply the image transform
+                    # x_net_rearranged = rearrange(val_x_recon, 'b c h w t -> b c t h w')
+                    # x2_rearranged = ei_loss_fn.T(x_net_rearranged) # This calls VideoRotate
+                    # val_t_img = rearrange(x2_rearranged, 'b c t h w -> b c h w t')
+                    # x2_complex = to_torch_complex(val_t_img)
+
+                    # # 2. Get the rotation angle used
+                    # #    (assuming you've modified VideoRotate to store it)
+                    # angle_deg = ei_loss_fn.T.last_angle # Access it from the composed transform
+                    # angle_rad = torch.deg2rad(torch.tensor(angle_deg, device=device))
+
+                    # # 3. Create a 2D rotation matrix
+                    # cos_a, sin_a = torch.cos(angle_rad), torch.sin(angle_rad)
+                    # # Note: k-space rotation is often the transpose of image rotation
+                    # rot_matrix = torch.tensor([[cos_a, sin_a],
+                    #                         [-sin_a, cos_a]], dtype=torch.float32, device=device)
+
+                    # # 4. Rotate the k-space trajectory
+                    # # ktraj shape is likely (2, n_points, n_time), so we permute for matmul
+                    # ktraj_permuted = eval_ktraj.permute(1, 2, 0) # (n_points, n_time, 2)
+                    # ktraj_rot_permuted = torch.matmul(ktraj_permuted, rot_matrix)
+                    # ktraj_rot = ktraj_rot_permuted.permute(2, 0, 1) # Back to (2, n_points, n_time)
+                    
+                    # # 5. Create a new, temporary physics operator for the EI loss
+                    # #    Crucially, we reuse the original dcomp, as discussed.
+                    # physics_rot = MCNUFFT(eval_nufft_ob, eval_adjnufft_ob, ktraj_rot, eval_dcomp)
+                    
+                    # # 6. Calculate the EI loss with the rotated physics
+                    # y_rot = physics_rot(inv=False, data=x2_complex, smaps=val_csmap).to(val_csmap.device)
+                    
+                    # # For the reconstruction step, you MUST use the rotated physics again
+                    # x3, *_ = model(y_rot, physics_rot, val_csmap, acceleration_encoding, epoch=None)
+
+                    # val_ei_loss = ei_loss_fn.metric(x3, val_t_img)
+
                     val_running_ei_loss += val_ei_loss.item()
                     val_loader_tqdm.set_postfix(
                         val_mc_loss=val_mc_loss.item(), val_ei_loss=val_ei_loss.item()
@@ -775,10 +1000,11 @@ else:
 
 
                 ## Evaluation
-                ssim, psnr, mse, dc_mse, dc_mae, recon_corr, _ = eval_sample(val_kspace_batch, val_csmap, val_ground_truth, val_x_recon, eval_physics, val_mask, val_grasp_img_tensor, eval_dir, f'epoch{epoch}', device)
+                ssim, psnr, mse, lpips, dc_mse, dc_mae, recon_corr, _ = eval_sample(val_kspace_batch, val_csmap, val_ground_truth, val_x_recon, eval_physics, val_mask, val_grasp_img_tensor, acceleration, eval_dir, f'epoch{epoch}', device)
                 epoch_eval_ssims.append(ssim)
                 epoch_eval_psnrs.append(psnr)
                 epoch_eval_mses.append(mse)
+                epoch_eval_lpipses.append(lpips)
                 epoch_eval_dc_mses.append(dc_mse)
                 epoch_eval_dc_maes.append(dc_mae)
 
@@ -791,6 +1017,7 @@ else:
         epoch_eval_ssim = np.mean(epoch_eval_ssims)
         epoch_eval_psnr = np.mean(epoch_eval_psnrs)
         epoch_eval_mse = np.mean(epoch_eval_mses)
+        epoch_eval_lpips = np.mean(epoch_eval_lpipses)
         epoch_eval_dc_mse = np.mean(epoch_eval_dc_mses)
         epoch_eval_dc_mae = np.mean(epoch_eval_dc_maes)
         epoch_eval_curve_corr = np.mean(epoch_eval_curve_corrs)
@@ -798,6 +1025,7 @@ else:
         eval_ssims.append(epoch_eval_ssim)
         eval_psnrs.append(epoch_eval_psnr)
         eval_mses.append(epoch_eval_mse)
+        eval_lpipses.append(epoch_eval_lpips)
         eval_dc_mses.append(epoch_eval_dc_mse) 
         eval_dc_maes.append(epoch_eval_dc_mae)    
         eval_curve_corrs.append(epoch_eval_curve_corr)  
@@ -870,6 +1098,7 @@ else:
                 eval_ssims=eval_ssims,
                 eval_psnrs=eval_psnrs,
                 eval_mses=eval_mses,
+                eval_lpipses=eval_lpipses,
                 eval_dc_mses=eval_dc_mses,
                 eval_dc_maes=eval_dc_maes,
                 eval_curve_corrs=eval_curve_corrs
@@ -1069,6 +1298,16 @@ else:
             plt.savefig(os.path.join(eval_dir, "eval_mses.png"))
             plt.close()
 
+
+            plt.figure()
+            plt.plot(eval_lpipses)
+            plt.xlabel("Epoch")
+            plt.ylabel("LPIPS")
+            plt.title("Evaluation LPIPS")
+            plt.grid(True)
+            plt.savefig(os.path.join(eval_dir, "eval_lpipses.png"))
+            plt.close()
+
             plt.figure()
             plt.plot(eval_dc_mses)
             plt.xlabel("Epoch")
@@ -1116,12 +1355,14 @@ else:
         print(f"Recon SSIM: {epoch_eval_ssim:.4f} ± {np.std(epoch_eval_ssims):.4f}")
         print(f"Recon PSNR: {epoch_eval_psnr:.4f} ± {np.std(epoch_eval_psnrs):.4f}")
         print(f"Recon MSE: {epoch_eval_mse:.4f} ± {np.std(epoch_eval_mses):.4f}")
+        print(f"Recon LPIPS: {epoch_eval_lpips:.4f} ± {np.std(epoch_eval_lpipses):.4f}")
         print(f"Recon DC MSE: {epoch_eval_dc_mse:.4f} ± {np.std(epoch_eval_dc_mses):.4f}")
         print(f"Recon DC MAE: {epoch_eval_dc_mae:.4f} ± {np.std(epoch_eval_dc_maes):.4f}")
         print(f"Recon Enhancement Curve Correlation: {epoch_eval_curve_corr:.4f} ± {np.std(epoch_eval_curve_corrs):.4f}")
         print(f"GRASP SSIM: {np.mean(grasp_ssims):.4f} ± {np.std(grasp_ssims):.4f}")
         print(f"GRASP PSNR: {np.mean(grasp_psnrs):.4f} ± {np.std(grasp_psnrs):.4f}")
         print(f"GRASP MSE: {np.mean(grasp_mses):.4f} ± {np.std(grasp_mses):.4f}")
+        print(f"GRASP LPIPS: {np.mean(grasp_lpipses):.4f} ± {np.std(grasp_lpipses):.4f}")
         print(f"GRASP DC MSE: {np.mean(grasp_dc_mses):.6f} ± {np.std(grasp_dc_mses):.4f}")
         print(f"GRASP DC MAE: {np.mean(grasp_dc_maes):.6f} ± {np.std(grasp_dc_maes):.4f}")
         print(f"GRASP Enhancement Curve Correlation: {np.mean(grasp_curve_corrs):.6f} ± {np.std(grasp_curve_corrs):.4f}")
@@ -1146,6 +1387,7 @@ eval_curves = dict(
     eval_ssims=eval_ssims,
     eval_psnrs=eval_psnrs,
     eval_mses=eval_mses,
+    eval_lpipses=eval_lpipses,
     eval_dc_mses=eval_dc_mses,
     eval_dc_maes=eval_dc_maes,
     eval_curve_corrs=eval_curve_corrs,
@@ -1160,9 +1402,23 @@ metrics_path = os.path.join(eval_dir, "eval_metrics.csv")
 
 with open(metrics_path, 'w', newline='') as csvfile:
     writer = csv.writer(csvfile)
-    writer.writerow(['Recon', 'SSIM', 'PSNR', 'MSE', 'DC MSE', 'DC MAE', 'EC Correlation'])
-    writer.writerow(['DL', f'{epoch_eval_ssim:.4f} ± {np.std(epoch_eval_ssims):.4f}', f'{epoch_eval_psnr:.4f} ± {np.std(epoch_eval_psnrs):.4f}', f'{epoch_eval_mse:.4f} ± {np.std(epoch_eval_mses):.4f}', f'{epoch_eval_dc_mse:.4f} ± {np.std(epoch_eval_dc_mses):.4f}', f'{epoch_eval_dc_mae:.4f} ± {np.std(epoch_eval_dc_maes):.4f}', f'{epoch_eval_curve_corr:.4f} ± {np.std(epoch_eval_curve_corrs):.4f}'])
-    writer.writerow(['GRASP', f'{np.mean(grasp_ssims):.4f} ± {np.std(grasp_ssims):.4f}', f'{np.mean(grasp_psnrs):.4f} ± {np.std(grasp_psnrs):.4f}', f'{np.mean(grasp_mses):.4f} ± {np.std(grasp_mses):.4f}', f'{np.mean(grasp_dc_mses):.4f} ± {np.std(grasp_dc_mses):.4f}', f'{np.mean(grasp_dc_maes):.4f} ± {np.std(grasp_dc_maes):.4f}', f'{np.mean(grasp_curve_corrs):.4f} ± {np.std(grasp_curve_corrs):.4f}'])
+    writer.writerow(['Recon', 'SSIM', 'PSNR', 'MSE', 'LPIPS', 'DC MSE', 'DC MAE', 'EC Correlation'])
+    writer.writerow(['DL', 
+                     f'{epoch_eval_ssim:.4f} ± {np.std(epoch_eval_ssims):.4f}', 
+                     f'{epoch_eval_psnr:.4f} ± {np.std(epoch_eval_psnrs):.4f}', 
+                     f'{epoch_eval_mse:.4f} ± {np.std(epoch_eval_mses):.4f}',
+                     f'{epoch_eval_lpips:.4f} ± {np.std(epoch_eval_lpipses):.4f}',  
+                     f'{epoch_eval_dc_mse:.4f} ± {np.std(epoch_eval_dc_mses):.4f}', 
+                     f'{epoch_eval_dc_mae:.4f} ± {np.std(epoch_eval_dc_maes):.4f}', 
+                     f'{epoch_eval_curve_corr:.4f} ± {np.std(epoch_eval_curve_corrs):.4f}'])
+    writer.writerow(['GRASP', 
+                     f'{np.mean(grasp_ssims):.4f} ± {np.std(grasp_ssims):.4f}', 
+                     f'{np.mean(grasp_psnrs):.4f} ± {np.std(grasp_psnrs):.4f}', 
+                     f'{np.mean(grasp_mses):.4f} ± {np.std(grasp_mses):.4f}', 
+                     f'{np.mean(grasp_lpipses):.4f} ± {np.std(grasp_lpipses):.4f}', 
+                     f'{np.mean(grasp_dc_mses):.4f} ± {np.std(grasp_dc_mses):.4f}', 
+                     f'{np.mean(grasp_dc_maes):.4f} ± {np.std(grasp_dc_maes):.4f}', 
+                     f'{np.mean(grasp_curve_corrs):.4f} ± {np.std(grasp_curve_corrs):.4f}'])
 
 
 
@@ -1246,12 +1502,14 @@ with torch.no_grad():
     spf_recon_ssim = {}
     spf_recon_psnr = {}
     spf_recon_mse = {}
+    spf_recon_lpips = {}
     spf_recon_dc_mse = {}
     spf_recon_dc_mae = {}
     spf_recon_corr = {}
     spf_grasp_ssim = {}
     spf_grasp_psnr = {}
     spf_grasp_mse = {}
+    spf_grasp_lpips = {}
     spf_grasp_dc_mse = {}
     spf_grasp_dc_mae = {}
     spf_grasp_corr = {}
@@ -1263,12 +1521,14 @@ with torch.no_grad():
         stress_test_ssims = []
         stress_test_psnrs = []
         stress_test_mses = []
+        stress_test_lpipses = []
         stress_test_dc_mses = []
         stress_test_dc_maes = []
         stress_test_corrs = []
         stress_test_grasp_ssims = []
         stress_test_grasp_psnrs = []
         stress_test_grasp_mses = []
+        stress_test_grasp_lpipses = []
         stress_test_grasp_dc_mses = []
         stress_test_grasp_dc_maes = []
         stress_test_grasp_corrs = []
@@ -1290,7 +1550,7 @@ with torch.no_grad():
 
 
             # SIMULATE KSPACE
-            ktraj, dcomp, nufft_ob, adjnufft_ob = prep_nufft(640, spokes, num_frames)
+            ktraj, dcomp, nufft_ob, adjnufft_ob = prep_nufft(N_samples, spokes, num_frames)
             physics = MCNUFFT(nufft_ob.to(device), adjnufft_ob.to(device), ktraj.to(device), dcomp.to(device))
 
             sim_kspace = physics(False, ground_truth, csmap)
@@ -1298,16 +1558,19 @@ with torch.no_grad():
             kspace = sim_kspace.squeeze(0).to(device) # Remove batch dim
 
             # calculate acceleration factor
+            acceleration = torch.tensor([N_full / int(spokes)], dtype=torch.float, device=device)
+
             if config['model']['encode_acceleration']:
-                acceleration = torch.tensor([N_full / int(spokes)], dtype=torch.float, device=device)
+                acceleration_encoding = acceleration
             else: 
-                acceleration = None
+                acceleration_encoding = None
+
 
             # check if GRASP image exists or if we need to perform GRASP recon
-            if grasp_img is None:
+            if type(grasp_img) is int or len(grasp_img.shape) == 1:
                 print(f"No GRASP file found, performing reconstruction with {spokes} spokes/frame and {num_frames} frames.")
 
-                grasp_img = GRASPRecon(csmap, sim_kspace, spokes, num_frames, grasp_path)
+                grasp_img = GRASPRecon(csmap, sim_kspace, spokes, num_frames, grasp_path[0])
 
                 grasp_recon_torch = torch.from_numpy(grasp_img).permute(2, 0, 1) # T, H, W
                 grasp_recon_torch = torch.stack([grasp_recon_torch.real, grasp_recon_torch.imag], dim=0)
@@ -1319,7 +1582,7 @@ with torch.no_grad():
 
             
             x_recon, *_ = model(
-                kspace.to(device), physics, csmap, acceleration, epoch=None, norm=config['model']['norm']
+                kspace.to(device), physics, csmap, acceleration_encoding, epoch=None, norm=config['model']['norm']
             )
 
             ground_truth = torch.stack([ground_truth.real, ground_truth.imag], dim=1)
@@ -1327,10 +1590,11 @@ with torch.no_grad():
 
 
             ## Evaluation
-            ssim, psnr, mse, dc_mse, dc_mae, recon_corr, grasp_corr = eval_sample(kspace, csmap, ground_truth, x_recon, physics, mask, grasp_img, eval_dir, f"{spokes}spf", device)
+            ssim, psnr, mse, lpips, dc_mse, dc_mae, recon_corr, grasp_corr = eval_sample(kspace, csmap, ground_truth, x_recon, physics, mask, grasp_img, acceleration, eval_dir, f"{spokes}spf", device)
             stress_test_ssims.append(ssim)
             stress_test_psnrs.append(psnr)
             stress_test_mses.append(mse)
+            stress_test_lpipses.append(lpips)
             stress_test_dc_mses.append(dc_mse)
             stress_test_dc_maes.append(dc_mae)
 
@@ -1339,10 +1603,11 @@ with torch.no_grad():
                 stress_test_grasp_corrs.append(grasp_corr)
 
 
-            ssim_grasp, psnr_grasp, mse_grasp, dc_mse_grasp, dc_mae_grasp = eval_grasp(kspace, csmap, ground_truth, grasp_img, physics, device, eval_dir)
+            ssim_grasp, psnr_grasp, mse_grasp, lpips_grasp, dc_mse_grasp, dc_mae_grasp = eval_grasp(kspace, csmap, ground_truth, grasp_img, physics, device, eval_dir)
             stress_test_grasp_ssims.append(ssim_grasp)
             stress_test_grasp_psnrs.append(psnr_grasp)
             stress_test_grasp_mses.append(mse_grasp)
+            stress_test_grasp_lpipses.append(lpips_grasp)
             stress_test_grasp_dc_mses.append(dc_mse_grasp)
             stress_test_grasp_dc_maes.append(dc_mae_grasp)
 
@@ -1350,6 +1615,7 @@ with torch.no_grad():
             spf_recon_ssim[spokes] = np.mean(stress_test_ssims)
             spf_recon_psnr[spokes] = np.mean(stress_test_psnrs)
             spf_recon_mse[spokes] = np.mean(stress_test_mses)
+            spf_recon_lpips[spokes] = np.mean(stress_test_lpipses)
             spf_recon_dc_mse[spokes] = np.mean(stress_test_dc_mses)
             spf_recon_dc_mae[spokes] = np.mean(stress_test_dc_maes)
             spf_recon_corr[spokes] = np.mean(stress_test_corrs)
@@ -1357,6 +1623,7 @@ with torch.no_grad():
             spf_grasp_ssim[spokes] = np.mean(stress_test_grasp_ssims)
             spf_grasp_psnr[spokes] = np.mean(stress_test_grasp_psnrs)
             spf_grasp_mse[spokes] = np.mean(stress_test_grasp_mses)
+            spf_grasp_lpips[spokes] = np.mean(stress_test_grasp_lpipses)
             spf_grasp_dc_mse[spokes] = np.mean(stress_test_grasp_dc_mses)
             spf_grasp_dc_mae[spokes] = np.mean(stress_test_grasp_dc_maes)
             spf_grasp_corr[spokes] = np.mean(stress_test_grasp_corrs)
@@ -1384,12 +1651,13 @@ with torch.no_grad():
         spf_metrics_path = os.path.join(eval_dir, "eval_metrics.csv")
         with open(spf_metrics_path, 'a', newline='') as csvfile:
             writer = csv.writer(csvfile)
-            writer.writerow(['Recon', 'Spokes Per Frame', 'SSIM', 'PSNR', 'MSE', 'DC MSE'])
+            writer.writerow(['Recon', 'Spokes Per Frame', 'SSIM', 'PSNR', 'MSE', "LPIPS", 'DC MSE', 'DC MAE', 'EC Correlation'])
 
             writer.writerow(['DL', spokes, 
             f'{np.mean(stress_test_ssims):.4f} ± {np.std(stress_test_ssims):.4f}', 
             f'{np.mean(stress_test_psnrs):.4f} ± {np.std(stress_test_psnrs):.4f}', 
             f'{np.mean(stress_test_mses):.4f} ± {np.std(stress_test_mses):.4f}', 
+            f'{np.mean(stress_test_lpipses):.4f} ± {np.std(stress_test_lpipses):.4f}', 
             f'{np.mean(stress_test_dc_mses):.4f} ± {np.std(stress_test_dc_mses):.4f}',
             f'{np.mean(stress_test_dc_maes):.4f} ± {np.std(stress_test_dc_maes):.4f}',
             f'{np.mean(stress_test_corrs):.4f} ± {np.std(stress_test_corrs):.4f}'
@@ -1399,6 +1667,7 @@ with torch.no_grad():
             f'{np.mean(stress_test_grasp_ssims):.4f} ± {np.std(stress_test_grasp_ssims):.4f}', 
             f'{np.mean(stress_test_grasp_psnrs):.4f} ± {np.std(stress_test_grasp_psnrs):.4f}', 
             f'{np.mean(stress_test_grasp_mses):.4f} ± {np.std(stress_test_grasp_mses):.4f}', 
+            f'{np.mean(stress_test_grasp_lpipses):.4f} ± {np.std(stress_test_grasp_lpipses):.4f}', 
             f'{np.mean(stress_test_grasp_dc_mses):.4f} ± {np.std(stress_test_grasp_dc_mses):.4f}',
             f'{np.mean(stress_test_grasp_dc_maes):.4f} ± {np.std(stress_test_grasp_dc_maes):.4f}',
             f'{np.mean(stress_test_grasp_corrs):.4f} ± {np.std(stress_test_grasp_corrs):.4f}',
@@ -1412,12 +1681,14 @@ with torch.no_grad():
         spf_eval_ssims = []
         spf_eval_psnrs = []
         spf_eval_mses = []
+        spf_eval_lpipses = []
         spf_eval_dc_mses = []
         spf_eval_dc_maes = []
         spf_eval_curve_corrs = []
         spf_grasp_ssims = []
         spf_grasp_psnrs = []
         spf_grasp_mses = []
+        spf_grasp_lpipses = []
         spf_grasp_dc_mses = []
         spf_grasp_dc_maes = []
         spf_grasp_curve_corrs = []
@@ -1438,7 +1709,7 @@ with torch.no_grad():
             ground_truth = ground_truth.to(device) # Shape: (1, 2, T, H, W)
 
             # SIMULATE KSPACE
-            ktraj, dcomp, nufft_ob, adjnufft_ob = prep_nufft(640, spokes, num_frames)
+            ktraj, dcomp, nufft_ob, adjnufft_ob = prep_nufft(N_samples, spokes, num_frames)
             physics = MCNUFFT(nufft_ob.to(device), adjnufft_ob.to(device), ktraj.to(device), dcomp.to(device))
 
             sim_kspace = physics(False, ground_truth, csmap)
@@ -1446,15 +1717,19 @@ with torch.no_grad():
             kspace = sim_kspace.squeeze(0).to(device) # Remove batch dim
             
             # calculate acceleration factor
+            acceleration = torch.tensor([N_full / int(spokes)], dtype=torch.float, device=device)
+
             if config['model']['encode_acceleration']:
-                acceleration = torch.tensor([N_full / int(spokes)], dtype=torch.float, device=device)
+                acceleration_encoding = acceleration
             else: 
-                acceleration = None
+                acceleration_encoding = None
+
 
             # check if GRASP image exists or if we need to perform GRASP recon
-            if grasp_img is None:
+            if type(grasp_img) is int or len(grasp_img.shape) == 1:
                 print(f"No GRASP file found, performing reconstruction with {spokes} spokes/frame and {num_frames} frames.")
-                grasp_img = GRASPRecon(csmap, sim_kspace, spokes, num_frames, grasp_path)
+
+                grasp_img = GRASPRecon(csmap, sim_kspace, spokes, num_frames, grasp_path[0])
 
                 grasp_recon_torch = torch.from_numpy(grasp_img).permute(2, 0, 1) # T, H, W
                 grasp_recon_torch = torch.stack([grasp_recon_torch.real, grasp_recon_torch.imag], dim=0)
@@ -1466,7 +1741,7 @@ with torch.no_grad():
 
 
             x_recon, *_ = model(
-                kspace.to(device), physics, csmap, acceleration, epoch=None, norm=config['model']['norm']
+                kspace.to(device), physics, csmap, acceleration_encoding, epoch=None, norm=config['model']['norm']
             )
 
             ground_truth = torch.stack([ground_truth.real, ground_truth.imag], dim=1)
@@ -1474,10 +1749,11 @@ with torch.no_grad():
 
 
             ## Evaluation
-            ssim, psnr, mse, dc_mse, dc_mae, recon_corr, grasp_corr = eval_sample(kspace, csmap, ground_truth, x_recon, physics, mask, grasp_img, eval_dir, f'{spokes}spf', device)
+            ssim, psnr, mse, lpips, dc_mse, dc_mae, recon_corr, grasp_corr = eval_sample(kspace, csmap, ground_truth, x_recon, physics, mask, grasp_img, acceleration, eval_dir, f'{spokes}spf', device)
             spf_eval_ssims.append(ssim)
             spf_eval_psnrs.append(psnr)
             spf_eval_mses.append(mse)
+            spf_eval_lpipses.append(lpips)
             spf_eval_dc_mses.append(dc_mse)
             spf_eval_dc_maes.append(dc_mae)
 
@@ -1486,10 +1762,11 @@ with torch.no_grad():
                 spf_grasp_curve_corrs.append(grasp_corr)
 
 
-            ssim_grasp, psnr_grasp, mse_grasp, dc_mse_grasp, dc_mae_grasp = eval_grasp(kspace, csmap, ground_truth, grasp_img, physics, device, eval_dir)
+            ssim_grasp, psnr_grasp, mse_grasp, lpips_grasp, dc_mse_grasp, dc_mae_grasp = eval_grasp(kspace, csmap, ground_truth, grasp_img, physics, device, eval_dir)
             spf_grasp_ssims.append(ssim_grasp)
             spf_grasp_psnrs.append(psnr_grasp)
             spf_grasp_mses.append(mse_grasp)
+            spf_grasp_lpipses.append(lpips_grasp)
             spf_grasp_dc_mses.append(dc_mse_grasp)
             spf_grasp_dc_maes.append(dc_mae_grasp)
 
@@ -1513,6 +1790,7 @@ with torch.no_grad():
         spf_recon_ssim[spokes] = np.mean(spf_eval_ssims)
         spf_recon_psnr[spokes] = np.mean(spf_eval_psnrs)
         spf_recon_mse[spokes] = np.mean(spf_eval_mses)
+        spf_recon_lpips[spokes] = np.mean(spf_eval_lpipses)
         spf_recon_dc_mse[spokes] = np.mean(spf_eval_dc_mses)
         spf_recon_dc_mae[spokes] = np.mean(spf_eval_dc_maes)
         spf_recon_corr[spokes] = np.mean(spf_eval_curve_corrs)
@@ -1520,6 +1798,7 @@ with torch.no_grad():
         spf_grasp_ssim[spokes] = np.mean(spf_grasp_ssims)
         spf_grasp_psnr[spokes] = np.mean(spf_grasp_psnrs)
         spf_grasp_mse[spokes] = np.mean(spf_grasp_mses)
+        spf_grasp_lpips[spokes] = np.mean(spf_grasp_lpipses)
         spf_grasp_dc_mse[spokes] = np.mean(spf_grasp_dc_mses)
         spf_grasp_dc_mae[spokes] = np.mean(spf_grasp_dc_maes)
         spf_grasp_corr[spokes] = np.mean(spf_grasp_curve_corrs)
@@ -1529,12 +1808,13 @@ with torch.no_grad():
         spf_metrics_path = os.path.join(eval_dir, "eval_metrics.csv")
         with open(spf_metrics_path, 'a', newline='') as csvfile:
             writer = csv.writer(csvfile)
-            writer.writerow(['Recon', 'Spokes Per Frame', 'SSIM', 'PSNR', 'MSE', 'DC'])
+            writer.writerow(['Recon', 'Spokes Per Frame', 'SSIM', 'PSNR', 'MSE', 'LPIPS', 'DC MSE', 'DC MAE', 'EC Correlation'])
 
             writer.writerow(['DL', spokes, 
             f'{np.mean(spf_eval_ssims):.4f} ± {np.std(spf_eval_ssims):.4f}', 
             f'{np.mean(spf_eval_psnrs):.4f} ± {np.std(spf_eval_psnrs):.4f}', 
             f'{np.mean(spf_eval_mses):.4f} ± {np.std(spf_eval_mses):.4f}', 
+            f'{np.mean(spf_eval_lpipses):.4f} ± {np.std(spf_eval_lpipses):.4f}', 
             f'{np.mean(spf_eval_dc_mses):.4f} ± {np.std(spf_eval_dc_mses):.4f}',
             f'{np.mean(spf_eval_dc_maes):.4f} ± {np.std(spf_eval_dc_maes):.4f}',
             f'{np.mean(spf_eval_curve_corrs):.4f} ± {np.std(spf_eval_curve_corrs):.4f}'
@@ -1544,6 +1824,7 @@ with torch.no_grad():
             f'{np.mean(spf_grasp_ssims):.4f} ± {np.std(spf_grasp_ssims):.4f}', 
             f'{np.mean(spf_grasp_psnrs):.4f} ± {np.std(spf_grasp_psnrs):.4f}', 
             f'{np.mean(spf_grasp_mses):.4f} ± {np.std(spf_grasp_mses):.4f}', 
+            f'{np.mean(spf_grasp_lpipses):.4f} ± {np.std(spf_grasp_lpipses):.4f}', 
             f'{np.mean(spf_grasp_dc_mses):.4f} ± {np.std(spf_grasp_dc_mses):.4f}',
             f'{np.mean(spf_grasp_dc_maes):.4f} ± {np.std(spf_grasp_dc_maes):.4f}',
             f'{np.mean(spf_grasp_curve_corrs):.4f} ± {np.std(spf_grasp_curve_corrs):.4f}'
@@ -1586,6 +1867,17 @@ plt.title("Evaluation Image MSE vs Spokes per Frame")
 plt.legend()
 plt.grid(True)
 plt.savefig(os.path.join(eval_dir, "spf_eval_mse.png"))
+plt.close()
+
+plt.figure()
+plt.plot(list(spf_recon_lpips.keys()), list(spf_recon_lpips.values()), label="DL Recon", marker='o')
+plt.plot(list(spf_grasp_lpips.keys()), list(spf_grasp_lpips.values()), label="GRASP Recon", marker='o')
+plt.xlabel("Spokes per Frame")
+plt.ylabel("LPIPS")
+plt.title("Evaluation LPIPS vs Spokes per Frame")
+plt.legend()
+plt.grid(True)
+plt.savefig(os.path.join(eval_dir, "spf_eval_lpips.png"))
 plt.close()
 
 

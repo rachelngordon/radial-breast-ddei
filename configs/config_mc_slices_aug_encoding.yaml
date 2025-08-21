@@ -12,6 +12,7 @@ data:
   coils: 16
   eval_timeframes: 22
   spf_aug: true
+  fpg: 24
 
 # Experiment settings
 experiment:
@@ -24,8 +25,8 @@ dataloader:
   num_workers: 2
   max_subjects: 300
   slice_idx: None
-  slice_range_start: 35
-  slice_range_end: 45
+  slice_range_start: 20
+  slice_range_end: 60
 
 # Model settings
 model:

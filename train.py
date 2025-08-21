@@ -19,6 +19,8 @@ from utils import prep_nufft, log_gradient_stats, plot_enhancement_curve, get_co
 from eval import eval_grasp, eval_sample
 import csv
 import math
+import random
+import time 
 
 # Parse command-line arguments
 parser = argparse.ArgumentParser(description="Train ReconResNet model.")
@@ -115,6 +117,12 @@ N_time, N_samples, N_coils, N_time_eval = (
     config["data"]["coils"],
     config["data"]["eval_timeframes"]
 )
+Ng = config["data"]["fpg"] 
+# Mg = N_time // Ng  
+# indG = np.arange(0, N_time, 1, dtype=int)
+# indG = np.reshape(indG, [Mg, Ng])
+
+
 N_spokes = int(config["data"]["total_spokes"] / N_time)
 
 N_full = config['data']['height'] * math.pi / 2
@@ -156,6 +164,7 @@ if config['dataloader']['slice_range_start'] == "None" or config['dataloader']['
         dataset_key=config["data"]["dataset_key"],
         file_pattern="*.h5",
         slice_idx=config["dataloader"]["slice_idx"],
+        num_random_slices=config["dataloader"].get("num_random_slices", None),
         N_time=N_time,
         N_coils=N_coils,
         spf_aug=config['data']['spf_aug'],
@@ -167,6 +176,7 @@ else:
         dataset_key=config["data"]["dataset_key"],
         file_pattern="*.h5",
         slice_idx=range(config['dataloader']['slice_range_start'], config['dataloader']['slice_range_end']),
+        num_random_slices=config["dataloader"].get("num_random_slices", None),
         N_time=N_time,
         N_coils=N_coils,
         spf_aug=config['data']['spf_aug'],
@@ -194,6 +204,7 @@ train_loader = DataLoader(
     batch_size=config["dataloader"]["batch_size"],
     shuffle=config["dataloader"]["shuffle"],
     num_workers=config["dataloader"]["num_workers"],
+    pin_memory=True,
 )
 
 
@@ -209,6 +220,7 @@ val_dro_loader = DataLoader(
     batch_size=config["dataloader"]["batch_size"],
     shuffle=config["dataloader"]["shuffle"],
     num_workers=config["dataloader"]["num_workers"],
+    pin_memory=True,
 )
 
 
@@ -400,18 +412,48 @@ if args.from_checkpoint == False and config['debugging']['calc_step_0'] == True:
         # Evaluate on training data
         for measured_kspace, csmap, grasp_img, N_samples, N_spokes, N_time in tqdm(train_loader, desc="Step 0 Training Evaluation"):
 
-            # prep physics operators
-            ktraj, dcomp, nufft_ob, adjnufft_ob = prep_nufft(N_samples, N_spokes, N_time)
-            ktraj = ktraj.to(device)
-            dcomp = dcomp.to(device)
-            nufft_ob = nufft_ob.to(device)
-            adjnufft_ob = adjnufft_ob.to(device)
-
-            physics = MCNUFFT(nufft_ob, adjnufft_ob, ktraj, dcomp)
-
             # prepare inputs
             measured_kspace = to_torch_complex(measured_kspace).squeeze()
             measured_kspace = rearrange(measured_kspace, 't co sp sam -> co (sp sam) t')
+            
+            if N_time > Ng:
+
+                # Mg = N_time // Ng  
+                # print("Mg: ", Mg)
+                # indG = np.arange(0, N_time, 1, dtype=int)
+                # print("indG: ", indG)
+                # indG = np.reshape(indG, [Mg, Ng])
+                # print("indG reshaped: ", indG)
+
+                # prep physics operators
+                ktraj, dcomp, nufft_ob, adjnufft_ob = prep_nufft(N_samples, N_spokes, Ng)
+                ktraj = ktraj.to(device)
+                dcomp = dcomp.to(device)
+                nufft_ob = nufft_ob.to(device)
+                adjnufft_ob = adjnufft_ob.to(device)
+
+                physics = MCNUFFT(nufft_ob, adjnufft_ob, ktraj, dcomp)
+
+
+                # random_group = torch.randperm(Mg)
+
+                # for p in random_group[0:1]:
+
+                max_idx = N_time - Ng
+                random_index = random.randint(0, max_idx - 1) 
+
+                measured_kspace = measured_kspace[..., random_index:random_index + Ng]
+
+            else:
+                # prep physics operators
+                ktraj, dcomp, nufft_ob, adjnufft_ob = prep_nufft(N_samples, N_spokes, N_time)
+                ktraj = ktraj.to(device)
+                dcomp = dcomp.to(device)
+                nufft_ob = nufft_ob.to(device)
+                adjnufft_ob = adjnufft_ob.to(device)
+
+                physics = MCNUFFT(nufft_ob, adjnufft_ob, ktraj, dcomp)
+
 
             csmap = csmap.to(device).to(measured_kspace.dtype)
 
@@ -422,7 +464,6 @@ if args.from_checkpoint == False and config['debugging']['calc_step_0'] == True:
             else: 
                 acceleration_encoding = None
 
-            print(acceleration_encoding)
 
             x_recon, adj_loss, lambda_L, lambda_S, lambda_spatial_L, lambda_spatial_S, gamma, lambda_step = model(
                 measured_kspace.to(device), physics, csmap, acceleration_encoding, epoch="train0", norm=config['model']['norm']
@@ -475,7 +516,7 @@ if args.from_checkpoint == False and config['debugging']['calc_step_0'] == True:
                 # ei_loss = ei_loss_fn.metric(x3, x2)
 
                 initial_train_ei_loss += ei_loss.item()
-                
+            
 
         # record losses
         step0_train_mc_loss = initial_train_mc_loss / len(train_loader)
@@ -645,6 +686,10 @@ else:
             train_loader, desc=f"Epoch {epoch}/{epochs}  Training", unit="batch"
         )
 
+        if hasattr(train_dataset, 'resample_slices'):
+            print(f"Epoch {epoch}: Resampling training slices...")
+            train_dataset.resample_slices()
+
         if use_ei_loss:
 
             # --- Check if it's the transition epoch ---
@@ -667,23 +712,43 @@ else:
 
 
         for measured_kspace, csmap, grasp_img, N_samples, N_spokes, N_time in train_loader_tqdm:  # measured_kspace shape: (B, C, I, S, T)
-
-            # prepare physics operators
-            ktraj, dcomp, nufft_ob, adjnufft_ob = prep_nufft(N_samples, N_spokes, N_time)
-            ktraj = ktraj.to(device)
-            dcomp = dcomp.to(device)
-            nufft_ob = nufft_ob.to(device)
-            adjnufft_ob = adjnufft_ob.to(device)
-
-            physics = MCNUFFT(nufft_ob, adjnufft_ob, ktraj, dcomp)
-
-
-            # iteration_count += 1
-            optimizer.zero_grad()
+            
+            start = time.time()
 
             # prepare inputs
             measured_kspace = to_torch_complex(measured_kspace).squeeze()
             measured_kspace = rearrange(measured_kspace, 't co sp sam -> co (sp sam) t')
+
+            if N_time > Ng:
+
+                # prep physics operators
+                ktraj, dcomp, nufft_ob, adjnufft_ob = prep_nufft(N_samples, N_spokes, Ng)
+                ktraj = ktraj.to(device)
+                dcomp = dcomp.to(device)
+                nufft_ob = nufft_ob.to(device)
+                adjnufft_ob = adjnufft_ob.to(device)
+
+                physics = MCNUFFT(nufft_ob, adjnufft_ob, ktraj, dcomp)
+
+                max_idx = N_time - Ng
+                random_index = random.randint(0, max_idx - 1) 
+
+                measured_kspace = measured_kspace[..., random_index:random_index + Ng]
+                
+
+            else:
+                # prep physics operators
+                ktraj, dcomp, nufft_ob, adjnufft_ob = prep_nufft(N_samples, N_spokes, N_time)
+                ktraj = ktraj.to(device)
+                dcomp = dcomp.to(device)
+                nufft_ob = nufft_ob.to(device)
+                adjnufft_ob = adjnufft_ob.to(device)
+
+                physics = MCNUFFT(nufft_ob, adjnufft_ob, ktraj, dcomp)
+
+
+            # iteration_count += 1
+            optimizer.zero_grad()
 
             csmap = csmap.to(device).to(measured_kspace.dtype)
 
@@ -775,19 +840,22 @@ else:
             total_loss.backward()
 
 
-            if config["debugging"]["enable_gradient_monitoring"] == True and iteration_count % config["debugging"]["monitoring_interval"] == 0:
+            # if config["debugging"]["enable_gradient_monitoring"] == True and iteration_count % config["debugging"]["monitoring_interval"] == 0:
             
-                log_gradient_stats(
-                    model=model,
-                    epoch=epoch,
-                    iteration=iteration_count,
-                    output_dir=output_dir,
-                    log_filename="gradient_stats.csv"
-                )
+            #     log_gradient_stats(
+            #         model=model,
+            #         epoch=epoch,
+            #         iteration=iteration_count,
+            #         output_dir=output_dir,
+            #         log_filename="gradient_stats.csv"
+            #     )
 
 
             torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
             optimizer.step()
+
+            end = time.time()
+            print("time for one iteration: ", end-start)
 
 
         # NOTE: commented out plotting until figured out how to handle variable numbers of timeframes
@@ -1488,7 +1556,7 @@ with torch.no_grad():
 
 
             # SIMULATE KSPACE
-            ktraj, dcomp, nufft_ob, adjnufft_ob = prep_nufft(640, spokes, num_frames)
+            ktraj, dcomp, nufft_ob, adjnufft_ob = prep_nufft(N_samples, spokes, num_frames)
             physics = MCNUFFT(nufft_ob.to(device), adjnufft_ob.to(device), ktraj.to(device), dcomp.to(device))
 
             sim_kspace = physics(False, ground_truth, csmap)
@@ -1647,7 +1715,7 @@ with torch.no_grad():
             ground_truth = ground_truth.to(device) # Shape: (1, 2, T, H, W)
 
             # SIMULATE KSPACE
-            ktraj, dcomp, nufft_ob, adjnufft_ob = prep_nufft(640, spokes, num_frames)
+            ktraj, dcomp, nufft_ob, adjnufft_ob = prep_nufft(N_samples, spokes, num_frames)
             physics = MCNUFFT(nufft_ob.to(device), adjnufft_ob.to(device), ktraj.to(device), dcomp.to(device))
 
             sim_kspace = physics(False, ground_truth, csmap)

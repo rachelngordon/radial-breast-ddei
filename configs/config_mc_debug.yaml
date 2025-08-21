@@ -11,7 +11,7 @@ data:
   samples: 640
   coils: 16
   eval_timeframes: 22
-  spf_aug: true
+  spf_aug: false
   fpg: 24
 
 # Experiment settings
@@ -23,7 +23,7 @@ dataloader:
   batch_size: 1
   shuffle: false
   num_workers: 2
-  max_subjects: 2
+  max_subjects: 3
   slice_idx: 41
   slice_range_start: None
   slice_range_end: None
@@ -80,6 +80,6 @@ evaluation:
   simulated_dataset_path: "/ess/scratch/scratch1/rachelgordon/simulated_dataset/"
 
 debugging:
-  calc_step_0: true
+  calc_step_0: false
   enable_gradient_monitoring: true
   monitoring_interval: 5

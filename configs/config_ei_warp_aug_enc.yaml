@@ -12,7 +12,7 @@ data:
   coils: 16
   eval_timeframes: 22
   spf_aug: true
-  fpg: 24
+  fpg: 16
 
 # Experiment settings
 experiment:
@@ -51,7 +51,7 @@ model:
   losses:
     adj_loss:
       weight: 50000
-    use_ei_loss: false
+    use_ei_loss: true
     mc_loss:
       weight: 1
       metric: "MAE"

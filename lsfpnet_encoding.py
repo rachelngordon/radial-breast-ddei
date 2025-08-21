@@ -85,6 +85,10 @@ class BasicBlock(nn.Module):
 
     def forward(self, M0, param_E, param_d, L, S, pt_L, pt_S, p_L, p_S, csmaps, style_embedding=None):
 
+        # print(f"Checking M0 for NaNs: {torch.isnan(M0).any().item()}")
+        # print(f"Checking L for NaNs: {torch.isnan(L).any().item()}")
+        # print(f"Checking S for NaNs: {torch.isnan(S).any().item()}")
+
         c = self.lambda_step / self.gamma
         nx, ny, nt = M0.size()
 
@@ -118,17 +122,75 @@ class BasicBlock(nn.Module):
         svd_input_mag = svd_input_complex.abs() + 1e-8
         original_phase = svd_input_complex / svd_input_mag
 
-        noise_std = 1e-5 # A small standard deviation for the noise
+        noise_std = 1e-3 # A small standard deviation for the noise
         noise = torch.randn_like(svd_input_mag) * noise_std
 
         stable_svd_input = svd_input_mag + noise #epsilon
 
+        # # Assume 'stable_svd_input' is your original non-square matrix A that causes the error
+        # # It has shape (m, n)
+        # A = stable_svd_input
+
+        # # 1. Choose a small regularization parameter
+        # alpha = 1e-6 # This is a hyperparameter you can tune
+
+        # # 2. Get the dimensions
+        # m, n = A.shape
+        # device = A.device
+        # dtype = A.dtype
+
+        # # 3. Create the identity matrix for augmentation. It must be n x n.
+        # #    Note: We take the square root of alpha for the augmentation.
+        # identity_aug = torch.sqrt(torch.tensor(alpha)) * torch.eye(n, device=device, dtype=dtype)
+
+        # # 4. Stack the original matrix A on top of the scaled identity
+        # A_aug = torch.cat([A, identity_aug], dim=0)
+
+
+        # print(f"Checking 'some_tensor' for NaNs before SVD: {torch.isnan(stable_svd_input).any().item()}")
+
+
+        # Right before your SVD call
+        if torch.isnan(stable_svd_input).any() or torch.isinf(stable_svd_input).any():
+            print("!!! SVD input contains NaN or Inf values. Halting. !!!")
+            # You might want to save the tensor here for debugging
+            torch.save(stable_svd_input, 'svd_input_error_tensor.pt')
+            # Or enter a debugger
+            import pdb; pdb.set_trace()
+
         
+        # # 5. Perform SVD on the well-conditioned augmented matrix
+        # #    This should now converge without an error.
+        # U_aug, S, Vh = torch.linalg.svd(A_aug, full_matrices=False)
+
+        # # The resulting S and Vh are the regularized singular values and right singular vectors you need.
+        # # Note: U_aug corresponds to the augmented (m+n) x n matrix. If you need U for the
+        # # original m x n matrix, you would typically only use the first m rows of U_aug.
+        # Ut = U_aug[:m, :]
+        # Vt = Vh
+        # # St is just S, but you can give it the same name for consistency
+        # St = S #torch.diag(S) # or just use the vector S depending on your needs
+
 
         # 2. Perform SVD on the REAL-VALUED magnitude matrix. 
         #    This completely avoids the complex svd_backward error.
         #    Using linalg.svd is fine here since the input is real.
         Ut, St, Vt = torch.linalg.svd(stable_svd_input, full_matrices=False)
+
+         # 3. Apply the shrinkage/thresholding to the real singular values.
+        #    (Project_inf operates on magnitudes, so this is correct).
+        St_shrunk = Project_inf(St, self.lambda_L, to_complex=False)
+
+        # 4. Reconstruct the new, thresholded MAGNITUDE matrix.
+        pt_L_mag = Ut @ torch.diag_embed(St_shrunk) @ Vt
+
+        # 5. Re-apply the original phase to our new magnitude matrix to get the
+        #    final complex-valued update term.
+        pt_L = pt_L_mag * original_phase
+
+        # temp_St = torch.diag(Project_inf(St, self.lambda_L))
+        # pt_L = Ut.mm(temp_St).mm(Vt)
+
 
         # 3. Apply the shrinkage/thresholding to the real singular values.
         #    (Project_inf operates on magnitudes, so this is correct).
@@ -150,7 +212,7 @@ class BasicBlock(nn.Module):
         temp_y_L = F.conv3d(temp_y_L, self.conv2_forward_l, padding=1)
 
         if style_embedding is not None:
-            print("encoding acceleration...")
+            # print("encoding acceleration...")
             # Inject style here
             style_params_L = self.style_injector_L(style_embedding)
             # Assuming style_embedding is [1, style_dim], params will be [1, channels * 2]
@@ -215,7 +277,7 @@ class BasicBlock(nn.Module):
         temp_y_S = F.conv3d(temp_y_S, self.conv2_forward_s, padding=1)
 
         if style_embedding is not None:
-            print("encoding acceleration...")
+            # print("encoding acceleration...")
             # Inject style here
             style_params_S = self.style_injector_S(style_embedding)
             scale_S, bias_S = style_params_S.chunk(2, dim=-1)
@@ -326,8 +388,7 @@ class LSFPNet(nn.Module):
             layers_adj_L.append(layer_adj_L)
             layers_adj_S.append(layer_adj_S)
 
-
-            if epoch is not None:
+            if epoch == 10:
                 self.plot_block_output(M0, L, S, iter=ii, epoch=epoch, output_dir=output_dir)
                 
 
@@ -353,7 +414,7 @@ class ArtifactRemovalLSFPNet(nn.Module):
         Per-dynamic-series max-magnitude scaling (paper default).
         Both `zf` (image) and `data` (k-space) share the SAME scalar.
         """
-        scale = zf.abs().max()                       # scalar, grads OK
+        scale = zf.abs().max() + 1e-8                     # scalar, grads OK
         return zf / scale, data / scale, scale
     
     @staticmethod

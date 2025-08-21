@@ -24,6 +24,7 @@ dataloader:
   shuffle: false
   num_workers: 2
   max_subjects: 300
+  num_random_slices: 1
   slice_idx: 41
   slice_range_start: None
   slice_range_end: None
@@ -59,8 +60,8 @@ model:
       temporal_transform: "none"
       spatial_transform: "rotate"
       weight: 0
-      warmup: 1
-      duration: 5
+      warmup: 6
+      duration: 50
       subsample_ratio_min: 0.7
       subsample_ratio_max: 0.95
       warp_ratio_min: 0.6

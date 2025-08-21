@@ -747,7 +747,7 @@ else:
                 physics = MCNUFFT(nufft_ob, adjnufft_ob, ktraj, dcomp)
 
 
-            # iteration_count += 1
+            iteration_count += 1
             optimizer.zero_grad()
 
             csmap = csmap.to(device).to(measured_kspace.dtype)
@@ -840,15 +840,15 @@ else:
             total_loss.backward()
 
 
-            # if config["debugging"]["enable_gradient_monitoring"] == True and iteration_count % config["debugging"]["monitoring_interval"] == 0:
+            if config["debugging"]["enable_gradient_monitoring"] == True and iteration_count % config["debugging"]["monitoring_interval"] == 0:
             
-            #     log_gradient_stats(
-            #         model=model,
-            #         epoch=epoch,
-            #         iteration=iteration_count,
-            #         output_dir=output_dir,
-            #         log_filename="gradient_stats.csv"
-            #     )
+                log_gradient_stats(
+                    model=model,
+                    epoch=epoch,
+                    iteration=iteration_count,
+                    output_dir=output_dir,
+                    log_filename="gradient_stats.csv"
+                )
 
 
             torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)

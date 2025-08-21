@@ -11,7 +11,8 @@ data:
   samples: 640
   coils: 16
   eval_timeframes: 22
-  spf_aug: false
+  spf_aug: true
+  fpg: 24
 
 # Experiment settings
 experiment:
@@ -23,7 +24,10 @@ dataloader:
   shuffle: false
   num_workers: 2
   max_subjects: 300
+  num_random_slices: 1
   slice_idx: 41
+  slice_range_start: None
+  slice_range_end: None
 
 # Model settings
 model:
@@ -37,7 +41,7 @@ model:
   lambda_spatial_S: 0.05
   gamma: 0.5
   lambda_step: 0.1
-  encode_acceleration: false
+  encode_acceleration: true
   optimizer:
     name: "Adam"
     lr: 0.0005

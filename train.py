@@ -1144,19 +1144,19 @@ else:
 
             # Plot Validation Adjoint Loss
             sns.lineplot(x=range(len(val_adj_losses)), y=val_adj_losses, ax=axes[1, 0], color='orange')
-            axes[1, 0].set_title("Validation Adjoint Loss")
+            axes[1, 0].set_title(f"Validation Adjoint Loss ({N_spokes_eval} spokes/frame)")
             axes[1, 0].set_xlabel("Epoch")
             axes[1, 0].set_ylabel("Adjoint Loss")
 
             # Plot Validation MC Loss
             sns.lineplot(x=range(len(val_mc_losses)), y=val_mc_losses, ax=axes[1, 1], color='orange')
-            axes[1, 1].set_title("Validation MC Loss")
+            axes[1, 1].set_title(f"Validation MC Loss ({N_spokes_eval} spokes/frame)")
             axes[1, 1].set_xlabel("Epoch")
             axes[1, 1].set_ylabel("MC Loss")
 
             # Plot Validation EI Loss
             sns.lineplot(x=range(len(val_ei_losses)), y=val_ei_losses, ax=axes[1, 2], color='orange')
-            axes[1, 2].set_title("Validation EI Loss")
+            axes[1, 2].set_title(f"Validation EI Loss ({N_spokes_eval} spokes/frame)")
             axes[1, 2].set_xlabel("Epoch")
             axes[1, 2].set_ylabel("EI Loss")
 
@@ -1339,6 +1339,7 @@ else:
 
             # Create a figure and a set of subplots
             fig, axes = plt.subplots(2, 3, figsize=(18, 10))
+            fig.suptitle(f'Evaluation Metrics Over Epochs ({N_spokes_eval} spokes/frame)', fontsize=20)
 
             sns.lineplot(x=range(len(eval_ssims)), y=eval_ssims, ax=axes[0, 0])
             axes[0, 0].set_title("Evaluation SSIM")
@@ -1370,7 +1371,7 @@ else:
             axes[1, 2].set_xlabel("Epoch")
             axes[1, 2].set_ylabel("Pearson Correlation Coefficient")
 
-            plt.tight_layout()
+            plt.tight_layout(rect=[0, 0.03, 1, 0.95])
             plt.savefig(os.path.join(output_dir, "eval_metrics.png"))
             plt.close()
 

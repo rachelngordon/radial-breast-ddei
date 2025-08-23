@@ -281,8 +281,8 @@ def plot_spatial_quality(
     error_map_grasp = grasp_img - gt_img
 
     # Calculate SSIM maps
-    _, ssim_map_dl = ssim_map_func(gt_img, recon_img, data_range=data_range, full=True)
-    _, ssim_map_grasp = ssim_map_func(gt_img, grasp_img, data_range=data_range, full=True)
+    ssim_dl, ssim_map_dl = ssim_map_func(gt_img, recon_img, data_range=data_range, full=True)
+    ssim_grasp, ssim_map_grasp = ssim_map_func(gt_img, grasp_img, data_range=data_range, full=True)
 
     # Create a 2x4 plot grid
     fig, axes = plt.subplots(2, 4, figsize=(24, 12))
@@ -300,7 +300,7 @@ def plot_spatial_quality(
     fig.colorbar(im_err_dl, ax=axes[0, 2], fraction=0.046, pad=0.04)
 
     im_ssim_dl = axes[0, 3].imshow(ssim_map_dl, cmap='viridis', vmin=0, vmax=1)
-    axes[0, 3].set_title("DL SSIM Map")
+    axes[0, 3].set_title(f"DL SSIM Map (SSIM Recon vs GT: {round(ssim_dl, 3)})")
     fig.colorbar(im_ssim_dl, ax=axes[0, 3], fraction=0.046, pad=0.04)
 
     # --- Bottom Row: GRASP Reconstruction Comparison ---
@@ -315,7 +315,7 @@ def plot_spatial_quality(
     fig.colorbar(im_err_grasp, ax=axes[1, 2], fraction=0.046, pad=0.04)
 
     im_ssim_grasp = axes[1, 3].imshow(ssim_map_grasp, cmap='viridis', vmin=0, vmax=1)
-    axes[1, 3].set_title("GRASP SSIM Map")
+    axes[1, 3].set_title(f"GRASP SSIM Map (SSIM Recon vs GT: {round(ssim_grasp, 3)})")
     fig.colorbar(im_ssim_grasp, ax=axes[1, 3], fraction=0.046, pad=0.04)
     
     # Turn off axes for all plots

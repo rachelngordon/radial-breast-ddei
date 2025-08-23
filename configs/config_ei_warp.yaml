@@ -11,8 +11,9 @@ data:
   samples: 640
   coils: 16
   eval_timeframes: 22
+  eval_spokes: 2
   spf_aug: true
-  fpg: 24
+  fpg: 16
 
 # Experiment settings
 experiment:

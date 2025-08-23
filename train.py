@@ -21,6 +21,7 @@ import csv
 import math
 import random
 import time 
+import seaborn as sns
 
 # Parse command-line arguments
 parser = argparse.ArgumentParser(description="Train ReconResNet model.")
@@ -111,11 +112,12 @@ start_epoch = 1
 model_type = config["model"]["name"]
 
 H, W = config["data"]["height"], config["data"]["width"]
-N_time, N_samples, N_coils, N_time_eval = (
+N_time, N_samples, N_coils, N_time_eval, N_spokes_eval = (
     config["data"]["timeframes"],
     config["data"]["samples"],
     config["data"]["coils"],
-    config["data"]["eval_timeframes"]
+    config["data"]["eval_timeframes"],
+    config["data"]["eval_spokes"]
 )
 Ng = config["data"]["fpg"] 
 # Mg = N_time // Ng  
@@ -193,10 +195,13 @@ else:
 #     N_coils=N_coils
 # )
 
+
 val_dro_dataset = SimulatedDataset(
     root_dir=config["evaluation"]["simulated_dataset_path"], 
     model_type=model_type, 
-    patient_ids=val_dro_patient_ids)
+    patient_ids=val_dro_patient_ids,
+    spokes_per_frame=N_spokes_eval,
+    num_frames=N_time_eval)
 
 
 train_loader = DataLoader(
@@ -224,7 +229,7 @@ val_dro_loader = DataLoader(
 )
 
 
-eval_ktraj, eval_dcomp, eval_nufft_ob, eval_adjnufft_ob = prep_nufft(N_samples, N_spokes, N_time_eval)
+eval_ktraj, eval_dcomp, eval_nufft_ob, eval_adjnufft_ob = prep_nufft(N_samples, N_spokes_eval, N_time_eval)
 eval_ktraj = eval_ktraj.to(device)
 eval_dcomp = eval_dcomp.to(device)
 eval_nufft_ob = eval_nufft_ob.to(device)
@@ -417,14 +422,6 @@ if args.from_checkpoint == False and config['debugging']['calc_step_0'] == True:
             measured_kspace = rearrange(measured_kspace, 't co sp sam -> co (sp sam) t')
             
             if N_time > Ng:
-
-                # Mg = N_time // Ng  
-                # print("Mg: ", Mg)
-                # indG = np.arange(0, N_time, 1, dtype=int)
-                # print("indG: ", indG)
-                # indG = np.reshape(indG, [Mg, Ng])
-                # print("indG reshaped: ", indG)
-
                 # prep physics operators
                 ktraj, dcomp, nufft_ob, adjnufft_ob = prep_nufft(N_samples, N_spokes, Ng)
                 ktraj = ktraj.to(device)
@@ -433,11 +430,6 @@ if args.from_checkpoint == False and config['debugging']['calc_step_0'] == True:
                 adjnufft_ob = adjnufft_ob.to(device)
 
                 physics = MCNUFFT(nufft_ob, adjnufft_ob, ktraj, dcomp)
-
-
-                # random_group = torch.randperm(Mg)
-
-                # for p in random_group[0:1]:
 
                 max_idx = N_time - Ng
                 random_index = random.randint(0, max_idx - 1) 
@@ -480,41 +472,6 @@ if args.from_checkpoint == False and config['debugging']['calc_step_0'] == True:
                     x_recon, physics, model, csmap, acceleration_encoding
                 )
 
-                # # 1. Apply the image transform
-                # x_net_rearranged = rearrange(x_recon, 'b c h w t -> b c t h w')
-                # x2_rearranged = ei_loss_fn.T(x_net_rearranged) # This calls VideoRotate
-                # x2 = rearrange(x2_rearranged, 'b c t h w -> b c h w t')
-                # x2_complex = to_torch_complex(x2)
-
-                # # 2. Get the rotation angle used
-                # #    (assuming you've modified VideoRotate to store it)
-                # angle_deg = ei_loss_fn.T.last_angle # Access it from the composed transform
-                # angle_rad = torch.deg2rad(torch.tensor(angle_deg, device=device))
-
-                # # 3. Create a 2D rotation matrix
-                # cos_a, sin_a = torch.cos(angle_rad), torch.sin(angle_rad)
-                # # Note: k-space rotation is often the transpose of image rotation
-                # rot_matrix = torch.tensor([[cos_a, sin_a],
-                #                         [-sin_a, cos_a]], dtype=torch.float32, device=device)
-
-                # # 4. Rotate the k-space trajectory
-                # # ktraj shape is likely (2, n_points, n_time), so we permute for matmul
-                # ktraj_permuted = ktraj.permute(1, 2, 0) # (n_points, n_time, 2)
-                # ktraj_rot_permuted = torch.matmul(ktraj_permuted, rot_matrix)
-                # ktraj_rot = ktraj_rot_permuted.permute(2, 0, 1) # Back to (2, n_points, n_time)
-                
-                # # 5. Create a new, temporary physics operator for the EI loss
-                # #    Crucially, we reuse the original dcomp, as discussed.
-                # physics_rot = MCNUFFT(nufft_ob, adjnufft_ob, ktraj_rot, dcomp)
-                
-                # # 6. Calculate the EI loss with the rotated physics
-                # y_rot = physics_rot(inv=False, data=x2_complex, smaps=csmap).to(csmap.device)
-                
-                # # For the reconstruction step, you MUST use the rotated physics again
-                # x3, *_ = model(y_rot, physics_rot, csmap, acceleration_encoding, epoch=None)
-
-                # ei_loss = ei_loss_fn.metric(x3, x2)
-
                 initial_train_ei_loss += ei_loss.item()
             
 
@@ -540,14 +497,24 @@ if args.from_checkpoint == False and config['debugging']['calc_step_0'] == True:
         # Evaluate on validation data
         for measured_kspace, csmap, ground_truth, grasp_img, mask, *_ in tqdm(val_dro_loader, desc="Step 0 Validation Evaluation"):
 
-            # prepare inputs
-            measured_kspace = measured_kspace.to(device)
-            csmap = csmap.to(device)
+            csmap = csmap.squeeze(0).to(device)   # Remove batch dim
+            ground_truth = ground_truth.to(device) # Shape: (1, 2, T, H, W)
+
+            # simulate k-space for validation if path does not exist
+            if type(measured_kspace) is list:
+
+                ground_truth_for_physics = rearrange(to_torch_complex(ground_truth), 'b t h w -> b h w t')
+                kspace_path = measured_kspace[0]
+
+                # SIMULATE KSPACE
+                measured_kspace = eval_physics(False, ground_truth_for_physics, csmap)
+
+                # save k-space 
+                np.save(kspace_path, measured_kspace.cpu().numpy())
+
 
             measured_kspace = measured_kspace.squeeze(0).to(device) # Remove batch dim
-            csmap = csmap.squeeze(0).to(device)   # Remove batch dim
 
-            # if config['model']['encode_acceleration']:
             N_spokes = eval_ktraj.shape[1] / config['data']['samples']
             acceleration = torch.tensor([N_full / int(N_spokes)], dtype=torch.float, device=device)
 
@@ -570,41 +537,6 @@ if args.from_checkpoint == False and config['debugging']['calc_step_0'] == True:
                 ei_loss, t_img = ei_loss_fn(
                     x_recon, eval_physics, model, csmap, acceleration_encoding
                 )
-
-                # # 1. Apply the image transform
-                # x_net_rearranged = rearrange(x_recon, 'b c h w t -> b c t h w')
-                # x2_rearranged = ei_loss_fn.T(x_net_rearranged) # This calls VideoRotate
-                # x2 = rearrange(x2_rearranged, 'b c t h w -> b c h w t')
-                # x2_complex = to_torch_complex(x2)
-
-                # # 2. Get the rotation angle used
-                # #    (assuming you've modified VideoRotate to store it)
-                # angle_deg = ei_loss_fn.T.last_angle # Access it from the composed transform
-                # angle_rad = torch.deg2rad(torch.tensor(angle_deg, device=device))
-
-                # # 3. Create a 2D rotation matrix
-                # cos_a, sin_a = torch.cos(angle_rad), torch.sin(angle_rad)
-                # # Note: k-space rotation is often the transpose of image rotation
-                # rot_matrix = torch.tensor([[cos_a, sin_a],
-                #                         [-sin_a, cos_a]], dtype=torch.float32, device=device)
-
-                # # 4. Rotate the k-space trajectory
-                # # ktraj shape is likely (2, n_points, n_time), so we permute for matmul
-                # ktraj_permuted = eval_ktraj.permute(1, 2, 0) # (n_points, n_time, 2)
-                # ktraj_rot_permuted = torch.matmul(ktraj_permuted, rot_matrix)
-                # ktraj_rot = ktraj_rot_permuted.permute(2, 0, 1) # Back to (2, n_points, n_time)
-                
-                # # 5. Create a new, temporary physics operator for the EI loss
-                # #    Crucially, we reuse the original dcomp, as discussed.
-                # physics_rot = MCNUFFT(eval_nufft_ob, eval_adjnufft_ob, ktraj_rot, eval_dcomp)
-                
-                # # 6. Calculate the EI loss with the rotated physics
-                # y_rot = physics_rot(inv=False, data=x2_complex, smaps=csmap).to(csmap.device)
-                
-                # # For the reconstruction step, you MUST use the rotated physics again
-                # x3, *_ = model(y_rot, physics_rot, csmap, acceleration_encoding, epoch=None)
-
-                # ei_loss = ei_loss_fn.metric(x3, x2)
 
                 initial_val_ei_loss += ei_loss.item()
 
@@ -776,41 +708,6 @@ else:
                     x_recon, physics, model, csmap, acceleration_encoding
                 )
 
-                # # 1. Apply the image transform
-                # x_net_rearranged = rearrange(x_recon, 'b c h w t -> b c t h w')
-                # x2_rearranged = ei_loss_fn.T(x_net_rearranged) # This calls VideoRotate
-                # x2 = rearrange(x2_rearranged, 'b c t h w -> b c h w t')
-                # x2_complex = to_torch_complex(x2)
-
-                # # 2. Get the rotation angle used
-                # #    (assuming you've modified VideoRotate to store it)
-                # angle_deg = ei_loss_fn.T.last_angle # Access it from the composed transform
-                # angle_rad = torch.deg2rad(torch.tensor(angle_deg, device=device))
-
-                # # 3. Create a 2D rotation matrix
-                # cos_a, sin_a = torch.cos(angle_rad), torch.sin(angle_rad)
-                # # Note: k-space rotation is often the transpose of image rotation
-                # rot_matrix = torch.tensor([[cos_a, sin_a],
-                #                         [-sin_a, cos_a]], dtype=torch.float32, device=device)
-
-                # # 4. Rotate the k-space trajectory
-                # # ktraj shape is likely (2, n_points, n_time), so we permute for matmul
-                # ktraj_permuted = ktraj.permute(1, 2, 0) # (n_points, n_time, 2)
-                # ktraj_rot_permuted = torch.matmul(ktraj_permuted, rot_matrix)
-                # ktraj_rot = ktraj_rot_permuted.permute(2, 0, 1) # Back to (2, n_points, n_time)
-                
-                # # 5. Create a new, temporary physics operator for the EI loss
-                # #    Crucially, we reuse the original dcomp, as discussed.
-                # physics_rot = MCNUFFT(nufft_ob, adjnufft_ob, ktraj_rot, dcomp)
-                
-                # # 6. Calculate the EI loss with the rotated physics
-                # y_rot = physics_rot(inv=False, data=x2_complex, smaps=csmap).to(csmap.device)
-                
-                # # For the reconstruction step, you MUST use the rotated physics again
-                # x3, *_ = model(y_rot, physics_rot, csmap, acceleration_encoding, epoch=None)
-
-                # ei_loss = ei_loss_fn.metric(x3, x2)
-
 
                 ei_loss_weight = get_cosine_ei_weight(
                     current_epoch=epoch,
@@ -930,10 +827,23 @@ else:
         with torch.no_grad():
             for val_kspace_batch, val_csmap, val_ground_truth, val_grasp_img, val_mask in tqdm(val_dro_loader):
 
-                # prepare inputs
-                val_kspace_batch = val_kspace_batch.squeeze(0).to(device) # Remove batch dim
                 val_csmap = val_csmap.squeeze(0).to(device)   # Remove batch dim
                 val_ground_truth = val_ground_truth.to(device) # Shape: (1, 2, T, H, W)
+
+                # simulate k-space for validation if path does not exist
+                if type(val_kspace_batch) is list:
+
+                    ground_truth_for_physics = rearrange(to_torch_complex(val_ground_truth), 'b t h w -> b h w t')
+                    kspace_path = val_kspace_batch[0]
+
+                    # SIMULATE KSPACE
+                    val_kspace_batch = eval_physics(False, ground_truth_for_physics, val_csmap)
+
+                    # save k-space 
+                    np.save(kspace_path, val_kspace_batch)
+
+                # prepare inputs
+                val_kspace_batch = val_kspace_batch.squeeze(0).to(device) # Remove batch dim
 
                 val_grasp_img_tensor = val_grasp_img.to(device)
 
@@ -1115,150 +1025,239 @@ else:
 
 
             # Plot MC Loss
-            plt.figure()
-            plt.plot(train_mc_losses, label="Training MC Loss")
-            plt.plot(val_mc_losses, label="Validation MC Loss")
-            plt.xlabel("Epoch")
-            plt.ylabel("MC Loss")
-            plt.title("Measurement Consistency Loss")
-            plt.legend()
-            plt.grid(True)
-            plt.savefig(os.path.join(output_dir, "mc_losses.png"))
+            # plt.figure()
+            # plt.plot(train_mc_losses, label="Training MC Loss")
+            # plt.plot(val_mc_losses, label="Validation MC Loss")
+            # plt.xlabel("Epoch")
+            # plt.ylabel("MC Loss")
+            # plt.title("Measurement Consistency Loss")
+            # plt.legend()
+            # plt.grid(True)
+            # plt.savefig(os.path.join(output_dir, "mc_losses.png"))
+            # plt.close()
+
+            # # Plot Train and Val Losses Individually
+            # plt.figure()
+            # plt.plot(train_mc_losses)
+            # plt.xlabel("Epoch")
+            # plt.ylabel("MC Loss")
+            # plt.title("Training Measurement Consistency Loss")
+            # plt.grid(True)
+            # plt.savefig(os.path.join(output_dir, "train_mc_losses.png"))
+            # plt.close()
+
+            # plt.figure()
+            # plt.plot(val_mc_losses)
+            # plt.xlabel("Epoch")
+            # plt.ylabel("MC Loss")
+            # plt.title("Validation Measurement Consistency Loss")
+            # plt.grid(True)
+            # plt.savefig(os.path.join(output_dir, "val_mc_losses.png"))
+            # plt.close()
+
+            # if use_ei_loss:
+            #     # Plot EI Loss
+            #     plt.figure()
+            #     plt.plot(train_ei_losses, label="Training EI Loss")
+            #     plt.plot(val_ei_losses, label="Validation EI Loss")
+            #     plt.xlabel("Epoch")
+            #     plt.ylabel("EI Loss")
+            #     plt.title("Equivariant Imaging Loss")
+            #     plt.legend()
+            #     plt.grid(True)
+            #     plt.savefig(os.path.join(output_dir, "ei_losses.png"))
+            #     plt.close()
+
+            #     plt.figure()
+            #     plt.plot(train_ei_losses)
+            #     plt.xlabel("Epoch")
+            #     plt.ylabel("EI Loss")
+            #     plt.title("Training Equivariant Imaging Loss")
+            #     plt.grid(True)
+            #     plt.savefig(os.path.join(output_dir, "train_ei_losses.png"))
+            #     plt.close()
+
+            #     plt.figure()
+            #     plt.plot(val_ei_losses)
+            #     plt.xlabel("Epoch")
+            #     plt.ylabel("EI Loss")
+            #     plt.title("Validation Equivariant Imaging Loss")
+            #     plt.grid(True)
+            #     plt.savefig(os.path.join(output_dir, "val_ei_losses.png"))
+            #     plt.close()
+
+
+            # plt.figure()
+            # plt.plot(train_adj_losses, label="Training Adjoint Loss")
+            # plt.plot(val_adj_losses, label="Validation Adjoint Loss")
+            # plt.xlabel("Epoch")
+            # plt.ylabel("Adjoint Loss")
+            # plt.title("CNN Adjoint Loss")
+            # plt.legend()
+            # plt.grid(True)
+            # plt.savefig(os.path.join(output_dir, "adj_losses.png"))
+            # plt.close()
+
+            # plt.figure()
+            # plt.plot(train_adj_losses)
+            # plt.xlabel("Epoch")
+            # plt.ylabel("Adjoint Loss")
+            # plt.title("Training CNN Adjoint Loss")
+            # plt.grid(True)
+            # plt.savefig(os.path.join(output_dir, "train_adj_losses.png"))
+            # plt.close()
+
+            # plt.figure()
+            # plt.plot(val_adj_losses)
+            # plt.xlabel("Epoch")
+            # plt.ylabel("Adjoint Loss")
+            # plt.title("Validation CNN Adjoint Loss")
+            # plt.grid(True)
+            # plt.savefig(os.path.join(output_dir, "val_adj_losses.png"))
+            # plt.close()
+
+
+            # plot losses in one figure
+            # Set the seaborn style
+            sns.set_style("whitegrid")
+
+            # Create a figure and a set of subplots
+            fig, axes = plt.subplots(2, 3, figsize=(18, 10))
+
+            # Plot Training Adjoint Loss
+            sns.lineplot(x=range(len(train_adj_losses)), y=train_adj_losses, ax=axes[0, 0])
+            axes[0, 0].set_title("Training Adjoint Loss")
+            axes[0, 0].set_xlabel("Epoch")
+            axes[0, 0].set_ylabel("Adjoint Loss")
+
+            # Plot Training MC Loss
+            sns.lineplot(x=range(len(train_mc_losses)), y=train_mc_losses, ax=axes[0, 1])
+            axes[0, 1].set_title("Training MC Loss")
+            axes[0, 1].set_xlabel("Epoch")
+            axes[0, 1].set_ylabel("MC Loss")
+
+            # Plot Training EI Loss
+            sns.lineplot(x=range(len(train_ei_losses)), y=train_ei_losses, ax=axes[0, 2])
+            axes[0, 2].set_title("Training EI Loss")
+            axes[0, 2].set_xlabel("Epoch")
+            axes[0, 2].set_ylabel("EI Loss")
+
+            # Plot Validation Adjoint Loss
+            sns.lineplot(x=range(len(val_adj_losses)), y=val_adj_losses, ax=axes[1, 0], color='orange')
+            axes[1, 0].set_title("Validation Adjoint Loss")
+            axes[1, 0].set_xlabel("Epoch")
+            axes[1, 0].set_ylabel("Adjoint Loss")
+
+            # Plot Validation MC Loss
+            sns.lineplot(x=range(len(val_mc_losses)), y=val_mc_losses, ax=axes[1, 1], color='orange')
+            axes[1, 1].set_title("Validation MC Loss")
+            axes[1, 1].set_xlabel("Epoch")
+            axes[1, 1].set_ylabel("MC Loss")
+
+            # Plot Validation EI Loss
+            sns.lineplot(x=range(len(val_ei_losses)), y=val_ei_losses, ax=axes[1, 2], color='orange')
+            axes[1, 2].set_title("Validation EI Loss")
+            axes[1, 2].set_xlabel("Epoch")
+            axes[1, 2].set_ylabel("EI Loss")
+
+            plt.tight_layout()
+            plt.savefig(os.path.join(output_dir, "losses.png"))
             plt.close()
 
-            # Plot Train and Val Losses Individually
-            plt.figure()
-            plt.plot(train_mc_losses)
-            plt.xlabel("Epoch")
-            plt.ylabel("MC Loss")
-            plt.title("Training Measurement Consistency Loss")
-            plt.grid(True)
-            plt.savefig(os.path.join(output_dir, "train_mc_losses.png"))
-            plt.close()
 
-            plt.figure()
-            plt.plot(val_mc_losses)
-            plt.xlabel("Epoch")
-            plt.ylabel("MC Loss")
-            plt.title("Validation Measurement Consistency Loss")
-            plt.grid(True)
-            plt.savefig(os.path.join(output_dir, "val_mc_losses.png"))
-            plt.close()
+            # plt.figure()
+            # plt.plot(lambda_Ls)
+            # plt.xlabel("Epoch")
+            # plt.ylabel("Lambda_L Value")
+            # plt.title("Lambda_L During Training")
+            # plt.grid(True)
+            # plt.savefig(os.path.join(output_dir, "lambda_L.png"))
+            # plt.close()
 
-            if use_ei_loss:
-                # Plot EI Loss
-                plt.figure()
-                plt.plot(train_ei_losses, label="Training EI Loss")
-                plt.plot(val_ei_losses, label="Validation EI Loss")
-                plt.xlabel("Epoch")
-                plt.ylabel("EI Loss")
-                plt.title("Equivariant Imaging Loss")
-                plt.legend()
-                plt.grid(True)
-                plt.savefig(os.path.join(output_dir, "ei_losses.png"))
-                plt.close()
+            # plt.figure()
+            # plt.plot(lambda_Ss)
+            # plt.xlabel("Epoch")
+            # plt.ylabel("Lambda_S Value")
+            # plt.title("Lambda_S During Training")
+            # plt.grid(True)
+            # plt.savefig(os.path.join(output_dir, "lambda_S.png"))
+            # plt.close()
 
-                plt.figure()
-                plt.plot(train_ei_losses)
-                plt.xlabel("Epoch")
-                plt.ylabel("EI Loss")
-                plt.title("Training Equivariant Imaging Loss")
-                plt.grid(True)
-                plt.savefig(os.path.join(output_dir, "train_ei_losses.png"))
-                plt.close()
+            # plt.figure()
+            # plt.plot(lambda_spatial_Ls)
+            # plt.xlabel("Epoch")
+            # plt.ylabel("Lambda_spatial_L Value")
+            # plt.title("Lambda_spatial_L During Training")
+            # plt.grid(True)
+            # plt.savefig(os.path.join(output_dir, "lambda_spatial_L.png"))
+            # plt.close()
 
-                plt.figure()
-                plt.plot(val_ei_losses)
-                plt.xlabel("Epoch")
-                plt.ylabel("EI Loss")
-                plt.title("Validation Equivariant Imaging Loss")
-                plt.grid(True)
-                plt.savefig(os.path.join(output_dir, "val_ei_losses.png"))
-                plt.close()
+            # plt.figure()
+            # plt.plot(lambda_spatial_Ss)
+            # plt.xlabel("Epoch")
+            # plt.ylabel("Lambda_spatial_S Value")
+            # plt.title("Lambda_spatial_S During Training")
+            # plt.grid(True)
+            # plt.savefig(os.path.join(output_dir, "lambda_spatial_S.png"))
+            # plt.close()
 
+            # plt.figure()
+            # plt.plot(gammas)
+            # plt.xlabel("Epoch")
+            # plt.ylabel("Gamma Value")
+            # plt.title("Step Size During Training")
+            # plt.grid(True)
+            # plt.savefig(os.path.join(output_dir, "gamma.png"))
+            # plt.close()
 
-            plt.figure()
-            plt.plot(train_adj_losses, label="Training Adjoint Loss")
-            plt.plot(val_adj_losses, label="Validation Adjoint Loss")
-            plt.xlabel("Epoch")
-            plt.ylabel("Adjoint Loss")
-            plt.title("CNN Adjoint Loss")
-            plt.legend()
-            plt.grid(True)
-            plt.savefig(os.path.join(output_dir, "adj_losses.png"))
-            plt.close()
+            # plt.figure()
+            # plt.plot(lambda_steps)
+            # plt.xlabel("Epoch")
+            # plt.ylabel("Lambda_step Value")
+            # plt.title("Lambda_step During Training")
+            # plt.grid(True)
+            # plt.savefig(os.path.join(output_dir, "lambda_step.png"))
+            # plt.close()
 
-            plt.figure()
-            plt.plot(train_adj_losses)
-            plt.xlabel("Epoch")
-            plt.ylabel("Adjoint Loss")
-            plt.title("Training CNN Adjoint Loss")
-            plt.grid(True)
-            plt.savefig(os.path.join(output_dir, "train_adj_losses.png"))
-            plt.close()
+            # plot learnable parameters in one figure
+            # Set the seaborn style
+            sns.set_style("whitegrid")
 
-            plt.figure()
-            plt.plot(val_adj_losses)
-            plt.xlabel("Epoch")
-            plt.ylabel("Adjoint Loss")
-            plt.title("Validation CNN Adjoint Loss")
-            plt.grid(True)
-            plt.savefig(os.path.join(output_dir, "val_adj_losses.png"))
-            plt.close()
+            # Create a figure and a set of subplots
+            fig, axes = plt.subplots(2, 3, figsize=(18, 10))
 
+            sns.lineplot(x=range(len(lambda_Ls)), y=lambda_Ls, ax=axes[0, 0])
+            axes[0, 0].set_title("Lambda_L Parameter Value")
+            axes[0, 0].set_xlabel("Epoch")
+            axes[0, 0].set_ylabel("Lambda_L")
 
-            plt.figure()
-            plt.plot(lambda_Ls)
-            plt.xlabel("Epoch")
-            plt.ylabel("Lambda_L Value")
-            plt.title("Lambda_L During Training")
-            plt.grid(True)
-            plt.savefig(os.path.join(output_dir, "lambda_L.png"))
-            plt.close()
+            sns.lineplot(x=range(len(lambda_Ss)), y=lambda_Ss, ax=axes[0, 1])
+            axes[0, 1].set_title("Lambda_S Parameter Value")
+            axes[0, 1].set_xlabel("Epoch")
+            axes[0, 1].set_ylabel("Lambda_S")
 
-            plt.figure()
-            plt.plot(lambda_Ss)
-            plt.xlabel("Epoch")
-            plt.ylabel("Lambda_S Value")
-            plt.title("Lambda_S During Training")
-            plt.grid(True)
-            plt.savefig(os.path.join(output_dir, "lambda_S.png"))
-            plt.close()
+            sns.lineplot(x=range(len(lambda_spatial_Ls)), y=lambda_spatial_Ls, ax=axes[0, 2])
+            axes[0, 2].set_title("Spatial Lambda_L Parameter Value")
+            axes[0, 2].set_xlabel("Epoch")
+            axes[0, 2].set_ylabel("Spatial Lambda_L")
 
-            plt.figure()
-            plt.plot(lambda_spatial_Ls)
-            plt.xlabel("Epoch")
-            plt.ylabel("Lambda_spatial_L Value")
-            plt.title("Lambda_spatial_L During Training")
-            plt.grid(True)
-            plt.savefig(os.path.join(output_dir, "lambda_spatial_L.png"))
-            plt.close()
+            sns.lineplot(x=range(len(lambda_spatial_Ss)), y=lambda_spatial_Ss, ax=axes[1, 0])
+            axes[1, 0].set_title("Spatial Lambda_S Parameter Value")
+            axes[1, 0].set_xlabel("Epoch")
+            axes[1, 0].set_ylabel("Spatial Lambda_S")
 
-            plt.figure()
-            plt.plot(lambda_spatial_Ss)
-            plt.xlabel("Epoch")
-            plt.ylabel("Lambda_spatial_S Value")
-            plt.title("Lambda_spatial_S During Training")
-            plt.grid(True)
-            plt.savefig(os.path.join(output_dir, "lambda_spatial_S.png"))
-            plt.close()
+            sns.lineplot(x=range(len(gammas)), y=gammas, ax=axes[1, 1])
+            axes[1, 1].set_title("Gamma Parameter Value")
+            axes[1, 1].set_xlabel("Epoch")
+            axes[1, 1].set_ylabel("Gamma")
 
-            plt.figure()
-            plt.plot(gammas)
-            plt.xlabel("Epoch")
-            plt.ylabel("Gamma Value")
-            plt.title("Step Size During Training")
-            plt.grid(True)
-            plt.savefig(os.path.join(output_dir, "gamma.png"))
-            plt.close()
+            sns.lineplot(x=range(len(lambda_steps)), y=lambda_steps, ax=axes[1, 2])
+            axes[1, 2].set_title("Lambda Step Parameter Value")
+            axes[1, 2].set_xlabel("Epoch")
+            axes[1, 2].set_ylabel("Lambda Step")
 
-            plt.figure()
-            plt.plot(lambda_steps)
-            plt.xlabel("Epoch")
-            plt.ylabel("Lambda_step Value")
-            plt.title("Lambda_step During Training")
-            plt.grid(True)
-            plt.savefig(os.path.join(output_dir, "lambda_step.png"))
+            plt.tight_layout()
+            plt.savefig(os.path.join(output_dir, "parameters.png"))
             plt.close()
 
 
@@ -1277,42 +1276,104 @@ else:
 
 
             # Plot Evaluation Stats
-            plt.figure()
-            plt.plot(eval_ssims)
-            plt.xlabel("Epoch")
-            plt.ylabel("SSIM")
-            plt.title("Evaluation SSIM")
-            plt.grid(True)
-            plt.savefig(os.path.join(eval_dir, "eval_ssims.png"))
+            # plt.figure()
+            # plt.plot(eval_ssims)
+            # plt.xlabel("Epoch")
+            # plt.ylabel("SSIM")
+            # plt.title("Evaluation SSIM")
+            # plt.grid(True)
+            # plt.savefig(os.path.join(eval_dir, "eval_ssims.png"))
+            # plt.close()
+
+            # plt.figure()
+            # plt.plot(eval_psnrs)
+            # plt.xlabel("Epoch")
+            # plt.ylabel("PSNR")
+            # plt.title("Evaluation PSNR")
+            # plt.grid(True)
+            # plt.savefig(os.path.join(eval_dir, "eval_psnrs.png"))
+            # plt.close()
+
+            # plt.figure()
+            # plt.plot(eval_mses)
+            # plt.xlabel("Epoch")
+            # plt.ylabel("MSE")
+            # plt.title("Evaluation MSE")
+            # plt.grid(True)
+            # plt.savefig(os.path.join(eval_dir, "eval_mses.png"))
+            # plt.close()
+
+
+            # plt.figure()
+            # plt.plot(eval_lpipses)
+            # plt.xlabel("Epoch")
+            # plt.ylabel("LPIPS")
+            # plt.title("Evaluation LPIPS")
+            # plt.grid(True)
+            # plt.savefig(os.path.join(eval_dir, "eval_lpipses.png"))
+            # plt.close()
+
+
+            # plt.figure()
+            # plt.plot(eval_dc_maes)
+            # plt.xlabel("Epoch")
+            # plt.ylabel("k-space MAE")
+            # plt.title("Evaluation Data Consistency (MAE)")
+            # plt.grid(True)
+            # plt.savefig(os.path.join(eval_dir, "eval_dc_maes.png"))
+            # plt.close()
+
+
+            # plt.figure()
+            # plt.plot(eval_curve_corrs)
+            # plt.xlabel("Epoch")
+            # plt.ylabel("Pearson Correlation of Tumor Enhancement Curve")
+            # plt.title("Pearson Correlation")
+            # plt.grid(True)
+            # plt.savefig(os.path.join(eval_dir, "eval_curve_correlations.png"))
+            # plt.close()
+
+            # plot evaluation metrics in one figure
+            # Set the seaborn style
+            sns.set_style("whitegrid")
+
+            # Create a figure and a set of subplots
+            fig, axes = plt.subplots(2, 3, figsize=(18, 10))
+
+            sns.lineplot(x=range(len(eval_ssims)), y=eval_ssims, ax=axes[0, 0])
+            axes[0, 0].set_title("Evaluation SSIM")
+            axes[0, 0].set_xlabel("Epoch")
+            axes[0, 0].set_ylabel("SSIM")
+
+            sns.lineplot(x=range(len(eval_psnrs)), y=eval_psnrs, ax=axes[0, 1])
+            axes[0, 1].set_title("Evaluation PSNR")
+            axes[0, 1].set_xlabel("Epoch")
+            axes[0, 1].set_ylabel("PSNR")
+
+            sns.lineplot(x=range(len(eval_mses)), y=eval_mses, ax=axes[0, 2])
+            axes[0, 2].set_title("Evaluation Image MSE")
+            axes[0, 2].set_xlabel("Epoch")
+            axes[0, 2].set_ylabel("MSE")
+
+            sns.lineplot(x=range(len(eval_lpipses)), y=eval_lpipses, ax=axes[1, 0])
+            axes[1, 0].set_title("Evaluation LPIPS")
+            axes[1, 0].set_xlabel("Epoch")
+            axes[1, 0].set_ylabel("LPIPS")
+
+            sns.lineplot(x=range(len(eval_dc_maes)), y=eval_dc_maes, ax=axes[1, 1])
+            axes[1, 1].set_title("Evaluation k-space MAE")
+            axes[1, 1].set_xlabel("Epoch")
+            axes[1, 1].set_ylabel("MAE")
+
+            sns.lineplot(x=range(len(eval_curve_corrs)), y=eval_curve_corrs, ax=axes[1, 2])
+            axes[1, 2].set_title("Tumor Enhancement Curve Correlation")
+            axes[1, 2].set_xlabel("Epoch")
+            axes[1, 2].set_ylabel("Pearson Correlation Coefficient")
+
+            plt.tight_layout()
+            plt.savefig(os.path.join(output_dir, "eval_metrics.png"))
             plt.close()
 
-            plt.figure()
-            plt.plot(eval_psnrs)
-            plt.xlabel("Epoch")
-            plt.ylabel("PSNR")
-            plt.title("Evaluation PSNR")
-            plt.grid(True)
-            plt.savefig(os.path.join(eval_dir, "eval_psnrs.png"))
-            plt.close()
-
-            plt.figure()
-            plt.plot(eval_mses)
-            plt.xlabel("Epoch")
-            plt.ylabel("MSE")
-            plt.title("Evaluation MSE")
-            plt.grid(True)
-            plt.savefig(os.path.join(eval_dir, "eval_mses.png"))
-            plt.close()
-
-
-            plt.figure()
-            plt.plot(eval_lpipses)
-            plt.xlabel("Epoch")
-            plt.ylabel("LPIPS")
-            plt.title("Evaluation LPIPS")
-            plt.grid(True)
-            plt.savefig(os.path.join(eval_dir, "eval_lpipses.png"))
-            plt.close()
 
             plt.figure()
             plt.plot(eval_dc_mses)
@@ -1321,26 +1382,6 @@ else:
             plt.title("Evaluation Data Consistency (MSE)")
             plt.grid(True)
             plt.savefig(os.path.join(eval_dir, "eval_dc_mses.png"))
-            plt.close()
-
-
-            plt.figure()
-            plt.plot(eval_dc_maes)
-            plt.xlabel("Epoch")
-            plt.ylabel("k-space MAE")
-            plt.title("Evaluation Data Consistency (MAE)")
-            plt.grid(True)
-            plt.savefig(os.path.join(eval_dir, "eval_dc_maes.png"))
-            plt.close()
-
-
-            plt.figure()
-            plt.plot(eval_curve_corrs)
-            plt.xlabel("Epoch")
-            plt.ylabel("Pearson Correlation of Tumor Enhancement Curve")
-            plt.title("Pearson Correlation")
-            plt.grid(True)
-            plt.savefig(os.path.join(eval_dir, "eval_curve_correlations.png"))
             plt.close()
 
 
@@ -1553,6 +1594,9 @@ with torch.no_grad():
 
             csmap = csmap.squeeze(0).to(device)   # Remove batch dim
             ground_truth = ground_truth.to(device) # Shape: (1, 2, T, H, W)
+
+            print("ground truth shape: ", ground_truth.shape)
+            print("csmap shape: ", csmap.shape)
 
 
             # SIMULATE KSPACE
@@ -1840,83 +1884,187 @@ with torch.no_grad():
 
     
 # Plot Metrics vs Spokes Per Frame
-plt.figure()
-plt.plot(list(spf_recon_ssim.keys()), list(spf_recon_ssim.values()), label="DL Recon", marker='o')
-plt.plot(list(spf_grasp_ssim.keys()), list(spf_grasp_ssim.values()), label="GRASP Recon", marker='o')
-plt.xlabel("Spokes per Frame")
-plt.ylabel("SSIM")
-plt.title("Evaluation SSIM vs Spokes per Frame")
-plt.legend()
-plt.grid(True)
-plt.savefig(os.path.join(eval_dir, "spf_eval_ssim.png"))
-plt.close()
+# plt.figure()
+# plt.plot(list(spf_recon_ssim.keys()), list(spf_recon_ssim.values()), label="DL Recon", marker='o')
+# plt.plot(list(spf_grasp_ssim.keys()), list(spf_grasp_ssim.values()), label="GRASP Recon", marker='o')
+# plt.xlabel("Spokes per Frame")
+# plt.ylabel("SSIM")
+# plt.title("Evaluation SSIM vs Spokes per Frame")
+# plt.legend()
+# plt.grid(True)
+# plt.savefig(os.path.join(eval_dir, "spf_eval_ssim.png"))
+# plt.close()
 
 
-plt.figure()
-plt.plot(list(spf_recon_psnr.keys()), list(spf_recon_psnr.values()), label="DL Recon", marker='o')
-plt.plot(list(spf_grasp_psnr.keys()), list(spf_grasp_psnr.values()), label="GRASP Recon", marker='o')
-plt.xlabel("Spokes per Frame")
-plt.ylabel("PSNR")
-plt.title("Evaluation PSNR vs Spokes per Frame")
-plt.legend()
-plt.grid(True)
-plt.savefig(os.path.join(eval_dir, "spf_eval_psnr.png"))
-plt.close()
+# plt.figure()
+# plt.plot(list(spf_recon_psnr.keys()), list(spf_recon_psnr.values()), label="DL Recon", marker='o')
+# plt.plot(list(spf_grasp_psnr.keys()), list(spf_grasp_psnr.values()), label="GRASP Recon", marker='o')
+# plt.xlabel("Spokes per Frame")
+# plt.ylabel("PSNR")
+# plt.title("Evaluation PSNR vs Spokes per Frame")
+# plt.legend()
+# plt.grid(True)
+# plt.savefig(os.path.join(eval_dir, "spf_eval_psnr.png"))
+# plt.close()
 
 
-plt.figure()
-plt.plot(list(spf_recon_mse.keys()), list(spf_recon_mse.values()), label="DL Recon", marker='o')
-plt.plot(list(spf_grasp_mse.keys()), list(spf_grasp_mse.values()), label="GRASP Recon", marker='o')
-plt.xlabel("Spokes per Frame")
-plt.ylabel("MSE")
-plt.title("Evaluation Image MSE vs Spokes per Frame")
-plt.legend()
-plt.grid(True)
-plt.savefig(os.path.join(eval_dir, "spf_eval_mse.png"))
-plt.close()
+# plt.figure()
+# plt.plot(list(spf_recon_mse.keys()), list(spf_recon_mse.values()), label="DL Recon", marker='o')
+# plt.plot(list(spf_grasp_mse.keys()), list(spf_grasp_mse.values()), label="GRASP Recon", marker='o')
+# plt.xlabel("Spokes per Frame")
+# plt.ylabel("MSE")
+# plt.title("Evaluation Image MSE vs Spokes per Frame")
+# plt.legend()
+# plt.grid(True)
+# plt.savefig(os.path.join(eval_dir, "spf_eval_mse.png"))
+# plt.close()
 
-plt.figure()
-plt.plot(list(spf_recon_lpips.keys()), list(spf_recon_lpips.values()), label="DL Recon", marker='o')
-plt.plot(list(spf_grasp_lpips.keys()), list(spf_grasp_lpips.values()), label="GRASP Recon", marker='o')
-plt.xlabel("Spokes per Frame")
-plt.ylabel("LPIPS")
-plt.title("Evaluation LPIPS vs Spokes per Frame")
-plt.legend()
-plt.grid(True)
-plt.savefig(os.path.join(eval_dir, "spf_eval_lpips.png"))
-plt.close()
-
-
-plt.figure()
-plt.plot(list(spf_recon_dc_mse.keys()), list(spf_recon_dc_mse.values()), label="DL Recon", marker='o')
-plt.plot(list(spf_grasp_dc_mse.keys()), list(spf_grasp_dc_mse.values()), label="GRASP Recon", marker='o')
-plt.xlabel("Spokes per Frame")
-plt.ylabel("k-space MSE")
-plt.title("Data Consistency Evaluation (MSE) vs Spokes per Frame")
-plt.legend()
-plt.grid(True)
-plt.savefig(os.path.join(eval_dir, "spf_eval_dc_mse.png"))
-plt.close()
-
-plt.figure()
-plt.plot(list(spf_recon_dc_mae.keys()), list(spf_recon_dc_mae.values()), label="DL Recon", marker='o')
-plt.plot(list(spf_grasp_dc_mae.keys()), list(spf_grasp_dc_mae.values()), label="GRASP Recon", marker='o')
-plt.xlabel("Spokes per Frame")
-plt.ylabel("k-space MAE")
-plt.title("Data Consistency Evaluation (MAE) vs Spokes per Frame")
-plt.legend()
-plt.grid(True)
-plt.savefig(os.path.join(eval_dir, "spf_eval_dc_mae.png"))
-plt.close()
+# plt.figure()
+# plt.plot(list(spf_recon_lpips.keys()), list(spf_recon_lpips.values()), label="DL Recon", marker='o')
+# plt.plot(list(spf_grasp_lpips.keys()), list(spf_grasp_lpips.values()), label="GRASP Recon", marker='o')
+# plt.xlabel("Spokes per Frame")
+# plt.ylabel("LPIPS")
+# plt.title("Evaluation LPIPS vs Spokes per Frame")
+# plt.legend()
+# plt.grid(True)
+# plt.savefig(os.path.join(eval_dir, "spf_eval_lpips.png"))
+# plt.close()
 
 
-plt.figure()
-plt.plot(list(spf_recon_corr.keys()), list(spf_recon_corr.values()), label="DL Recon", marker='o')
-plt.plot(list(spf_grasp_corr.keys()), list(spf_grasp_corr.values()), label="GRASP Recon", marker='o')
-plt.xlabel("Spokes per Frame")
-plt.ylabel("Pearson Correlation")
-plt.title("Pearson Correlation of Tumor Enhancement Curve vs Spokes per Frame")
-plt.legend()
-plt.grid(True)
-plt.savefig(os.path.join(eval_dir, "spf_eval_curve_correlations.png"))
+# plt.figure()
+# plt.plot(list(spf_recon_dc_mse.keys()), list(spf_recon_dc_mse.values()), label="DL Recon", marker='o')
+# plt.plot(list(spf_grasp_dc_mse.keys()), list(spf_grasp_dc_mse.values()), label="GRASP Recon", marker='o')
+# plt.xlabel("Spokes per Frame")
+# plt.ylabel("k-space MSE")
+# plt.title("Data Consistency Evaluation (MSE) vs Spokes per Frame")
+# plt.legend()
+# plt.grid(True)
+# plt.savefig(os.path.join(eval_dir, "spf_eval_dc_mse.png"))
+# plt.close()
+
+# plt.figure()
+# plt.plot(list(spf_recon_dc_mae.keys()), list(spf_recon_dc_mae.values()), label="DL Recon", marker='o')
+# plt.plot(list(spf_grasp_dc_mae.keys()), list(spf_grasp_dc_mae.values()), label="GRASP Recon", marker='o')
+# plt.xlabel("Spokes per Frame")
+# plt.ylabel("k-space MAE")
+# plt.title("Data Consistency Evaluation (MAE) vs Spokes per Frame")
+# plt.legend()
+# plt.grid(True)
+# plt.savefig(os.path.join(eval_dir, "spf_eval_dc_mae.png"))
+# plt.close()
+
+
+# plt.figure()
+# plt.plot(list(spf_recon_corr.keys()), list(spf_recon_corr.values()), label="DL Recon", marker='o')
+# plt.plot(list(spf_grasp_corr.keys()), list(spf_grasp_corr.values()), label="GRASP Recon", marker='o')
+# plt.xlabel("Spokes per Frame")
+# plt.ylabel("Pearson Correlation")
+# plt.title("Pearson Correlation of Tumor Enhancement Curve vs Spokes per Frame")
+# plt.legend()
+# plt.grid(True)
+# plt.savefig(os.path.join(eval_dir, "spf_eval_curve_correlations.png"))
+# plt.close()
+
+
+# plot variable spokes/frame evaluation metrics in one figure
+sns.set_style("whitegrid")
+fig, axes = plt.subplots(2, 3, figsize=(18, 10))
+
+
+sns.lineplot(x=list(spf_recon_ssim.keys()), 
+             y=list(spf_recon_ssim.values()), 
+             label="DL Recon", 
+             marker='o',
+             ax=axes[0, 0])
+
+sns.lineplot(x=list(spf_grasp_ssim.keys()), 
+             y=list(spf_grasp_ssim.values()), 
+             label="Standard Recon", 
+             marker='o',
+             ax=axes[0, 0])
+
+axes[0, 0].set_title("Evaluation SSIM vs Spokes/Frame")
+axes[0, 0].set_xlabel("Epoch")
+axes[0, 0].set_ylabel("SSIM")
+
+
+sns.lineplot(x=list(spf_recon_psnr.keys()), 
+             y=list(spf_recon_psnr.values()), 
+             label="DL Recon", 
+             marker='o',
+             ax=axes[0, 1])
+
+sns.lineplot(x=list(spf_grasp_psnr.keys()), 
+             y=list(spf_grasp_psnr.values()), 
+             label="Standard Recon", 
+             marker='o',
+             ax=axes[0, 1])
+axes[0, 1].set_title("Evaluation PSNR vs Spokes/Frame")
+axes[0, 1].set_xlabel("Epoch")
+axes[0, 1].set_ylabel("PSNR")
+
+
+sns.lineplot(x=list(spf_recon_mse.keys()), 
+             y=list(spf_recon_mse.values()), 
+             label="DL Recon", 
+             marker='o',
+             ax=axes[0, 2])
+
+sns.lineplot(x=list(spf_grasp_mse.keys()), 
+             y=list(spf_grasp_mse.values()), 
+             label="Standard Recon", 
+             marker='o',
+             ax=axes[0, 2])
+axes[0, 2].set_title("Evaluation Image MSE vs Spokes/Frame")
+axes[0, 2].set_xlabel("Epoch")
+axes[0, 2].set_ylabel("MSE")
+
+
+sns.lineplot(x=list(spf_recon_lpips.keys()), 
+             y=list(spf_recon_lpips.values()), 
+             label="DL Recon", 
+             marker='o',
+             ax=axes[1, 0])
+
+sns.lineplot(x=list(spf_grasp_lpips.keys()), 
+             y=list(spf_grasp_lpips.values()), 
+             label="Standard Recon", 
+             marker='o',
+             ax=axes[1, 0])
+axes[1, 0].set_title("Evaluation LPIPS vs Spokes/Frame")
+axes[1, 0].set_xlabel("Epoch")
+axes[1, 0].set_ylabel("LPIPS")
+
+sns.lineplot(x=list(spf_recon_dc_mae.keys()), 
+             y=list(spf_recon_dc_mae.values()), 
+             label="DL Recon", 
+             marker='o',
+             ax=axes[1, 1])
+
+sns.lineplot(x=list(spf_grasp_dc_mae.keys()), 
+             y=list(spf_grasp_dc_mae.values()), 
+             label="Standard Recon", 
+             marker='o',
+             ax=axes[1, 1])
+axes[1, 1].set_title("Evaluation k-space MAE vs Spokes/Frame")
+axes[1, 1].set_xlabel("Epoch")
+axes[1, 1].set_ylabel("MAE")
+
+sns.lineplot(x=list(spf_recon_corr.keys()), 
+             y=list(spf_recon_corr.values()), 
+             label="DL Recon", 
+             marker='o',
+             ax=axes[1, 2])
+
+sns.lineplot(x=list(spf_grasp_corr.keys()), 
+             y=list(spf_grasp_corr.values()), 
+             label="Standard Recon", 
+             marker='o',
+             ax=axes[1, 2])
+axes[1, 2].set_title("Tumor Enhancement Curve Correlation vs Spokes/Frame")
+axes[1, 2].set_xlabel("Epoch")
+axes[1, 2].set_ylabel("Pearson Correlation Coefficient")
+
+plt.tight_layout()
+plt.savefig(os.path.join(output_dir, "spf_eval_metrics.png"))
 plt.close()

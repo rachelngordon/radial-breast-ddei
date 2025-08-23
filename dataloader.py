@@ -435,8 +435,10 @@ class SimulatedDataset(Dataset):
     It loads the simulated k-space, coil sensitivity maps, and the
     ground truth dynamic image (DRO).
     """
-    def __init__(self, root_dir, model_type, patient_ids):
+    def __init__(self, root_dir, model_type, patient_ids, spokes_per_frame=36, num_frames=22):
         self.model_type = model_type
+        self.spokes_per_frame = spokes_per_frame
+        self.num_frames = num_frames
         # Find all sample directories, e.g., 'sample_001_sub1', 'sample_002_sub2', etc.
         self.sample_paths = sorted(glob.glob(os.path.join(root_dir, 'sample_*')))
         if not self.sample_paths:
@@ -467,10 +469,18 @@ class SimulatedDataset(Dataset):
         sample_dir = self.sample_paths[idx]
 
         # Load the data from .npy files
-        kspace_complex = np.load(os.path.join(sample_dir, 'simulated_kspace.npy'))
         csmaps = np.load(os.path.join(sample_dir, 'csmaps.npy'))
         dro = np.load(os.path.join(sample_dir, 'dro_ground_truth.npz'))
-        grasp_recon = np.load(os.path.join(sample_dir, 'grasp_recon.npy'))
+        grasp_recon = np.load(os.path.join(sample_dir, f'grasp_spf{self.spokes_per_frame}_frames{self.num_frames}.npy'))
+
+        kspace_path = os.path.join(sample_dir, f'simulated_kspace_spf{self.spokes_per_frame}_frames{self.num_frames}.npy')
+
+        if os.path.exists(kspace_path):
+            kspace_complex = np.load(kspace_path, allow_pickle=True)
+            kspace_torch = torch.from_numpy(kspace_complex)
+        else:
+            kspace_torch = kspace_path
+
 
         ground_truth_complex = dro['ground_truth_images']
 
@@ -507,21 +517,21 @@ class SimulatedDataset(Dataset):
         csmaps_torch = torch.from_numpy(csmaps).permute(2, 0, 1).unsqueeze(0)
 
         # --- Prepare k-space based on model type ---
-        if self.model_type == "CRNN":
-            # k-space: (C, Samples, T) -> (1, 2, C*Samples*T) -> reshape to training format
-            # The training code expects k-space as (B, C, 2, Samples, T)
-            # Your simulated k-space is (Coils, N_samples_per_frame * N_spokes, N_frames)
-            kspace_real_imag = np.stack([kspace_complex.real, kspace_complex.imag]) # (2, C, Samples, T)
-            kspace_torch = torch.from_numpy(kspace_real_imag)
-            # Add batch and coil dimensions to match trainer. Assuming C=1 from trainer code.
-            kspace_torch = kspace_torch.permute(2, 0, 1, 3).unsqueeze(0) # (B, C, 2, Samples, T)
+        # if self.model_type == "CRNN":
+        #     # k-space: (C, Samples, T) -> (1, 2, C*Samples*T) -> reshape to training format
+        #     # The training code expects k-space as (B, C, 2, Samples, T)
+        #     # Your simulated k-space is (Coils, N_samples_per_frame * N_spokes, N_frames)
+        #     kspace_real_imag = np.stack([kspace_complex.real, kspace_complex.imag]) # (2, C, Samples, T)
+        #     kspace_torch = torch.from_numpy(kspace_real_imag)
+        #     # Add batch and coil dimensions to match trainer. Assuming C=1 from trainer code.
+        #     kspace_torch = kspace_torch.permute(2, 0, 1, 3).unsqueeze(0) # (B, C, 2, Samples, T)
         
-        elif self.model_type == "LSFPNet":
-            # LSFPNet expects complex k-space of shape (coils, samples, time)
-            kspace_torch = torch.from_numpy(kspace_complex)
+        # elif self.model_type == "LSFPNet":
+        #     # LSFPNet expects complex k-space of shape (coils, samples, time)
+        #     kspace_torch = torch.from_numpy(kspace_complex)
         
-        else:
-            raise ValueError(f"Unsupported model_type for SimulatedDataset: {self.model_type}")
+        # else:
+        #     raise ValueError(f"Unsupported model_type for SimulatedDataset: {self.model_type}")
         
         grasp_recon_torch = torch.flip(grasp_recon_torch, dims=[-3])
         grasp_recon_torch = torch.rot90(grasp_recon_torch, k=3, dims=[-3,-1])
@@ -585,6 +595,7 @@ class SimulatedSPFDataset(Dataset):
         grasp_path = os.path.join(sample_dir, f'grasp_spf{self.spokes_per_frame}_frames{self.num_frames}.npy')
         
         if os.path.exists(grasp_path):
+            print("loading grasp image from ", grasp_path)
             grasp_recon = np.load(grasp_path)
 
             # GRASP Recon: (H, W, T) -> (2, T, H, W) [real/imag, time, h, w]
@@ -605,9 +616,6 @@ class SimulatedSPFDataset(Dataset):
         # SELECT TIME WINDOW
         ground_truth_complex = ground_truth_complex[..., self.window]
 
-
-
-        # SIMULATE KSPACE WITH DESIRED SPOKES PER FRAME
         smap_torch = rearrange(torch.tensor(csmaps), 'h w c -> c h w').unsqueeze(0)
         simImg_torch = torch.tensor(ground_truth_complex).to(torch.cfloat)
 

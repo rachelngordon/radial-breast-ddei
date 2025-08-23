@@ -13,7 +13,7 @@ data:
   eval_timeframes: 22
   eval_spokes: 2
   spf_aug: true
-  fpg: 16
+  fpg: 24
 
 # Experiment settings
 experiment:
@@ -24,7 +24,7 @@ dataloader:
   batch_size: 1
   shuffle: false
   num_workers: 2
-  max_subjects: 300
+  max_subjects: 2
   num_random_slices: 1
   slice_idx: 41
   slice_range_start: None
@@ -53,14 +53,14 @@ model:
   losses:
     adj_loss:
       weight: 50000
-    use_ei_loss: true
+    use_ei_loss: false
     mc_loss:
       weight: 1
       metric: "MAE"
     ei_loss:
       temporal_transform: "none"
-      spatial_transform: "diffeo"
-      weight: 1
+      spatial_transform: "rotate"
+      weight: 0
       warmup: 6
       duration: 50
       subsample_ratio_min: 0.7
@@ -72,7 +72,7 @@ model:
 
 # Training settings
 training:
-  epochs: 30
+  epochs: 1
   save_interval: 1
   plot_interval: 20
   device: "cuda"  # or "cpu"

@@ -13,6 +13,7 @@ data:
   eval_timeframes: 18
   eval_spokes: 16
   spf_aug: false
+  weight_accelerations: false
   fpg: 24
   train_spokes_per_frame: 16
 

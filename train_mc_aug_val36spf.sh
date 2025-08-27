@@ -2,11 +2,11 @@
 
 # Parameters
 #SBATCH --cpus-per-task=4
-#SBATCH --error=logs/lsfp_ei_warp_spatial_new_weights_aug_enc_random_slice_val2spf.err
-#SBATCH --output=logs/lsfp_ei_warp_spatial_new_weights_aug_enc_random_slice_val2spf.out
+#SBATCH --error=logs/lsfp_mc_af_aug_val36spf.err
+#SBATCH --output=logs/lsfp_mc_af_aug_val36spf.out
 #SBATCH --exclude=''
 #SBATCH --gpus-per-node=1
-#SBATCH --job-name=lsfp_ei_warp_spatial_new_weights_aug_enc_random_slice_val2spf
+#SBATCH --job-name=lsfp_mc_af_aug_val36spf
 #SBATCH --mem-per-gpu=50000
 #SBATCH --nodes=1
 #SBATCH --ntasks-per-node=1
@@ -21,4 +21,4 @@ source /gpfs/data/karczmar-lab/workspaces/rachelgordon/micromamba/etc/profile.d/
 micromamba activate recon_mri
 
 # Run the training script with srun
-python3 train.py --config configs/config_ei_warp_spatial.yaml --exp_name lsfp_ei_warp_spatial_new_weights_aug_enc_random_slice_val2spf
+python3 train.py --config configs/config_mc_aug_val36spf.yaml --exp_name lsfp_mc_af_aug_val36spf

@@ -289,58 +289,79 @@ def plot_reconstruction_sample(x_recon, title, filename, output_dir, grasp_img=N
     else:
         x_recon_mag = x_recon
 
-    grasp_img_mag = torch.sqrt(grasp_img[:, 0, ...] ** 2 + grasp_img[:, 1, ...] ** 2)
+    print(x_recon_mag.shape)
 
-    if grasp_img_mag.shape[-1] == 320 and grasp_img_mag.shape[-2] == 320:
-        n_timeframes = grasp_img_mag.shape[1]
-    elif grasp_img_mag.shape[-1] == 320 and grasp_img_mag.shape[1] == 320:
-        n_timeframes = grasp_img_mag.shape[-2]
+    n_timeframes = x_recon_mag.shape[-1]
+
+    if grasp_img:
+        grasp_img_mag = torch.sqrt(grasp_img[:, 0, ...] ** 2 + grasp_img[:, 1, ...] ** 2)
+
+        # if grasp_img_mag.shape[-1] == 320 and grasp_img_mag.shape[-2] == 320:
+        #     n_timeframes = grasp_img_mag.shape[1]
+        # elif grasp_img_mag.shape[-1] == 320 and grasp_img_mag.shape[1] == 320:
+        #     n_timeframes = grasp_img_mag.shape[-2]
+        # else:
+        #     n_timeframes = grasp_img_mag.shape[-1]
+
+        fig, axes = plt.subplots(
+            nrows=2,
+            ncols=n_timeframes,
+            figsize=(n_timeframes * 3, 8),
+            squeeze=False,
+        )
+
+        if transform:
+            axes[0, 0].set_ylabel("Transformed Image", fontsize=14, labelpad=10)
+            axes[1, 0].set_ylabel("Model Output", fontsize=14, labelpad=10)
+
+            os.makedirs(os.path.join(output_dir, "transforms"), exist_ok=True)
+
+        else:
+            
+            axes[0, 0].set_ylabel("Model Output", fontsize=14, labelpad=10)
+            axes[1, 0].set_ylabel("GRASP Benchmark", fontsize=14, labelpad=10)
+
+
     else:
-        n_timeframes = grasp_img_mag.shape[-1]
+        fig, axes = plt.subplots(
+            nrows=1,
+            ncols=n_timeframes,
+            figsize=(n_timeframes * 3, 4),
+            squeeze=True,
+        )
 
-    fig, axes = plt.subplots(
-        nrows=2,
-        ncols=n_timeframes,
-        figsize=(n_timeframes * 3, 8),
-        squeeze=False,
-    )
-
-    if transform:
-        axes[0, 0].set_ylabel("Transformed Image", fontsize=14, labelpad=10)
-        axes[1, 0].set_ylabel("Model Output", fontsize=14, labelpad=10)
-
-        os.makedirs(os.path.join(output_dir, "transforms"), exist_ok=True)
-
-    else:
-        
-        axes[0, 0].set_ylabel("Model Output", fontsize=14, labelpad=10)
-        axes[1, 0].set_ylabel("GRASP Benchmark", fontsize=14, labelpad=10)
     
     for t in range(n_timeframes):
-
+        
         if x_recon_mag.shape[1] == n_timeframes:
             img = x_recon_mag[batch_idx, t, :, :].cpu().detach().numpy()
         else:
             img = x_recon_mag[batch_idx, ..., t].cpu().detach().numpy()
 
-        if grasp_img_mag.shape[1] == n_timeframes:
-            grasp_img = grasp_img_mag[batch_idx, t, :, :].cpu().detach().numpy()
-        elif grasp_img_mag.shape[-1] == n_timeframes:
-            grasp_img = grasp_img_mag[batch_idx, :, :, t].cpu().detach().numpy()
-        else:
-            grasp_img = grasp_img_mag[batch_idx, :, t, :].cpu().detach().numpy()
+        if grasp_img:
+            if grasp_img_mag.shape[1] == n_timeframes:
+                grasp_img = grasp_img_mag[batch_idx, t, :, :].cpu().detach().numpy()
+            elif grasp_img_mag.shape[-1] == n_timeframes:
+                grasp_img = grasp_img_mag[batch_idx, :, :, t].cpu().detach().numpy()
+            else:
+                grasp_img = grasp_img_mag[batch_idx, :, t, :].cpu().detach().numpy()
 
-        ax1 = axes[0, t]
-        # ax1.imshow(np.rot90(img, 2), cmap="gray")
+
+            ax1 = axes[0, t]
+        else:
+            ax1 = axes[t]
+
         ax1.imshow(img, cmap="gray")
         ax1.set_title(f"t = {t}")
         ax1.set_xticks([])
         ax1.set_yticks([])
-        ax2 = axes[1, t]
-        ax2.imshow(grasp_img, cmap="gray")
-        ax2.set_title(f"t = {t}")
-        ax2.set_xticks([])
-        ax2.set_yticks([])
+
+        if grasp_img:
+            ax2 = axes[1, t]
+            ax2.imshow(grasp_img, cmap="gray")
+            ax2.set_title(f"t = {t}")
+            ax2.set_xticks([])
+            ax2.set_yticks([])
     
     fig.suptitle(title, fontsize=16)
     plt.tight_layout(rect=[0, 0.03, 1, 0.95])

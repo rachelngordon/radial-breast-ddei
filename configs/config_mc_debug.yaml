@@ -82,6 +82,8 @@ training:
 evaluation:
   num_samples: 15
   simulated_dataset_path: "/ess/scratch/scratch1/rachelgordon/dro_dataset"
+  chunk_size: 24
+  chunk_overlap: 12
 
 debugging:
   calc_step_0: false

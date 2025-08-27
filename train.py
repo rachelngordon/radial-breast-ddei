@@ -14,7 +14,7 @@ from ei import EILoss
 from mc import MCLoss
 from lsfpnet_encoding import LSFPNet, ArtifactRemovalLSFPNet
 from radial_lsfp import MCNUFFT
-from utils import prep_nufft, log_gradient_stats, plot_enhancement_curve, get_cosine_ei_weight, plot_reconstruction_sample, get_git_commit, save_checkpoint, load_checkpoint, to_torch_complex, GRASPRecon
+from utils import prep_nufft, log_gradient_stats, plot_enhancement_curve, get_cosine_ei_weight, plot_reconstruction_sample, get_git_commit, save_checkpoint, load_checkpoint, to_torch_complex, GRASPRecon, sliding_window_inference
 from eval import eval_grasp, eval_sample
 import csv
 import math
@@ -128,6 +128,9 @@ Ng = config["data"]["fpg"]
 
 N_spokes = int(config["data"]["total_spokes"] / N_time)
 N_full = config['data']['height'] * math.pi / 2
+
+eval_chunk_size = config["evaluation"]["chunk_size"]
+eval_chunk_overlap = config["evaluation"]["chunk_overlap"]
 
 
 if config["data"]["train_spokes_per_frame"] != "None":
@@ -465,9 +468,6 @@ if args.from_checkpoint == False and config['debugging']['calc_step_0'] == True:
                 kspace_path = measured_kspace[0]
 
                 # SIMULATE KSPACE
-                print("ground_truth_for_physics: ", ground_truth_for_physics.shape)
-                print("csmap: ", csmap.shape)
-                print("eval_physics.ktraj: ", eval_physics.ktraj.shape)
                 measured_kspace = eval_physics(False, ground_truth_for_physics, csmap)
 
                 # save k-space 
@@ -496,9 +496,14 @@ if args.from_checkpoint == False and config['debugging']['calc_step_0'] == True:
             else: 
                 acceleration_encoding = None
 
-            x_recon, adj_loss, *_ = model(
+            if N_time_eval > eval_chunk_size:
+                print("Performing sliding window eval...")
+                x_recon, adj_loss = sliding_window_inference(H, W, N_samples, N_spokes, N_time_eval, eval_chunk_size, eval_chunk_overlap, measured_kspace, csmap, acceleration_encoding, model, epoch="val0", device=device)  
+            else:
+                x_recon, adj_loss, *_ = model(
                 measured_kspace.to(device), eval_physics, csmap, acceleration_encoding, epoch="val0", norm=config['model']['norm']
-            )
+                )
+            
 
             # compute losses
             initial_val_adj_loss += adj_loss.item()
@@ -811,9 +816,6 @@ else:
                     kspace_path = val_kspace_batch[0]
 
                     # SIMULATE KSPACE
-                    print("ground_truth_for_physics: ", ground_truth_for_physics.shape)
-                    print("val_csmap: ", val_csmap.shape)
-                    print("eval_physics.ktraj: ", eval_physics.ktraj.shape)
                     val_kspace_batch = eval_physics(False, ground_truth_for_physics, val_csmap)
 
                     # save k-space 
@@ -845,10 +847,16 @@ else:
                 else: 
                     acceleration_encoding = None
                     
-
-                val_x_recon, val_adj_loss, *_ = model(
+                if N_time_eval > eval_chunk_size:
+                    print("Performing sliding window eval...")
+                    val_x_recon, val_adj_loss = sliding_window_inference(H, W, N_samples, N_spokes, N_time_eval, eval_chunk_size, eval_chunk_overlap, val_kspace_batch, val_csmap, acceleration_encoding, model, epoch=f"val{epoch}", device=device)  
+                else:
+                    val_x_recon, val_adj_loss, *_ = model(
                     val_kspace_batch.to(device), eval_physics, val_csmap, acceleration_encoding, epoch=f"val{epoch}", norm=config['model']['norm']
-                )
+                    )
+
+
+                
 
                 # compute losses
                 val_running_adj_loss += val_adj_loss.item()
@@ -1251,11 +1259,11 @@ MAIN_EVALUATION_PLAN = [
 # This has a different (lower) total spoke budget.
 
 STRESS_TEST_PLAN = [
-    # {
-    #     "spokes_per_frame": 2,
-    #     "num_frames": 144, # 2 * 144 = 288 total spokes
-    #     "description": "Stress test: max temporal points, 2 spokes"
-    # },
+    {
+        "spokes_per_frame": 2,
+        "num_frames": 144, # 2 * 144 = 288 total spokes
+        "description": "Stress test: max temporal points, 2 spokes"
+    },
     {
         "spokes_per_frame": 4,
         "num_frames": 72, # 4 * 72 = 288 total spokes
@@ -1324,10 +1332,6 @@ with torch.no_grad():
         eval_spf_dataset.num_frames = num_frames
         eval_spf_dataset._update_sample_paths()
 
-        print(eval_spf_dataset.spokes_per_frame)
-        print(eval_spf_dataset.num_frames)
-        print(eval_spf_dataset.dro_dir)
-
 
         for csmap, ground_truth, grasp_img, mask, grasp_path in tqdm(eval_spf_loader, desc="Variable Spokes Per Frame Evaluation"):
 
@@ -1335,18 +1339,11 @@ with torch.no_grad():
             csmap = csmap.squeeze(0).to(device)   # Remove batch dim
             ground_truth = ground_truth.to(device) # Shape: (1, 2, T, H, W)
 
-            print("ground truth shape: ", ground_truth.shape)
-            print("csmap shape: ", csmap.shape)
-
 
             # SIMULATE KSPACE
             ktraj, dcomp, nufft_ob, adjnufft_ob = prep_nufft(N_samples, spokes, num_frames)
             physics = MCNUFFT(nufft_ob.to(device), adjnufft_ob.to(device), ktraj.to(device), dcomp.to(device))
 
-
-            print("ground_truth: ", ground_truth.shape)
-            print("csmap: ", csmap.shape)
-            print("physics.ktraj: ", physics.ktraj.shape)
 
             sim_kspace = physics(False, ground_truth, csmap)
 
@@ -1375,10 +1372,13 @@ with torch.no_grad():
 
             grasp_img = grasp_img.to(device)
 
-            
-            x_recon, *_ = model(
-                kspace.to(device), physics, csmap, acceleration_encoding, epoch=None, norm=config['model']['norm']
-            )
+            if num_frames > eval_chunk_size:
+                print("Performing sliding window eval...")
+                x_recon, _ = sliding_window_inference(H, W, N_samples, spokes, num_frames, eval_chunk_size, eval_chunk_overlap, kspace, csmap, acceleration_encoding, model, epoch=None, device=device)  
+            else:
+                x_recon, *_ = model(
+                    kspace.to(device), physics, csmap, acceleration_encoding, epoch=None, norm=config['model']['norm']
+                )
 
             ground_truth = torch.stack([ground_truth.real, ground_truth.imag], dim=1)
             ground_truth = rearrange(ground_truth, 'b i h w t -> b i t h w')
@@ -1515,10 +1515,15 @@ with torch.no_grad():
 
             grasp_img = grasp_img.to(device)
 
-
-            x_recon, *_ = model(
+            if num_frames > eval_chunk_size:
+                print("Performing sliding window eval...")
+                x_recon, _ = sliding_window_inference(H, W, N_samples, spokes, num_frames, eval_chunk_size, eval_chunk_overlap, kspace, csmap, acceleration_encoding, model, epoch=None, device=device)  
+            else:
+                x_recon, *_ = model(
                 kspace.to(device), physics, csmap, acceleration_encoding, epoch=None, norm=config['model']['norm']
-            )
+                )
+
+            
 
             ground_truth = torch.stack([ground_truth.real, ground_truth.imag], dim=1)
             ground_truth = rearrange(ground_truth, 'b i h w t -> b i t h w')

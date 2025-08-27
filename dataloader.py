@@ -401,7 +401,7 @@ class SimulatedSPFDataset(Dataset):
         grasp_path = os.path.join(sample_dir, f'grasp_spf{self.spokes_per_frame}_frames{self.num_frames}.npy')
         
         if os.path.exists(grasp_path):
-            print("loading grasp image from ", grasp_path)
+            # print("loading grasp image from ", grasp_path)
             grasp_recon = np.load(grasp_path)
 
             # GRASP Recon: (H, W, T) -> (2, T, H, W) [real/imag, time, h, w]
@@ -413,13 +413,11 @@ class SimulatedSPFDataset(Dataset):
             grasp_recon_torch = torch.rot90(grasp_recon_torch, k=3, dims=[-3,-1])
 
         else:
-            print("setting grasp img to zero")
+            # print("setting grasp img to zero")
             grasp_recon_torch = 0
 
 
         ground_truth_complex = dro['ground_truth_images']
-
-        print("loaded ground truth shape: ", ground_truth_complex.shape)
 
         # SELECT TIME WINDOW
         # ground_truth_complex = ground_truth_complex[..., self.window]

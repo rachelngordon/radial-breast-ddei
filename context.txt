@@ -1,4 +1,4 @@
-=== train_fpg.py ===
+=== train.py ===
 import argparse
 import json
 import os
@@ -21,6 +21,8 @@ from eval import eval_grasp, eval_sample
 import csv
 import math
 import random
+import time 
+import seaborn as sns
 parser = argparse.ArgumentParser(description="Train ReconResNet model.")
 parser.add_argument(
     "--config",
@@ -84,11 +86,12 @@ device = torch.device(config["training"]["device"])
 start_epoch = 1
 model_type = config["model"]["name"]
 H, W = config["data"]["height"], config["data"]["width"]
-N_time, N_samples, N_coils, N_time_eval = (
+N_time, N_samples, N_coils, N_time_eval, N_spokes_eval = (
     config["data"]["timeframes"],
     config["data"]["samples"],
     config["data"]["coils"],
-    config["data"]["eval_timeframes"]
+    config["data"]["eval_timeframes"],
+    config["data"]["eval_spokes"]
 )
 Ng = config["data"]["fpg"] 
 N_spokes = int(config["data"]["total_spokes"] / N_time)
@@ -110,6 +113,7 @@ if config['dataloader']['slice_range_start'] == "None" or config['dataloader']['
         dataset_key=config["data"]["dataset_key"],
         file_pattern="*.h5",
         slice_idx=config["dataloader"]["slice_idx"],
+        num_random_slices=config["dataloader"].get("num_random_slices", None),
         N_time=N_time,
         N_coils=N_coils,
         spf_aug=config['data']['spf_aug'],
@@ -121,6 +125,7 @@ else:
         dataset_key=config["data"]["dataset_key"],
         file_pattern="*.h5",
         slice_idx=range(config['dataloader']['slice_range_start'], config['dataloader']['slice_range_end']),
+        num_random_slices=config["dataloader"].get("num_random_slices", None),
         N_time=N_time,
         N_coils=N_coils,
         spf_aug=config['data']['spf_aug'],
@@ -128,20 +133,24 @@ else:
 val_dro_dataset = SimulatedDataset(
     root_dir=config["evaluation"]["simulated_dataset_path"], 
     model_type=model_type, 
-    patient_ids=val_dro_patient_ids)
+    patient_ids=val_dro_patient_ids,
+    spokes_per_frame=N_spokes_eval,
+    num_frames=N_time_eval)
 train_loader = DataLoader(
     train_dataset,
     batch_size=config["dataloader"]["batch_size"],
     shuffle=config["dataloader"]["shuffle"],
     num_workers=config["dataloader"]["num_workers"],
+    pin_memory=True,
 )
 val_dro_loader = DataLoader(
     val_dro_dataset,
     batch_size=config["dataloader"]["batch_size"],
     shuffle=config["dataloader"]["shuffle"],
     num_workers=config["dataloader"]["num_workers"],
+    pin_memory=True,
 )
-eval_ktraj, eval_dcomp, eval_nufft_ob, eval_adjnufft_ob = prep_nufft(N_samples, N_spokes, N_time_eval)
+eval_ktraj, eval_dcomp, eval_nufft_ob, eval_adjnufft_ob = prep_nufft(N_samples, N_spokes_eval, N_time_eval)
 eval_ktraj = eval_ktraj.to(device)
 eval_dcomp = eval_dcomp.to(device)
 eval_nufft_ob = eval_nufft_ob.to(device)
@@ -183,6 +192,8 @@ if use_ei_loss:
         ei_loss_fn = EILoss(monophasic_warp, model_type=model_type)
     elif config['model']['losses']['ei_loss']['temporal_transform'] == "noise":
         ei_loss_fn = EILoss(temp_noise, model_type=model_type)
+    elif config['model']['losses']['ei_loss']['temporal_transform'] == "warp_subsample":
+        ei_loss_fn = EILoss((subsample | monophasic_warp) | (diffeo | rotate), model_type=model_type)
     elif config['model']['losses']['ei_loss']['temporal_transform'] == "none":
         if config['model']['losses']['ei_loss']['spatial_transform'] == "rotate":
             ei_loss_fn = EILoss(rotate, model_type=model_type)
@@ -190,6 +201,8 @@ if use_ei_loss:
             ei_loss_fn = EILoss(diffeo, model_type=model_type)
         else:
             ei_loss_fn = EILoss(rotate | diffeo, model_type=model_type)
+    elif config['model']['losses']['ei_loss']['temporal_transform'] == "all" and config['model']['losses']['ei_loss']['spatial_transform'] == "all":
+        ei_loss_fn = EILoss((subsample | monophasic_warp | temp_noise) | (diffeo | rotate), model_type=model_type)
     else:
         raise(ValueError, "Unsupported Temporal Transform.")
 if args.from_checkpoint:
@@ -306,10 +319,14 @@ if args.from_checkpoint == False and config['debugging']['calc_step_0'] == True:
         gammas.append(gamma.item())
         lambda_steps.append(lambda_step.item())
         for measured_kspace, csmap, ground_truth, grasp_img, mask, *_ in tqdm(val_dro_loader, desc="Step 0 Validation Evaluation"):
-            measured_kspace = measured_kspace.to(device)
-            csmap = csmap.to(device)
-            measured_kspace = measured_kspace.squeeze(0).to(device) # Remove batch dim
             csmap = csmap.squeeze(0).to(device)   # Remove batch dim
+            ground_truth = ground_truth.to(device) # Shape: (1, 2, T, H, W)
+            if type(measured_kspace) is list:
+                ground_truth_for_physics = rearrange(to_torch_complex(ground_truth), 'b t h w -> b h w t')
+                kspace_path = measured_kspace[0]
+                measured_kspace = eval_physics(False, ground_truth_for_physics, csmap)
+                np.save(kspace_path, measured_kspace.cpu().numpy())
+            measured_kspace = measured_kspace.squeeze(0).to(device) # Remove batch dim
             N_spokes = eval_ktraj.shape[1] / config['data']['samples']
             acceleration = torch.tensor([N_full / int(N_spokes)], dtype=torch.float, device=device)
             if config['model']['encode_acceleration']:
@@ -386,6 +403,9 @@ else:
         train_loader_tqdm = tqdm(
             train_loader, desc=f"Epoch {epoch}/{epochs}  Training", unit="batch"
         )
+        if hasattr(train_dataset, 'resample_slices'):
+            print(f"Epoch {epoch}: Resampling training slices...")
+            train_dataset.resample_slices()
         if use_ei_loss:
             if epoch < warmup + 1:
                 target_w_ei = 0.0
@@ -397,7 +417,20 @@ else:
                 else:
                     target_w_ei = 0.0 # Prevent division by zero
                 print(f"Dynamically calculated target EI weight: {target_w_ei:.4f}")
+            elif epoch > warmup + 1 and args.from_checkpoint == True:
+                if config['model']['losses']['ei_loss']['temporal_transform'] == "subsample":
+                    if config['model']['losses']['ei_loss']['spatial_transform'] == "none":
+                        target_w_ei = 1071983.5251
+                elif config['model']['losses']['ei_loss']['temporal_transform'] == "warp":
+                    target_w_ei = 1045141.4724
+                elif config['model']['losses']['ei_loss']['temporal_transform'] == "none":
+                    if config['model']['losses']['ei_loss']['spatial_transform'] == "rotate":
+                        target_w_ei = 592169.4663
+                    elif config['model']['losses']['ei_loss']['spatial_transform'] == "diffeo":
+                        target_w_ei = 714774.6359
+                pass
         for measured_kspace, csmap, grasp_img, N_samples, N_spokes, N_time in train_loader_tqdm:  # measured_kspace shape: (B, C, I, S, T)
+            start = time.time()
             measured_kspace = to_torch_complex(measured_kspace).squeeze()
             measured_kspace = rearrange(measured_kspace, 't co sp sam -> co (sp sam) t')
             if N_time > Ng:
@@ -417,10 +450,10 @@ else:
                 nufft_ob = nufft_ob.to(device)
                 adjnufft_ob = adjnufft_ob.to(device)
                 physics = MCNUFFT(nufft_ob, adjnufft_ob, ktraj, dcomp)
+            iteration_count += 1
             optimizer.zero_grad()
             csmap = csmap.to(device).to(measured_kspace.dtype)
             acceleration = torch.tensor([N_full / int(N_spokes)], dtype=torch.float, device=device)
-            print("AF: ", acceleration)
             if config['model']['encode_acceleration']:
                 acceleration_encoding = acceleration
             else: 
@@ -465,6 +498,8 @@ else:
                 )
             torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
             optimizer.step()
+            end = time.time()
+            print("time for one iteration: ", end-start)
         epoch_train_mc_loss = running_mc_loss / len(train_loader)
         train_mc_losses.append(epoch_train_mc_loss)
         weighted_train_mc_losses.append(epoch_train_mc_loss*mc_loss_weight)
@@ -496,9 +531,14 @@ else:
         )
         with torch.no_grad():
             for val_kspace_batch, val_csmap, val_ground_truth, val_grasp_img, val_mask in tqdm(val_dro_loader):
-                val_kspace_batch = val_kspace_batch.squeeze(0).to(device) # Remove batch dim
                 val_csmap = val_csmap.squeeze(0).to(device)   # Remove batch dim
                 val_ground_truth = val_ground_truth.to(device) # Shape: (1, 2, T, H, W)
+                if type(val_kspace_batch) is list:
+                    ground_truth_for_physics = rearrange(to_torch_complex(val_ground_truth), 'b t h w -> b h w t')
+                    kspace_path = val_kspace_batch[0]
+                    val_kspace_batch = eval_physics(False, ground_truth_for_physics, val_csmap)
+                    np.save(kspace_path, val_kspace_batch)
+                val_kspace_batch = val_kspace_batch.squeeze(0).to(device) # Remove batch dim
                 val_grasp_img_tensor = val_grasp_img.to(device)
                 N_spokes = eval_ktraj.shape[1] / config['data']['samples']
                 acceleration = torch.tensor([N_full / int(N_spokes)], dtype=torch.float, device=device)
@@ -604,132 +644,63 @@ else:
             model_save_path = os.path.join(output_dir, f'{exp_name}_model.pth')
             save_checkpoint(model, optimizer, epoch + 1, train_curves, val_curves, eval_curves, model_save_path)
             print(f'Model saved to {model_save_path}')
-            plt.figure()
-            plt.plot(train_mc_losses, label="Training MC Loss")
-            plt.plot(val_mc_losses, label="Validation MC Loss")
-            plt.xlabel("Epoch")
-            plt.ylabel("MC Loss")
-            plt.title("Measurement Consistency Loss")
-            plt.legend()
-            plt.grid(True)
-            plt.savefig(os.path.join(output_dir, "mc_losses.png"))
+            sns.set_style("whitegrid")
+            fig, axes = plt.subplots(2, 3, figsize=(18, 10))
+            sns.lineplot(x=range(len(train_adj_losses)), y=train_adj_losses, ax=axes[0, 0])
+            axes[0, 0].set_title("Training Adjoint Loss")
+            axes[0, 0].set_xlabel("Epoch")
+            axes[0, 0].set_ylabel("Adjoint Loss")
+            sns.lineplot(x=range(len(train_mc_losses)), y=train_mc_losses, ax=axes[0, 1])
+            axes[0, 1].set_title("Training MC Loss")
+            axes[0, 1].set_xlabel("Epoch")
+            axes[0, 1].set_ylabel("MC Loss")
+            sns.lineplot(x=range(len(train_ei_losses)), y=train_ei_losses, ax=axes[0, 2])
+            axes[0, 2].set_title("Training EI Loss")
+            axes[0, 2].set_xlabel("Epoch")
+            axes[0, 2].set_ylabel("EI Loss")
+            sns.lineplot(x=range(len(val_adj_losses)), y=val_adj_losses, ax=axes[1, 0], color='orange')
+            axes[1, 0].set_title(f"Validation Adjoint Loss ({N_spokes_eval} spokes/frame)")
+            axes[1, 0].set_xlabel("Epoch")
+            axes[1, 0].set_ylabel("Adjoint Loss")
+            sns.lineplot(x=range(len(val_mc_losses)), y=val_mc_losses, ax=axes[1, 1], color='orange')
+            axes[1, 1].set_title(f"Validation MC Loss ({N_spokes_eval} spokes/frame)")
+            axes[1, 1].set_xlabel("Epoch")
+            axes[1, 1].set_ylabel("MC Loss")
+            sns.lineplot(x=range(len(val_ei_losses)), y=val_ei_losses, ax=axes[1, 2], color='orange')
+            axes[1, 2].set_title(f"Validation EI Loss ({N_spokes_eval} spokes/frame)")
+            axes[1, 2].set_xlabel("Epoch")
+            axes[1, 2].set_ylabel("EI Loss")
+            plt.tight_layout()
+            plt.savefig(os.path.join(output_dir, "losses.png"))
             plt.close()
-            plt.figure()
-            plt.plot(train_mc_losses)
-            plt.xlabel("Epoch")
-            plt.ylabel("MC Loss")
-            plt.title("Training Measurement Consistency Loss")
-            plt.grid(True)
-            plt.savefig(os.path.join(output_dir, "train_mc_losses.png"))
-            plt.close()
-            plt.figure()
-            plt.plot(val_mc_losses)
-            plt.xlabel("Epoch")
-            plt.ylabel("MC Loss")
-            plt.title("Validation Measurement Consistency Loss")
-            plt.grid(True)
-            plt.savefig(os.path.join(output_dir, "val_mc_losses.png"))
-            plt.close()
-            if use_ei_loss:
-                plt.figure()
-                plt.plot(train_ei_losses, label="Training EI Loss")
-                plt.plot(val_ei_losses, label="Validation EI Loss")
-                plt.xlabel("Epoch")
-                plt.ylabel("EI Loss")
-                plt.title("Equivariant Imaging Loss")
-                plt.legend()
-                plt.grid(True)
-                plt.savefig(os.path.join(output_dir, "ei_losses.png"))
-                plt.close()
-                plt.figure()
-                plt.plot(train_ei_losses)
-                plt.xlabel("Epoch")
-                plt.ylabel("EI Loss")
-                plt.title("Training Equivariant Imaging Loss")
-                plt.grid(True)
-                plt.savefig(os.path.join(output_dir, "train_ei_losses.png"))
-                plt.close()
-                plt.figure()
-                plt.plot(val_ei_losses)
-                plt.xlabel("Epoch")
-                plt.ylabel("EI Loss")
-                plt.title("Validation Equivariant Imaging Loss")
-                plt.grid(True)
-                plt.savefig(os.path.join(output_dir, "val_ei_losses.png"))
-                plt.close()
-            plt.figure()
-            plt.plot(train_adj_losses, label="Training Adjoint Loss")
-            plt.plot(val_adj_losses, label="Validation Adjoint Loss")
-            plt.xlabel("Epoch")
-            plt.ylabel("Adjoint Loss")
-            plt.title("CNN Adjoint Loss")
-            plt.legend()
-            plt.grid(True)
-            plt.savefig(os.path.join(output_dir, "adj_losses.png"))
-            plt.close()
-            plt.figure()
-            plt.plot(train_adj_losses)
-            plt.xlabel("Epoch")
-            plt.ylabel("Adjoint Loss")
-            plt.title("Training CNN Adjoint Loss")
-            plt.grid(True)
-            plt.savefig(os.path.join(output_dir, "train_adj_losses.png"))
-            plt.close()
-            plt.figure()
-            plt.plot(val_adj_losses)
-            plt.xlabel("Epoch")
-            plt.ylabel("Adjoint Loss")
-            plt.title("Validation CNN Adjoint Loss")
-            plt.grid(True)
-            plt.savefig(os.path.join(output_dir, "val_adj_losses.png"))
-            plt.close()
-            plt.figure()
-            plt.plot(lambda_Ls)
-            plt.xlabel("Epoch")
-            plt.ylabel("Lambda_L Value")
-            plt.title("Lambda_L During Training")
-            plt.grid(True)
-            plt.savefig(os.path.join(output_dir, "lambda_L.png"))
-            plt.close()
-            plt.figure()
-            plt.plot(lambda_Ss)
-            plt.xlabel("Epoch")
-            plt.ylabel("Lambda_S Value")
-            plt.title("Lambda_S During Training")
-            plt.grid(True)
-            plt.savefig(os.path.join(output_dir, "lambda_S.png"))
-            plt.close()
-            plt.figure()
-            plt.plot(lambda_spatial_Ls)
-            plt.xlabel("Epoch")
-            plt.ylabel("Lambda_spatial_L Value")
-            plt.title("Lambda_spatial_L During Training")
-            plt.grid(True)
-            plt.savefig(os.path.join(output_dir, "lambda_spatial_L.png"))
-            plt.close()
-            plt.figure()
-            plt.plot(lambda_spatial_Ss)
-            plt.xlabel("Epoch")
-            plt.ylabel("Lambda_spatial_S Value")
-            plt.title("Lambda_spatial_S During Training")
-            plt.grid(True)
-            plt.savefig(os.path.join(output_dir, "lambda_spatial_S.png"))
-            plt.close()
-            plt.figure()
-            plt.plot(gammas)
-            plt.xlabel("Epoch")
-            plt.ylabel("Gamma Value")
-            plt.title("Step Size During Training")
-            plt.grid(True)
-            plt.savefig(os.path.join(output_dir, "gamma.png"))
-            plt.close()
-            plt.figure()
-            plt.plot(lambda_steps)
-            plt.xlabel("Epoch")
-            plt.ylabel("Lambda_step Value")
-            plt.title("Lambda_step During Training")
-            plt.grid(True)
-            plt.savefig(os.path.join(output_dir, "lambda_step.png"))
+            sns.set_style("whitegrid")
+            fig, axes = plt.subplots(2, 3, figsize=(18, 10))
+            sns.lineplot(x=range(len(lambda_Ls)), y=lambda_Ls, ax=axes[0, 0])
+            axes[0, 0].set_title("Lambda_L Parameter Value")
+            axes[0, 0].set_xlabel("Epoch")
+            axes[0, 0].set_ylabel("Lambda_L")
+            sns.lineplot(x=range(len(lambda_Ss)), y=lambda_Ss, ax=axes[0, 1])
+            axes[0, 1].set_title("Lambda_S Parameter Value")
+            axes[0, 1].set_xlabel("Epoch")
+            axes[0, 1].set_ylabel("Lambda_S")
+            sns.lineplot(x=range(len(lambda_spatial_Ls)), y=lambda_spatial_Ls, ax=axes[0, 2])
+            axes[0, 2].set_title("Spatial Lambda_L Parameter Value")
+            axes[0, 2].set_xlabel("Epoch")
+            axes[0, 2].set_ylabel("Spatial Lambda_L")
+            sns.lineplot(x=range(len(lambda_spatial_Ss)), y=lambda_spatial_Ss, ax=axes[1, 0])
+            axes[1, 0].set_title("Spatial Lambda_S Parameter Value")
+            axes[1, 0].set_xlabel("Epoch")
+            axes[1, 0].set_ylabel("Spatial Lambda_S")
+            sns.lineplot(x=range(len(gammas)), y=gammas, ax=axes[1, 1])
+            axes[1, 1].set_title("Gamma Parameter Value")
+            axes[1, 1].set_xlabel("Epoch")
+            axes[1, 1].set_ylabel("Gamma")
+            sns.lineplot(x=range(len(lambda_steps)), y=lambda_steps, ax=axes[1, 2])
+            axes[1, 2].set_title("Lambda Step Parameter Value")
+            axes[1, 2].set_xlabel("Epoch")
+            axes[1, 2].set_ylabel("Lambda Step")
+            plt.tight_layout()
+            plt.savefig(os.path.join(output_dir, "parameters.png"))
             plt.close()
             plt.figure()
             plt.plot(weighted_train_mc_losses, label="MC Loss")
@@ -742,37 +713,35 @@ else:
             plt.grid(True)
             plt.savefig(os.path.join(output_dir, "weighted_losses.png"))
             plt.close()
-            plt.figure()
-            plt.plot(eval_ssims)
-            plt.xlabel("Epoch")
-            plt.ylabel("SSIM")
-            plt.title("Evaluation SSIM")
-            plt.grid(True)
-            plt.savefig(os.path.join(eval_dir, "eval_ssims.png"))
-            plt.close()
-            plt.figure()
-            plt.plot(eval_psnrs)
-            plt.xlabel("Epoch")
-            plt.ylabel("PSNR")
-            plt.title("Evaluation PSNR")
-            plt.grid(True)
-            plt.savefig(os.path.join(eval_dir, "eval_psnrs.png"))
-            plt.close()
-            plt.figure()
-            plt.plot(eval_mses)
-            plt.xlabel("Epoch")
-            plt.ylabel("MSE")
-            plt.title("Evaluation MSE")
-            plt.grid(True)
-            plt.savefig(os.path.join(eval_dir, "eval_mses.png"))
-            plt.close()
-            plt.figure()
-            plt.plot(eval_lpipses)
-            plt.xlabel("Epoch")
-            plt.ylabel("LPIPS")
-            plt.title("Evaluation LPIPS")
-            plt.grid(True)
-            plt.savefig(os.path.join(eval_dir, "eval_lpipses.png"))
+            sns.set_style("whitegrid")
+            fig, axes = plt.subplots(2, 3, figsize=(18, 10))
+            fig.suptitle(f'Evaluation Metrics Over Epochs ({N_spokes_eval} spokes/frame)', fontsize=20)
+            sns.lineplot(x=range(len(eval_ssims)), y=eval_ssims, ax=axes[0, 0])
+            axes[0, 0].set_title("Evaluation SSIM")
+            axes[0, 0].set_xlabel("Epoch")
+            axes[0, 0].set_ylabel("SSIM")
+            sns.lineplot(x=range(len(eval_psnrs)), y=eval_psnrs, ax=axes[0, 1])
+            axes[0, 1].set_title("Evaluation PSNR")
+            axes[0, 1].set_xlabel("Epoch")
+            axes[0, 1].set_ylabel("PSNR")
+            sns.lineplot(x=range(len(eval_mses)), y=eval_mses, ax=axes[0, 2])
+            axes[0, 2].set_title("Evaluation Image MSE")
+            axes[0, 2].set_xlabel("Epoch")
+            axes[0, 2].set_ylabel("MSE")
+            sns.lineplot(x=range(len(eval_lpipses)), y=eval_lpipses, ax=axes[1, 0])
+            axes[1, 0].set_title("Evaluation LPIPS")
+            axes[1, 0].set_xlabel("Epoch")
+            axes[1, 0].set_ylabel("LPIPS")
+            sns.lineplot(x=range(len(eval_dc_maes)), y=eval_dc_maes, ax=axes[1, 1])
+            axes[1, 1].set_title("Evaluation k-space MAE")
+            axes[1, 1].set_xlabel("Epoch")
+            axes[1, 1].set_ylabel("MAE")
+            sns.lineplot(x=range(len(eval_curve_corrs)), y=eval_curve_corrs, ax=axes[1, 2])
+            axes[1, 2].set_title("Tumor Enhancement Curve Correlation")
+            axes[1, 2].set_xlabel("Epoch")
+            axes[1, 2].set_ylabel("Pearson Correlation Coefficient")
+            plt.tight_layout(rect=[0, 0.03, 1, 0.95])
+            plt.savefig(os.path.join(output_dir, "eval_metrics.png"))
             plt.close()
             plt.figure()
             plt.plot(eval_dc_mses)
@@ -781,22 +750,6 @@ else:
             plt.title("Evaluation Data Consistency (MSE)")
             plt.grid(True)
             plt.savefig(os.path.join(eval_dir, "eval_dc_mses.png"))
-            plt.close()
-            plt.figure()
-            plt.plot(eval_dc_maes)
-            plt.xlabel("Epoch")
-            plt.ylabel("k-space MAE")
-            plt.title("Evaluation Data Consistency (MAE)")
-            plt.grid(True)
-            plt.savefig(os.path.join(eval_dir, "eval_dc_maes.png"))
-            plt.close()
-            plt.figure()
-            plt.plot(eval_curve_corrs)
-            plt.xlabel("Epoch")
-            plt.ylabel("Pearson Correlation of Tumor Enhancement Curve")
-            plt.title("Pearson Correlation")
-            plt.grid(True)
-            plt.savefig(os.path.join(eval_dir, "eval_curve_correlations.png"))
             plt.close()
         print(
             f"Epoch {epoch}: Training MC Loss: {epoch_train_mc_loss:.6f}, Validation MC Loss: {epoch_val_mc_loss:.6f}"
@@ -966,6 +919,8 @@ with torch.no_grad():
         for csmap, ground_truth, grasp_img, mask, grasp_path in tqdm(eval_spf_loader, desc="Variable Spokes Per Frame Evaluation"):
             csmap = csmap.squeeze(0).to(device)   # Remove batch dim
             ground_truth = ground_truth.to(device) # Shape: (1, 2, T, H, W)
+            print("ground truth shape: ", ground_truth.shape)
+            print("csmap shape: ", csmap.shape)
             ktraj, dcomp, nufft_ob, adjnufft_ob = prep_nufft(N_samples, spokes, num_frames)
             physics = MCNUFFT(nufft_ob.to(device), adjnufft_ob.to(device), ktraj.to(device), dcomp.to(device))
             sim_kspace = physics(False, ground_truth, csmap)
@@ -1141,127 +1096,89 @@ with torch.no_grad():
             f'{np.mean(spf_grasp_dc_maes):.4f} ± {np.std(spf_grasp_dc_maes):.4f}',
             f'{np.mean(spf_grasp_curve_corrs):.4f} ± {np.std(spf_grasp_curve_corrs):.4f}'
             ])
-plt.figure()
-plt.plot(list(spf_recon_ssim.keys()), list(spf_recon_ssim.values()), label="DL Recon", marker='o')
-plt.plot(list(spf_grasp_ssim.keys()), list(spf_grasp_ssim.values()), label="GRASP Recon", marker='o')
-plt.xlabel("Spokes per Frame")
-plt.ylabel("SSIM")
-plt.title("Evaluation SSIM vs Spokes per Frame")
-plt.legend()
-plt.grid(True)
-plt.savefig(os.path.join(eval_dir, "spf_eval_ssim.png"))
+sns.set_style("whitegrid")
+fig, axes = plt.subplots(2, 3, figsize=(18, 10))
+sns.lineplot(x=list(spf_recon_ssim.keys()), 
+             y=list(spf_recon_ssim.values()), 
+             label="DL Recon", 
+             marker='o',
+             ax=axes[0, 0])
+sns.lineplot(x=list(spf_grasp_ssim.keys()), 
+             y=list(spf_grasp_ssim.values()), 
+             label="Standard Recon", 
+             marker='o',
+             ax=axes[0, 0])
+axes[0, 0].set_title("Evaluation SSIM vs Spokes/Frame")
+axes[0, 0].set_xlabel("Epoch")
+axes[0, 0].set_ylabel("SSIM")
+sns.lineplot(x=list(spf_recon_psnr.keys()), 
+             y=list(spf_recon_psnr.values()), 
+             label="DL Recon", 
+             marker='o',
+             ax=axes[0, 1])
+sns.lineplot(x=list(spf_grasp_psnr.keys()), 
+             y=list(spf_grasp_psnr.values()), 
+             label="Standard Recon", 
+             marker='o',
+             ax=axes[0, 1])
+axes[0, 1].set_title("Evaluation PSNR vs Spokes/Frame")
+axes[0, 1].set_xlabel("Epoch")
+axes[0, 1].set_ylabel("PSNR")
+sns.lineplot(x=list(spf_recon_mse.keys()), 
+             y=list(spf_recon_mse.values()), 
+             label="DL Recon", 
+             marker='o',
+             ax=axes[0, 2])
+sns.lineplot(x=list(spf_grasp_mse.keys()), 
+             y=list(spf_grasp_mse.values()), 
+             label="Standard Recon", 
+             marker='o',
+             ax=axes[0, 2])
+axes[0, 2].set_title("Evaluation Image MSE vs Spokes/Frame")
+axes[0, 2].set_xlabel("Epoch")
+axes[0, 2].set_ylabel("MSE")
+sns.lineplot(x=list(spf_recon_lpips.keys()), 
+             y=list(spf_recon_lpips.values()), 
+             label="DL Recon", 
+             marker='o',
+             ax=axes[1, 0])
+sns.lineplot(x=list(spf_grasp_lpips.keys()), 
+             y=list(spf_grasp_lpips.values()), 
+             label="Standard Recon", 
+             marker='o',
+             ax=axes[1, 0])
+axes[1, 0].set_title("Evaluation LPIPS vs Spokes/Frame")
+axes[1, 0].set_xlabel("Epoch")
+axes[1, 0].set_ylabel("LPIPS")
+sns.lineplot(x=list(spf_recon_dc_mae.keys()), 
+             y=list(spf_recon_dc_mae.values()), 
+             label="DL Recon", 
+             marker='o',
+             ax=axes[1, 1])
+sns.lineplot(x=list(spf_grasp_dc_mae.keys()), 
+             y=list(spf_grasp_dc_mae.values()), 
+             label="Standard Recon", 
+             marker='o',
+             ax=axes[1, 1])
+axes[1, 1].set_title("Evaluation k-space MAE vs Spokes/Frame")
+axes[1, 1].set_xlabel("Epoch")
+axes[1, 1].set_ylabel("MAE")
+sns.lineplot(x=list(spf_recon_corr.keys()), 
+             y=list(spf_recon_corr.values()), 
+             label="DL Recon", 
+             marker='o',
+             ax=axes[1, 2])
+sns.lineplot(x=list(spf_grasp_corr.keys()), 
+             y=list(spf_grasp_corr.values()), 
+             label="Standard Recon", 
+             marker='o',
+             ax=axes[1, 2])
+axes[1, 2].set_title("Tumor Enhancement Curve Correlation vs Spokes/Frame")
+axes[1, 2].set_xlabel("Epoch")
+axes[1, 2].set_ylabel("Pearson Correlation Coefficient")
+plt.tight_layout()
+plt.savefig(os.path.join(output_dir, "spf_eval_metrics.png"))
 plt.close()
-plt.figure()
-plt.plot(list(spf_recon_psnr.keys()), list(spf_recon_psnr.values()), label="DL Recon", marker='o')
-plt.plot(list(spf_grasp_psnr.keys()), list(spf_grasp_psnr.values()), label="GRASP Recon", marker='o')
-plt.xlabel("Spokes per Frame")
-plt.ylabel("PSNR")
-plt.title("Evaluation PSNR vs Spokes per Frame")
-plt.legend()
-plt.grid(True)
-plt.savefig(os.path.join(eval_dir, "spf_eval_psnr.png"))
-plt.close()
-plt.figure()
-plt.plot(list(spf_recon_mse.keys()), list(spf_recon_mse.values()), label="DL Recon", marker='o')
-plt.plot(list(spf_grasp_mse.keys()), list(spf_grasp_mse.values()), label="GRASP Recon", marker='o')
-plt.xlabel("Spokes per Frame")
-plt.ylabel("MSE")
-plt.title("Evaluation Image MSE vs Spokes per Frame")
-plt.legend()
-plt.grid(True)
-plt.savefig(os.path.join(eval_dir, "spf_eval_mse.png"))
-plt.close()
-plt.figure()
-plt.plot(list(spf_recon_lpips.keys()), list(spf_recon_lpips.values()), label="DL Recon", marker='o')
-plt.plot(list(spf_grasp_lpips.keys()), list(spf_grasp_lpips.values()), label="GRASP Recon", marker='o')
-plt.xlabel("Spokes per Frame")
-plt.ylabel("LPIPS")
-plt.title("Evaluation LPIPS vs Spokes per Frame")
-plt.legend()
-plt.grid(True)
-plt.savefig(os.path.join(eval_dir, "spf_eval_lpips.png"))
-plt.close()
-plt.figure()
-plt.plot(list(spf_recon_dc_mse.keys()), list(spf_recon_dc_mse.values()), label="DL Recon", marker='o')
-plt.plot(list(spf_grasp_dc_mse.keys()), list(spf_grasp_dc_mse.values()), label="GRASP Recon", marker='o')
-plt.xlabel("Spokes per Frame")
-plt.ylabel("k-space MSE")
-plt.title("Data Consistency Evaluation (MSE) vs Spokes per Frame")
-plt.legend()
-plt.grid(True)
-plt.savefig(os.path.join(eval_dir, "spf_eval_dc_mse.png"))
-plt.close()
-plt.figure()
-plt.plot(list(spf_recon_dc_mae.keys()), list(spf_recon_dc_mae.values()), label="DL Recon", marker='o')
-plt.plot(list(spf_grasp_dc_mae.keys()), list(spf_grasp_dc_mae.values()), label="GRASP Recon", marker='o')
-plt.xlabel("Spokes per Frame")
-plt.ylabel("k-space MAE")
-plt.title("Data Consistency Evaluation (MAE) vs Spokes per Frame")
-plt.legend()
-plt.grid(True)
-plt.savefig(os.path.join(eval_dir, "spf_eval_dc_mae.png"))
-plt.close()
-plt.figure()
-plt.plot(list(spf_recon_corr.keys()), list(spf_recon_corr.values()), label="DL Recon", marker='o')
-plt.plot(list(spf_grasp_corr.keys()), list(spf_grasp_corr.values()), label="GRASP Recon", marker='o')
-plt.xlabel("Spokes per Frame")
-plt.ylabel("Pearson Correlation")
-plt.title("Pearson Correlation of Tumor Enhancement Curve vs Spokes per Frame")
-plt.legend()
-plt.grid(True)
-plt.savefig(os.path.join(eval_dir, "spf_eval_curve_correlations.png"))
-plt.close()
-
-=== radial_lsfp.py ===
-import torch
-import torch.nn as nn
-import numpy as np
-from time import time
-dtype = torch.complex64
-class MCNUFFT(nn.Module):
-    def __init__(self, nufft_ob, adjnufft_ob, ktraj, dcomp):
-        super(MCNUFFT, self).__init__()
-        self.nufft_ob = nufft_ob
-        self.adjnufft_ob = adjnufft_ob
-        self.ktraj = torch.squeeze(ktraj)
-        self.dcomp = torch.squeeze(dcomp)
-    def forward(self, inv, data, smaps):
-        data = torch.squeeze(data)  # delete redundant dimension
-        Nx = smaps.shape[2]
-        Ny = smaps.shape[3]
-        if inv:  # adjoint nufft
-            smaps = smaps.to(dtype)
-            if len(data.shape) > 2:  # multi-frame
-                x = torch.zeros([Nx, Ny, data.shape[2]], dtype=dtype)
-                for ii in range(0, data.shape[2]):
-                    kd = data[:, :, ii]
-                    k = self.ktraj[:, :, ii]
-                    d = self.dcomp[:, ii]
-                    kd = kd.unsqueeze(0)
-                    d = d.unsqueeze(0).unsqueeze(0)
-                    tt1 = time()
-                    x_temp = self.adjnufft_ob(kd * d, k, smaps=smaps)
-                    x[:, :, ii] = torch.squeeze(x_temp) / np.sqrt(Nx * Ny)
-                    tt2 = time()
-            else:  # single frame
-                kd = data.unsqueeze(0)
-                d = self.dcomp.unsqueeze(0).unsqueeze(0)
-                x = self.adjnufft_ob(kd * d, self.ktraj, smaps=smaps)
-                x = torch.squeeze(x) / np.sqrt(Nx * Ny)
-        else:  # forward nufft
-            if len(data.shape) > 2:  # multi-frame
-                x = torch.zeros([smaps.shape[1], self.ktraj.shape[1], data.shape[-1]], dtype=dtype)
-                for ii in range(0, data.shape[-1]):
-                    image = data[:, :, ii]
-                    k = self.ktraj[:, :, ii]
-                    image = image.unsqueeze(0).unsqueeze(0)
-                    x_temp = self.nufft_ob(image, k, smaps=smaps)
-                    x[:, :, ii] = torch.squeeze(x_temp) / np.sqrt(Nx * Ny)
-            else:  # single frame
-                image = data.unsqueeze(0).unsqueeze(0)
-                x = self.nufft_ob(image, self.ktraj, smaps=smaps)
-                x = torch.squeeze(x) / np.sqrt(Nx * Ny)
-        return x
 
 === lsfpnet_encoding.py ===
 import os
@@ -1345,17 +1262,14 @@ class BasicBlock(nn.Module):
         noise_std = 1e-3 # A small standard deviation for the noise
         noise = torch.randn_like(svd_input_mag) * noise_std
         stable_svd_input = svd_input_mag + noise #epsilon
-        A = stable_svd_input
-        alpha = 1e-6 # This is a hyperparameter you can tune
-        m, n = A.shape
-        device = A.device
-        dtype = A.dtype
-        identity_aug = torch.sqrt(torch.tensor(alpha)) * torch.eye(n, device=device, dtype=dtype)
-        A_aug = torch.cat([A, identity_aug], dim=0)
-        U_aug, S, Vh = torch.linalg.svd(A_aug, full_matrices=False)
-        Ut = U_aug[:m, :]
-        Vt = Vh
-        St = S #torch.diag(S) # or just use the vector S depending on your needs
+        if torch.isnan(stable_svd_input).any() or torch.isinf(stable_svd_input).any():
+            print("!!! SVD input contains NaN or Inf values. Halting. !!!")
+            torch.save(stable_svd_input, 'svd_input_error_tensor.pt')
+            import pdb; pdb.set_trace()
+        Ut, St, Vt = torch.linalg.svd(stable_svd_input, full_matrices=False)
+        St_shrunk = Project_inf(St, self.lambda_L, to_complex=False)
+        pt_L_mag = Ut @ torch.diag_embed(St_shrunk) @ Vt
+        pt_L = pt_L_mag * original_phase
         St_shrunk = Project_inf(St, self.lambda_L, to_complex=False)
         pt_L_mag = Ut @ torch.diag_embed(St_shrunk) @ Vt
         pt_L = pt_L_mag * original_phase
@@ -1365,7 +1279,6 @@ class BasicBlock(nn.Module):
         temp_y_L = F.relu(temp_y_L)
         temp_y_L = F.conv3d(temp_y_L, self.conv2_forward_l, padding=1)
         if style_embedding is not None:
-            print("encoding acceleration...")
             style_params_L = self.style_injector_L(style_embedding)
             scale_L, bias_L = style_params_L.chunk(2, dim=-1) # Split into [1, channels] each
             scale_L = scale_L.view(1, self.channels, 1, 1, 1)
@@ -1403,7 +1316,6 @@ class BasicBlock(nn.Module):
         temp_y_S = F.relu(temp_y_S)
         temp_y_S = F.conv3d(temp_y_S, self.conv2_forward_s, padding=1)
         if style_embedding is not None:
-            print("encoding acceleration...")
             style_params_S = self.style_injector_S(style_embedding)
             scale_S, bias_S = style_params_S.chunk(2, dim=-1)
             scale_S = scale_S.view(1, self.channels, 1, 1, 1)
@@ -1474,9 +1386,7 @@ class LSFPNet(nn.Module):
             [L, S, layer_adj_L, layer_adj_S, pt_L, pt_S, p_L, p_S, lambda_L, lambda_S, lambda_spatial_L, lambda_spatial_S, gamma, lambda_step] = self.fcs[ii](M0, param_E, param_d, L, S, pt_L, pt_S, p_L, p_S, csmap, style_embedding)
             layers_adj_L.append(layer_adj_L)
             layers_adj_S.append(layer_adj_S)
-            print("L: ", L.shape)
-            print("S: ", S.shape)
-            if epoch is not None:
+            if epoch == 10:
                 self.plot_block_output(M0, L, S, iter=ii, epoch=epoch, output_dir=output_dir)
         L = torch.reshape(L, [nx, ny, nt])
         S = torch.reshape(S, [nx, ny, nt])
@@ -1494,7 +1404,7 @@ class ArtifactRemovalLSFPNet(nn.Module):
         Per-dynamic-series max-magnitude scaling (paper default).
         Both `zf` (image) and `data` (k-space) share the SAME scalar.
         """
-        scale = zf.abs().max()                       # scalar, grads OK
+        scale = zf.abs().max() + 1e-8                     # scalar, grads OK
         return zf / scale, data / scale, scale
     @staticmethod
     def _normalise_indep(x: torch.Tensor):
@@ -1531,47 +1441,405 @@ class ArtifactRemovalLSFPNet(nn.Module):
         x_hat = torch.stack((recon.real, recon.imag), dim=0).unsqueeze(0)  # (B,2,H,W,T)
         return x_hat, loss_constraint_L + loss_constraint_S, lambda_L, lambda_S, lambda_spatial_L, lambda_spatial_S, gamma, lambda_step
 
-=== mc.py ===
-from typing import Union
+=== lsp.py ===
 import torch
-from deepinv.loss.loss import Loss
-from deepinv.loss.metric.metric import Metric
-from deepinv.transform.base import Transform
-from radial import to_torch_complex
-class MCLoss(Loss):
-    r"""
-    Measurement consistency loss
-    This loss enforces that the reconstructions are measurement-consistent, i.e., :math:`y=\forw{\inverse{y}}`.
-    The measurement consistency loss is defined as
-    .. math::
-        \|y-\forw{\inverse{y}}\|^2
-    where :math:`\inverse{y}` is the reconstructed signal and :math:`A` is a forward operator.
-    By default, the error is computed using the MSE metric, however any other metric (e.g., :math:`\ell_1`)
-    can be used as well.
-    :param Metric, torch.nn.Module metric: metric used for computing data consistency, which is set as the mean squared error by default.
+import numpy as np
+from time import time
+dtype=torch.complex64
+def Project_inf(x, c, to_complex=True):
+    x_max = torch.maximum((abs(x) / c), torch.tensor(1))
+    if to_complex:
+        x_max = x_max.to(dtype)
+    s = torch.div(x, x_max)
+    return s
+def Wxs(x):
+    temp_x = torch.zeros_like(x, dtype=dtype)
+    temp_x[:, 0:x.shape[1]-2] = x[:, 1:x.shape[1]-1]
+    temp_x[:, x.shape[1]-1] = temp_x[:, x.shape[1]-1]
+    res = temp_x - x
+    return res
+def Wtxs(x):
+    temp_x = torch.zeros_like(x, dtype=dtype)
+    temp_x[:, 0] = temp_x[:, 0]
+    temp_x[:, 1:x.shape[1]-1] = x[:, 0:x.shape[1]-2]
+    res = temp_x - x
+    res[:, 0] = -x[:, 0]
+    res[:, x.shape[1]-1] = x[:, x.shape[1]-2]
+    return res
+def LSP(param_E, param_d, param_lambda_L, param_lambda_S, param_nite, param_tol):
+    '''
+    :param param_E:
+    :param param_d:
+    :param param_lambda_L:
+    :param param_lambda_S:
+    :param param_nite:
+    :param param_tol:
+    :return:
+    '''
+    M = param_E(inv=True, data=param_d)
+    nx, ny, nt = M.size()
+    L = torch.zeros([nx * ny, nt], dtype=dtype)
+    S = torch.zeros([nx * ny, nt], dtype=dtype)
+    p_L = torch.zeros([nx * ny, nt], dtype=dtype)
+    p_S = torch.zeros([nx * ny, nt], dtype=dtype)
+    gamma = 0.5
+    lambda_step = 1/10
+    c = lambda_step/gamma
+    loss = torch.zeros(param_nite, dtype=float)
+    for itr in range(0, param_nite):
+        temp_data = torch.reshape(L+S, [nx, ny, nt])
+        gradient = param_E(inv=True, data=param_E(inv=False, data=temp_data) - param_d)
+        gradient = torch.reshape(gradient, [nx * ny, nt])
+        y_L = L - gamma * gradient - gamma * p_L
+        Par_L = c * y_L + p_L
+        Ut, St, Vt = torch.svd(Par_L)
+        temp_St = torch.diag(Project_inf(St, param_lambda_L))
+        p_L = Ut.mm(temp_St).mm(Vt.T)
+        L = L - gamma * gradient - gamma * p_L
+        y_S = S - gamma * gradient - gamma * Wtxs(p_S)
+        Par_S = c * Wxs(y_S) + p_S
+        p_S = Project_inf(Par_S, param_lambda_S)
+        S = S - gamma * gradient - gamma * Wtxs(p_S)
+        loss[itr] = 0
+        print(' iteration: %d/%d, Loss: %f' % (itr+1, param_nite, loss[itr]))
+    Ut, St, Vt = torch.svd(L)
+    L = torch.matmul((Ut[:, 0]*St[0]).unsqueeze(1), Vt[:, 0].unsqueeze(0))
+    L = torch.reshape(L, [nx, ny, nt])
+    S = torch.reshape(S, [nx, ny, nt])
+    return L, S, loss
+
+=== dataloader.py ===
+import glob
+import os
+import h5py
+import numpy as np
+import torch
+from torch.utils.data import DataLoader, Dataset
+import nibabel as nib
+from einops import rearrange
+import random
+import sigpy as sp
+from utils import prep_nufft
+from radial_lsfp import MCNUFFT
+import time
+from typing import Union, List, Optional
+class SliceDataset(Dataset):
     """
-    def __init__(self, model_type, metric: Union[Metric, torch.nn.Module] = torch.nn.MSELoss()):
-        super(MCLoss, self).__init__()
-        self.name = "mc"
-        self.metric = metric
-        self.device = torch.device("cuda")
-        self.model_type = model_type
-    def forward(self, y, x_net, physics, csmap, **kwargs):
-        r"""
-        Computes the measurement splitting loss
-        :param torch.Tensor y: measurements.
-        :param torch.Tensor x_net: reconstructed image :math:`\inverse{y}`.
-        :param deepinv.physics.Physics physics: forward operator associated with the measurements.
-        :return: (:class:`torch.Tensor`) loss.
+    A Dataset that:
+      - Looks for all .h5/.hdf5 files under `root_dir`.
+      - Each file is assumed to contain a dataset at `dataset_key`, with shape (... Z),
+        where Z is the number of slices/partitions.
+      - Can either use a fixed set of slices or randomly sample N slices per volume
+        at the start of each epoch.
+      - Returns each slice as a torch.Tensor.
+    """
+    def __init__(
+        self,
+        root_dir,
+        patient_ids,
+        dataset_key="kspace",
+        file_pattern="*.h5",
+        slice_idx: Optional[Union[int, range]] = 41,
+        num_random_slices: Optional[int] = None,  # New parameter for random sampling
+        N_time=8,
+        N_coils=16,
+        spf_aug=False,
+    ):
         """
-        if self.model_type == "CRNN":
-            return self.metric(physics.A(x_net, csmap), y)
-        elif self.model_type == "LSFPNet":
-            x_net = to_torch_complex(x_net)
-            y_hat = physics(inv=False, data=x_net, smaps=csmap).to(self.device)
-            y_hat = torch.stack([y_hat.real, y_hat.imag], dim=-1)
-            y = torch.stack([y.real, y.imag], dim=-1)
-            return self.metric(y_hat, y)
+        Args:
+            root_dir (str): Path to the folder containing all HDF5 k-space files.
+            patient_ids (list): List of patient IDs to filter the files.
+            dataset_key (str): The key/path inside each .h5 file to the k-space dataset.
+            file_pattern (str): Glob pattern to match your HDF5 files.
+            slice_idx (int, range, optional): A fixed slice index or range of indices to use.
+                                              This is ignored if num_random_slices is set.
+            num_random_slices (int, optional): If provided, the dataset will randomly sample
+                                               this many slices from each volume at the beginning
+                                               of each epoch.
+        """
+        super().__init__()
+        self.root_dir = root_dir
+        self.dataset_key = dataset_key
+        self.slice_idx = slice_idx
+        self.num_random_slices = num_random_slices
+        self.N_time = N_time
+        self.N_coils = N_coils
+        self.spf_aug = spf_aug
+        all_files = sorted(glob.glob(os.path.join(root_dir, file_pattern)))
+        print("Number of files in root directory: ", len(all_files))
+        if len(all_files) == 0:
+            raise RuntimeError(
+                f"No files found in {root_dir} matching pattern {file_pattern}"
+            )
+        filtered = []
+        for fp in all_files:
+            fname = os.path.basename(fp)
+            if any(pid in fname for pid in patient_ids):
+                filtered.append(fp)
+        self.file_list = filtered
+        if len(self.file_list) == 0:
+            raise RuntimeError("No files matched the provided patient_ids filter.")
+        if self.num_random_slices is not None:
+            print(f"Initializing in random slice sampling mode with N={self.num_random_slices} slices per volume.")
+            self.volume_map = []
+            for fp in self.file_list:
+                with h5py.File(fp, "r") as f:
+                    if self.dataset_key not in f:
+                        raise KeyError(f"Dataset key '{self.dataset_key}' not found in file {fp}")
+                    num_slices = f[self.dataset_key].shape[0]
+                    self.volume_map.append((fp, num_slices))
+            self.resample_slices()
+        else:
+            print(f"Initializing in fixed slice mode with slice_idx={self.slice_idx}.")
+            self.slice_index_map = []
+            for fp in self.file_list:
+                with h5py.File(fp, "r") as f:
+                    if self.dataset_key not in f:
+                        raise KeyError(f"Dataset key '{self.dataset_key}' not found in file {fp}")
+                    ds = f[self.dataset_key]
+                    num_slices = ds.shape[0]
+                slices_to_add = []
+                if isinstance(self.slice_idx, int):
+                    if self.slice_idx < num_slices:
+                        slices_to_add = [self.slice_idx]
+                    else:
+                        print(f"Warning: slice_idx {self.slice_idx} is out of bounds for {fp} "
+                              f"(size {num_slices}). Skipping this file for this slice.")
+                elif isinstance(self.slice_idx, range):
+                    slices_to_add = [s for s in self.slice_idx if s < num_slices]
+                    if len(slices_to_add) < len(self.slice_idx):
+                        print(f"Warning: Some requested slices were out of bounds for {fp}. "
+                              f"Using only the valid slice indices from the provided range.")
+                else:
+                    raise TypeError(f"slice_idx must be an int, range, or None, but got {type(self.slice_idx)}")
+                for z in slices_to_add:
+                    self.slice_index_map.append((fp, z))
+        print(f"Dataset initialized with {len(self.slice_index_map)} total slice examples.")
+        self.spokes_range = [2, 4, 8, 12, 16, 24, 32, 36, 48]
+        self.spf_weights = [1.0 / spf for spf in self.spokes_range]
+    def resample_slices(self):
+        """
+        Resamples N unique slices from each volume. This should be called at the
+        beginning of each training epoch to ensure the model sees different data.
+        """
+        if self.num_random_slices is None:
+            return
+        self.slice_index_map = []
+        for file_path, num_slices in self.volume_map:
+            if num_slices >= self.num_random_slices:
+                selected_slices = random.sample(range(num_slices), self.num_random_slices)
+            else:
+                print(f"Warning: Volume {os.path.basename(file_path)} has only {num_slices} slices, "
+                      f"which is less than the requested {self.num_random_slices}. Using all available slices.")
+                selected_slices = list(range(num_slices))
+            for z in selected_slices:
+                self.slice_index_map.append((file_path, z))
+    def load_dynamic_img(self, patient_id, slice):
+        H = W = 320
+        data = np.empty((2, self.N_time, H, W), dtype=np.float32)
+        for t in range(self.N_time):
+            img_path = f'/ess/scratch/scratch1/rachelgordon/dce-{self.N_time}tf/{patient_id}/slice_{slice:03d}_frame_{t:03d}.nii'
+            img = nib.load(img_path)
+            img_data = img.get_fdata()
+            if img_data.shape != (2, H, W):
+                raise ValueError(f"{img_path} has shape {img_data.shape}; expected (2, {H}, {W})")
+            data[:, t] = img_data.astype(np.float32)
+        return torch.from_numpy(data)
+    def load_csmaps(self, patient_id, slice):
+        ground_truth_dir = os.path.join(os.path.dirname(self.root_dir), 'cs_maps')
+        csmap_path = os.path.join(ground_truth_dir, patient_id + '_cs_maps', f'cs_map_slice_{slice:03d}.npy')
+        csmap = np.load(csmap_path)
+        return csmap.squeeze()
+    def __len__(self):
+        return len(self.slice_index_map)
+    def __getitem__(self, idx):
+        file_path, current_slice_idx = self.slice_index_map[idx]
+        current_slice_idx = int(current_slice_idx)
+        patient_id = file_path.split('/')[-1].strip('.h5')
+        grasp_img = self.load_dynamic_img(patient_id, current_slice_idx)
+        csmap = self.load_csmaps(patient_id, current_slice_idx)
+        with h5py.File(file_path, "r") as f:
+            ds = torch.tensor(f[self.dataset_key][:])
+            kspace_slice = ds[current_slice_idx]
+        if self.spf_aug:
+            total_spokes = kspace_slice.shape[0] * kspace_slice.shape[2]
+            N_samples = kspace_slice.shape[-1]
+            kspace = rearrange(kspace_slice, 't c sp sam -> t sp c sam')
+            kspace_flat = kspace.contiguous().view(total_spokes, self.N_coils, N_samples)
+            spokes_per_frame = random.choices(self.spokes_range, self.spf_weights, k=1)[0]
+            N_time = total_spokes // spokes_per_frame
+            kspace_binned = kspace_flat.view(N_time, spokes_per_frame, self.N_coils, N_samples)
+            kspace_slice = rearrange(kspace_binned, 't sp c sam -> t c sp sam')
+        else:
+            N_time = self.N_time
+            N_samples = kspace_slice.shape[-1]
+            spokes_per_frame = kspace_slice.shape[-2]
+        real_part = kspace_slice.real
+        imag_part = kspace_slice.imag
+        kspace_final = torch.stack([real_part, imag_part], dim=0).float()
+        kspace_final = torch.flip(kspace_final, dims=[-1])
+        csmap_tensor = torch.from_numpy(csmap)
+        csmap_tensor = torch.rot90(csmap_tensor, k=2, dims=[-2, -1])
+        csmap = csmap_tensor.numpy()
+        return kspace_final, csmap, grasp_img, N_samples, spokes_per_frame, N_time
+class SimulatedDataset(Dataset):
+    """
+    Dataset for loading the simulated data generated by your script.
+    It loads the simulated k-space, coil sensitivity maps, and the
+    ground truth dynamic image (DRO).
+    """
+    def __init__(self, root_dir, model_type, patient_ids, spokes_per_frame=36, num_frames=22):
+        self.model_type = model_type
+        self.spokes_per_frame = spokes_per_frame
+        self.num_frames = num_frames
+        self.sample_paths = sorted(glob.glob(os.path.join(root_dir, 'sample_*')))
+        if not self.sample_paths:
+            raise FileNotFoundError(f"No sample directories found in {root_dir}. "
+                                    "Please check the path to your simulated dataset.")
+        filtered = []
+        for fp in self.sample_paths:
+            fname = os.path.basename(fp)
+            if any(pid in fname for pid in patient_ids):
+                filtered.append(fp)
+        self.sample_paths = filtered
+        print(f"Found {len(self.sample_paths)} simulated samples in {root_dir} for this dataset.")
+        self.TISSUE_NAMES = [
+            'glandular', 'benign', 'malignant', 'muscle',
+            'skin', 'liver', 'heart', 'vascular'
+        ]
+    def __len__(self):
+        return len(self.sample_paths)
+    def __getitem__(self, idx):
+        sample_dir = self.sample_paths[idx]
+        csmaps = np.load(os.path.join(sample_dir, 'csmaps.npy'))
+        dro = np.load(os.path.join(sample_dir, 'dro_ground_truth.npz'))
+        grasp_recon = np.load(os.path.join(sample_dir, f'grasp_spf{self.spokes_per_frame}_frames{self.num_frames}.npy'))
+        kspace_path = os.path.join(sample_dir, f'simulated_kspace_spf{self.spokes_per_frame}_frames{self.num_frames}.npy')
+        if os.path.exists(kspace_path):
+            kspace_complex = np.load(kspace_path, allow_pickle=True)
+            kspace_torch = torch.from_numpy(kspace_complex)
+        else:
+            kspace_torch = kspace_path
+        ground_truth_complex = dro['ground_truth_images']
+        parMap = dro['parMap']
+        aif = dro['aif']
+        S0 = dro['S0']
+        T10 = dro['T10']
+        mask_dictionary_rebuilt = {}
+        for tissue_name in self.TISSUE_NAMES:
+            if tissue_name in dro:
+                mask_dictionary_rebuilt[tissue_name] = dro[tissue_name]
+        mask = mask_dictionary_rebuilt
+        ground_truth_torch = torch.from_numpy(ground_truth_complex).permute(2, 0, 1) # T, H, W
+        ground_truth_torch = torch.stack([ground_truth_torch.real, ground_truth_torch.imag], dim=0)
+        grasp_recon_torch = torch.from_numpy(grasp_recon).permute(2, 0, 1) # T, H, W
+        grasp_recon_torch = torch.stack([grasp_recon_torch.real, grasp_recon_torch.imag], dim=0)
+        csmaps_torch = torch.from_numpy(csmaps).permute(2, 0, 1).unsqueeze(0)
+        grasp_recon_torch = torch.flip(grasp_recon_torch, dims=[-3])
+        grasp_recon_torch = torch.rot90(grasp_recon_torch, k=3, dims=[-3,-1])
+        return kspace_torch, csmaps_torch, ground_truth_torch, grasp_recon_torch, mask#, parMap, aif, S0, T10, mask
+class SimulatedSPFDataset(Dataset):
+    """
+    Dataset for loading the simulated data generated by your script.
+    It loads the simulated k-space, coil sensitivity maps, and the
+    ground truth dynamic image (DRO).
+    """
+    def __init__(self, root_dir, model_type, patient_ids):
+        self.model_type = model_type
+        self.sample_paths = sorted(glob.glob(os.path.join(root_dir, 'sample_*')))
+        if not self.sample_paths:
+            raise FileNotFoundError(f"No sample directories found in {root_dir}. "
+                                    "Please check the path to your simulated dataset.")
+        filtered = []
+        for fp in self.sample_paths:
+            fname = os.path.basename(fp)
+            if any(pid in fname for pid in patient_ids):
+                filtered.append(fp)
+        self.sample_paths = filtered
+        print(f"Found {len(self.sample_paths)} simulated samples in {root_dir} for this dataset.")
+        self.TISSUE_NAMES = [
+            'glandular', 'benign', 'malignant', 'muscle',
+            'skin', 'liver', 'heart', 'vascular'
+        ]
+        self.spokes_per_frame = 16
+        self.num_frames = 20
+        self.window = slice(1, 21)
+    def __len__(self):
+        return len(self.sample_paths)
+    def __getitem__(self, idx):
+        sample_dir = self.sample_paths[idx]
+        print(f"  Testing {self.spokes_per_frame} spokes/frame with {self.num_frames} frames.")
+        csmaps = np.load(os.path.join(sample_dir, 'csmaps.npy'))
+        dro = np.load(os.path.join(sample_dir, 'dro_ground_truth.npz'))
+        grasp_path = os.path.join(sample_dir, f'grasp_spf{self.spokes_per_frame}_frames{self.num_frames}.npy')
+        if os.path.exists(grasp_path):
+            print("loading grasp image from ", grasp_path)
+            grasp_recon = np.load(grasp_path)
+            grasp_recon_torch = torch.from_numpy(grasp_recon).permute(2, 0, 1) # T, H, W
+            grasp_recon_torch = torch.stack([grasp_recon_torch.real, grasp_recon_torch.imag], dim=0)
+            grasp_recon_torch = torch.flip(grasp_recon_torch, dims=[-3])
+            grasp_recon_torch = torch.rot90(grasp_recon_torch, k=3, dims=[-3,-1])
+        else:
+            print("setting grasp img to zero")
+            grasp_recon_torch = 0
+        ground_truth_complex = dro['ground_truth_images']
+        ground_truth_complex = ground_truth_complex[..., self.window]
+        smap_torch = rearrange(torch.tensor(csmaps), 'h w c -> c h w').unsqueeze(0)
+        simImg_torch = torch.tensor(ground_truth_complex).to(torch.cfloat)
+        parMap = dro['parMap']
+        aif = dro['aif']
+        S0 = dro['S0']
+        T10 = dro['T10']
+        mask_dictionary_rebuilt = {}
+        for tissue_name in self.TISSUE_NAMES:
+            if tissue_name in dro:
+                mask_dictionary_rebuilt[tissue_name] = dro[tissue_name]
+        mask = mask_dictionary_rebuilt
+        ground_truth_torch = torch.from_numpy(ground_truth_complex).permute(2, 0, 1) # T, H, W
+        ground_truth_torch = torch.stack([ground_truth_torch.real, ground_truth_torch.imag], dim=0)
+        return smap_torch, simImg_torch, grasp_recon_torch, mask, grasp_path #, parMap, aif, S0, T10, mask
+
+=== radial_lsfp.py ===
+import torch
+import torch.nn as nn
+import numpy as np
+from time import time
+dtype = torch.complex64
+class MCNUFFT(nn.Module):
+    def __init__(self, nufft_ob, adjnufft_ob, ktraj, dcomp):
+        super(MCNUFFT, self).__init__()
+        self.nufft_ob = nufft_ob
+        self.adjnufft_ob = adjnufft_ob
+        self.ktraj = torch.squeeze(ktraj)
+        self.dcomp = torch.squeeze(dcomp)
+    def forward(self, inv, data, smaps):
+        data = torch.squeeze(data)
+        Nx, Ny = smaps.shape[2], smaps.shape[3]
+        if len(data.shape) > 2:  # multi-frame
+            is_complex_data = torch.is_complex(data)
+            if inv: # Adjoint NUFFT (k-space -> image)
+                kd = data.permute(2, 0, 1) # -> [time, coils, samples]
+                d = self.dcomp.permute(1, 0) # -> [time, samples]
+                k = self.ktraj.permute(2, 0, 1) # -> [time, samples, 2]
+                d = d.unsqueeze(1) 
+                x_temp = self.adjnufft_ob(kd * d, k, smaps=smaps.to(dtype))
+                x = x_temp.squeeze(1).permute(1, 2, 0) / np.sqrt(Nx * Ny)
+            else: # Forward NUFFT (image -> k-space)
+                image = data.permute(2, 0, 1).unsqueeze(1) # -> [time, 1, Nx, Ny]
+                k = self.ktraj.permute(2, 0, 1) # -> [time, samples, 2]
+                x_temp = self.nufft_ob(image, k, smaps=smaps)
+                x = x_temp.permute(1, 2, 0) / np.sqrt(Nx * Ny)
+        else:  # single frame (original logic is fine)
+            if inv:
+                kd = data.unsqueeze(0)
+                d = self.dcomp.unsqueeze(0).unsqueeze(0)
+                x = self.adjnufft_ob(kd * d, self.ktraj, smaps=smaps.to(dtype))
+                x = torch.squeeze(x) / np.sqrt(Nx * Ny)
+            else:
+                image = data.unsqueeze(0).unsqueeze(0)
+                x = self.nufft_ob(image, self.ktraj, smaps=smaps)
+                x = torch.squeeze(x) / np.sqrt(Nx * Ny)
+        return x
 
 === ei.py ===
 from typing import Union
@@ -1648,6 +1916,48 @@ class EILoss(Loss):
         x3, *_ = model(y, physics, csmap, acceleration, epoch=None)
         loss_ei = self.weight * self.metric(x3, x2)
         return loss_ei, x2
+
+=== mc.py ===
+from typing import Union
+import torch
+from deepinv.loss.loss import Loss
+from deepinv.loss.metric.metric import Metric
+from deepinv.transform.base import Transform
+from radial import to_torch_complex
+class MCLoss(Loss):
+    r"""
+    Measurement consistency loss
+    This loss enforces that the reconstructions are measurement-consistent, i.e., :math:`y=\forw{\inverse{y}}`.
+    The measurement consistency loss is defined as
+    .. math::
+        \|y-\forw{\inverse{y}}\|^2
+    where :math:`\inverse{y}` is the reconstructed signal and :math:`A` is a forward operator.
+    By default, the error is computed using the MSE metric, however any other metric (e.g., :math:`\ell_1`)
+    can be used as well.
+    :param Metric, torch.nn.Module metric: metric used for computing data consistency, which is set as the mean squared error by default.
+    """
+    def __init__(self, model_type, metric: Union[Metric, torch.nn.Module] = torch.nn.MSELoss()):
+        super(MCLoss, self).__init__()
+        self.name = "mc"
+        self.metric = metric
+        self.device = torch.device("cuda")
+        self.model_type = model_type
+    def forward(self, y, x_net, physics, csmap, **kwargs):
+        r"""
+        Computes the measurement splitting loss
+        :param torch.Tensor y: measurements.
+        :param torch.Tensor x_net: reconstructed image :math:`\inverse{y}`.
+        :param deepinv.physics.Physics physics: forward operator associated with the measurements.
+        :return: (:class:`torch.Tensor`) loss.
+        """
+        if self.model_type == "CRNN":
+            return self.metric(physics.A(x_net, csmap), y)
+        elif self.model_type == "LSFPNet":
+            x_net = to_torch_complex(x_net)
+            y_hat = physics(inv=False, data=x_net, smaps=csmap).to(self.device)
+            y_hat = torch.stack([y_hat.real, y_hat.imag], dim=-1)
+            y = torch.stack([y.real, y.imag], dim=-1)
+            return self.metric(y_hat, y)
 
 === transform.py ===
 import deepinv as dinv
@@ -2137,8 +2447,8 @@ def plot_spatial_quality(
     """
     error_map_dl = recon_img - gt_img
     error_map_grasp = grasp_img - gt_img
-    _, ssim_map_dl = ssim_map_func(gt_img, recon_img, data_range=data_range, full=True)
-    _, ssim_map_grasp = ssim_map_func(gt_img, grasp_img, data_range=data_range, full=True)
+    ssim_dl, ssim_map_dl = ssim_map_func(gt_img, recon_img, data_range=data_range, full=True)
+    ssim_grasp, ssim_map_grasp = ssim_map_func(gt_img, grasp_img, data_range=data_range, full=True)
     fig, axes = plt.subplots(2, 4, figsize=(24, 12))
     fig.suptitle(f"Spatial Quality Comparison at Time Frame {time_frame_index} with AF {acceleration}", fontsize=20)
     axes[0, 0].imshow(gt_img, cmap='gray')
@@ -2149,7 +2459,7 @@ def plot_spatial_quality(
     axes[0, 2].set_title("DL Error Map (Recon - GT)")
     fig.colorbar(im_err_dl, ax=axes[0, 2], fraction=0.046, pad=0.04)
     im_ssim_dl = axes[0, 3].imshow(ssim_map_dl, cmap='viridis', vmin=0, vmax=1)
-    axes[0, 3].set_title("DL SSIM Map")
+    axes[0, 3].set_title(f"DL SSIM Map (SSIM Recon vs GT: {round(ssim_dl, 3)})")
     fig.colorbar(im_ssim_dl, ax=axes[0, 3], fraction=0.046, pad=0.04)
     axes[1, 0].imshow(gt_img, cmap='gray')
     axes[1, 0].set_title("Ground Truth")
@@ -2159,7 +2469,7 @@ def plot_spatial_quality(
     axes[1, 2].set_title("GRASP Error Map (Recon - GT)")
     fig.colorbar(im_err_grasp, ax=axes[1, 2], fraction=0.046, pad=0.04)
     im_ssim_grasp = axes[1, 3].imshow(ssim_map_grasp, cmap='viridis', vmin=0, vmax=1)
-    axes[1, 3].set_title("GRASP SSIM Map")
+    axes[1, 3].set_title(f"GRASP SSIM Map (SSIM Recon vs GT: {round(ssim_grasp, 3)})")
     fig.colorbar(im_ssim_grasp, ax=axes[1, 3], fraction=0.046, pad=0.04)
     for ax in axes.flat:
         ax.axis('off')
@@ -2529,261 +2839,334 @@ def eval_sample(kspace, csmap, ground_truth, x_recon, physics, mask, grasp_img, 
         recon_corr, grasp_corr = None, None
     return ssim, psnr, mse, lpips, dc_mse, dc_mae, recon_corr, grasp_corr
 
-=== dataloader.py ===
-import glob
+=== utils.py ===
 import os
-import h5py
-import numpy as np
+import subprocess
+import matplotlib.pyplot as plt
 import torch
-from torch.utils.data import DataLoader, Dataset
-import nibabel as nib
+import numpy as np
 from einops import rearrange
-import random
+import torchkbnufft as tkbn
+import csv
 import sigpy as sp
-from utils import prep_nufft
-from radial_lsfp import MCNUFFT
-import time
-from typing import Union, List, Optional
-class SliceDataset(Dataset):
+from sigpy.mri import app
+def log_gradient_stats(model, epoch, iteration, output_dir, log_filename="gradient_stats.csv"):
     """
-    A Dataset that:
-      - Looks for all .h5/.hdf5 files under `root_dir`.
-      - Each file is assumed to contain a dataset at `dataset_key`, with shape (... Z),
-        where Z is the number of slices/partitions.
-      - Splits each volume into Z separate examples (one per slice).
-      - Returns each slice as a torch.Tensor.
+    Computes, prints, and logs the L2 norm of gradients for each parameter and the total gradient norm.
+    Args:
+        model (torch.nn.Module): The model being trained.
+        epoch (int): The current epoch.
+        iteration (int): The current global iteration/step count.
+        output_dir (str): The main experiment output directory.
+        log_filename (str): The CSV filename for storing detailed logs.
     """
-    def __init__(
-        self,
-        root_dir,
-        patient_ids,
-        dataset_key="kspace",
-        file_pattern="*.h5",
-        slice_idx: Optional[Union[int, range]] = 41,
-        N_time = 8,
-        N_coils=16,
-        spf_aug=False,
-    ):
-        """
-        Args:
-            root_dir (str): Path to the folder containing all HDF5 k-space files.
-            dataset_key (str): The key/path inside each .h5 file to the k-space dataset (e.g. "kspace").
-            file_pattern (str): Glob pattern to match your HDF5 files (default "*.h5").
-        """
-        super().__init__()
-        self.root_dir = root_dir
-        self.dataset_key = dataset_key
-        self.slice_idx = slice_idx
-        self.N_time = N_time
-        self.N_coils = N_coils
-        self.spf_aug = spf_aug
-        all_files = sorted(glob.glob(os.path.join(root_dir, file_pattern)))
-        print("Number of files in root directory: ", len(all_files))
-        if len(all_files) == 0:
-            raise RuntimeError(
-                f"No files found in {root_dir} matching pattern {file_pattern}"
-            )
-        filtered = []
-        for fp in all_files:
-            fname = os.path.basename(fp)
-            if any(pid in fname for pid in patient_ids):
-                filtered.append(fp)
-        self.file_list = filtered
-        if len(self.file_list) == 0:
-            raise RuntimeError("No files matched the provided patient_ids filter.")
-        self.slice_index_map = []
-        for fp in self.file_list:
-            with h5py.File(fp, "r") as f:
-                if self.dataset_key not in f:
-                    raise KeyError(f"Dataset key '{self.dataset_key}' not found in file {fp}")
-                ds = f[self.dataset_key]
-                num_slices = ds.shape[0]
-            slices_to_add = []
-            if isinstance(self.slice_idx, int):
-                if self.slice_idx < num_slices:
-                    slices_to_add = [self.slice_idx]
-                else:
-                    print(f"Warning: slice_idx {self.slice_idx} is out of bounds for {fp} "
-                        f"(size {num_slices}). Skipping this file for this slice.")
-            elif isinstance(self.slice_idx, range):
-                slices_to_add = [s for s in self.slice_idx if s < num_slices]
-                if len(slices_to_add) < len(self.slice_idx):
-                    print(f"Warning: Some requested slices were out of bounds for {fp}. "
-                        f"Using only the valid slice indices from the provided list.")
+    total_norm = 0.0
+    param_norms = []
+    for name, p in model.named_parameters():
+        if p.grad is not None and p.requires_grad:
+            param_norm = p.grad.data.norm(2)
+            if not torch.isfinite(param_norm):
+                param_norm_item = float('inf')
             else:
-                raise TypeError(f"slice_idx must be an int, range, or None, but got {type(self.slice_idx)}")
-            for z in slices_to_add:
-                self.slice_index_map.append((fp, z))
-        print(f"Dataset initialized with {len(self.slice_index_map)} total slice examples.")
-        self.spokes_range = [2, 4, 8, 12, 16, 24, 32, 36, 48]
-        self.spf_weights = [1.0 / spf for spf in self.spokes_range]
-    def load_dynamic_img(self, patient_id, slice):
-        H = W = 320
-        data = np.empty((2, self.N_time, H, W), dtype=np.float32)
-        for t in range(self.N_time):
-            img_path = f'/ess/scratch/scratch1/rachelgordon/dce-{self.N_time}tf/{patient_id}/slice_{slice:03d}_frame_{t:03d}.nii'
-            img = nib.load(img_path)
-            img_data = img.get_fdata()
-            if img_data.shape != (2, H, W):
-                raise ValueError(f"{img_path} has shape {img_data.shape}; "
-                                f"expected (2, {H}, {W})")
-            data[:, t] = img_data.astype(np.float32)
-        return torch.from_numpy(data) 
-    def load_csmaps(self, patient_id, slice):
-        ground_truth_dir = os.path.join(os.path.dirname(self.root_dir), 'cs_maps')
-        csmap_path = os.path.join(ground_truth_dir, patient_id + '_cs_maps', f'cs_map_slice_{slice:03d}.npy')
-        csmap = np.load(csmap_path)
-        return csmap.squeeze()
-    def __len__(self):
-        return len(self.slice_index_map)
-    def __getitem__(self, idx):
-        """
-        Returns a single slice of k-space as a torch.Tensor.
-        The output shape will be the standard (C=2, T, S, I) where C is [real, imag].
-        """
-        file_path, current_slice_idx = self.slice_index_map[idx]
-        current_slice_idx = int(current_slice_idx)
-        patient_id = file_path.split('/')[-1].strip('.h5')
-        grasp_img = self.load_dynamic_img(patient_id, current_slice_idx)
-        csmap = self.load_csmaps(patient_id, current_slice_idx)
-        with h5py.File(file_path, "r") as f:
-            ds = torch.tensor(f[self.dataset_key][:])
-            kspace_slice = ds[current_slice_idx]
-        if self.spf_aug:
-            total_spokes = kspace_slice.shape[0] * kspace_slice.shape[2]
-            N_samples = kspace_slice.shape[-1]
-            kspace = rearrange(kspace_slice, 't c sp sam -> t sp c sam')
-            kspace_flat = kspace.contiguous().view(total_spokes, self.N_coils, N_samples)
-            spokes_per_frame = random.choices(self.spokes_range, self.spf_weights, k=1)[0]
-            N_time = total_spokes // spokes_per_frame
-            kspace_binned = kspace_flat.view(N_time, spokes_per_frame, self.N_coils, N_samples)
-            kspace_slice = rearrange(kspace_binned, 't sp c sam -> t c sp sam')
+                param_norm_item = param_norm.item()
+            param_norms.append((name, param_norm_item))
+            total_norm += param_norm_item ** 2
+    total_norm = total_norm ** 0.5
+    print(f"--- Gradient Stats (Epoch {epoch}, Iter {iteration}) ---")
+    print(f"Total Gradient Norm: {total_norm:.4e}")
+    param_norms.sort(key=lambda x: x[1], reverse=True)
+    print("Top 5 layers with largest gradients:")
+    for name, norm in param_norms[:5]:
+        print(f"  - {name}: {norm:.4e}")
+    print("Top 5 layers with smallest gradients:")
+    non_zero_norms = [p for p in param_norms if p[1] > 0]
+    for name, norm in non_zero_norms[-5:]:
+        print(f"  - {name}: {norm:.4e}")
+    print("-------------------------------------------------")
+    log_path = os.path.join(output_dir, log_filename)
+    file_exists = os.path.isfile(log_path)
+    with open(log_path, 'a', newline='') as csvfile:
+        writer = csv.writer(csvfile)
+        if not file_exists:
+            writer.writerow(['epoch', 'iteration', 'total_norm', 'param_name', 'param_norm'])
+        writer.writerow([epoch, iteration, total_norm, '---TOTAL---', total_norm])
+        for name, norm in param_norms:
+            writer.writerow([epoch, iteration, total_norm, name, norm])
+def trajGR(Nkx, Nspokes):
+    '''
+    function for generating golden-angle radial sampling trajectory
+    :param Nkx: spoke length
+    :param Nspokes: number of spokes
+    :return: ktraj: golden-angle radial sampling trajectory
+    '''
+    ga = np.pi * ((1 - np.sqrt(5)) / 2)
+    kx = np.zeros(shape=(Nkx, Nspokes))
+    ky = np.zeros(shape=(Nkx, Nspokes))
+    ky[:, 0] = np.linspace(-np.pi, np.pi, Nkx)
+    for i in range(1, Nspokes):
+        kx[:, i] = np.cos(ga) * kx[:, i - 1] - np.sin(ga) * ky[:, i - 1]
+        ky[:, i] = np.sin(ga) * kx[:, i - 1] + np.cos(ga) * ky[:, i - 1]
+    ky = np.transpose(ky)
+    kx = np.transpose(kx)
+    ktraj = np.stack((ky.flatten(), kx.flatten()), axis=0)
+    return ktraj
+def prep_nufft(Nsample, Nspokes, Ng):
+    overSmaple = 2
+    im_size = (int(Nsample/overSmaple), int(Nsample/overSmaple))
+    grid_size = (Nsample, Nsample)
+    ktraj = trajGR(Nsample, Nspokes * Ng)
+    ktraj = torch.tensor(ktraj, dtype=torch.float)
+    dcomp = tkbn.calc_density_compensation_function(ktraj=ktraj, im_size=im_size)
+    dcomp = dcomp.squeeze()
+    ktraju = np.zeros([2, Nspokes * Nsample, Ng], dtype=float)
+    dcompu = np.zeros([Nspokes * Nsample, Ng], dtype=complex)
+    for ii in range(0, Ng):
+        ktraju[:, :, ii] = ktraj[:, (ii * Nspokes * Nsample):((ii + 1) * Nspokes * Nsample)]
+        dcompu[:, ii] = dcomp[(ii * Nspokes * Nsample):((ii + 1) * Nspokes * Nsample)]
+    ktraju = torch.tensor(ktraju, dtype=torch.float)
+    dcompu = torch.tensor(dcompu, dtype=torch.complex64)
+    nufft_ob = tkbn.KbNufft(im_size=im_size, grid_size=grid_size)  # forward nufft
+    adjnufft_ob = tkbn.KbNufftAdjoint(im_size=im_size, grid_size=grid_size)  # backward nufft
+    return ktraju, dcompu, nufft_ob, adjnufft_ob
+def _calculate_top_percentile_curve(dynamic_slice: torch.Tensor, percentile: float) -> list[float]:
+    """Helper function to calculate the enhancement curve for a single dynamic slice."""
+    if dynamic_slice.dim() != 5 or dynamic_slice.shape[0] != 1 or dynamic_slice.shape[1] != 2:
+        raise ValueError(f"Expected input shape (1, 2, T, H, W), but got {dynamic_slice.shape}")
+    magnitude_video = torch.sqrt(dynamic_slice[:, 0, ...] ** 2 + dynamic_slice[:, 1, ...] ** 2).squeeze(0)
+    num_time_frames = magnitude_video.shape[0]
+    top_percentile_means = []
+    q = percentile / 100.0
+    for t in range(num_time_frames):
+        frame_t = magnitude_video[t, :, :]
+        if frame_t.max() == 0:
+            top_percentile_means.append(0)
+            continue
+        threshold = torch.quantile(frame_t.flatten(), q)
+        bright_pixels = frame_t[frame_t > threshold]
+        mean_val = torch.mean(bright_pixels) if bright_pixels.numel() > 0 else threshold
+        top_percentile_means.append(mean_val.item())
+    return top_percentile_means
+def plot_enhancement_curve(
+    model_output: torch.Tensor,
+    percentile: float = 99.0,
+    title: str = "Enhancement Curve Comparison",
+    output_filename: str = None
+):
+    """
+    Calculates and plots the enhancement curves for a model output and a benchmark
+    image on the same graph for direct comparison.
+    Args:
+        model_output (torch.Tensor): The model's reconstructed dynamic slice.
+                                     Shape (1, 2, T, H, W).
+        benchmark_image (torch.Tensor): The ground truth or benchmark dynamic slice.
+                                        Shape (1, 2, T, H, W).
+        percentile (float, optional): The percentile for defining the brightest pixels.
+                                      Defaults to 99.0.
+        title (str, optional): The title for the plot. Defaults to "Enhancement Curve Comparison".
+        output_filename (str, optional): If provided, saves the plot to this file path.
+                                         Defaults to None (displays plot).
+    """
+    if not 0 < percentile < 100:
+        raise ValueError("Percentile must be between 0 and 100.")
+    model_curve = _calculate_top_percentile_curve(model_output.detach(), percentile)
+    num_time_frames = model_output.shape[2]
+    time_axis = np.arange(num_time_frames)
+    plt.figure(figsize=(12, 7))
+    plt.plot(time_axis, model_curve, label='Model Output', marker='o', linestyle='-', color='tab:blue')
+    plt.title(title, fontsize=16)
+    plt.xlabel("Time Frame", fontsize=12)
+    plt.ylabel(f"Mean Signal of Top {100-percentile:.1f}% Pixels", fontsize=12)
+    plt.legend()
+    plt.grid(True)
+    plt.tight_layout()
+    if output_filename:
+        output_dir = os.path.dirname(output_filename)
+        if output_dir:
+            os.makedirs(output_dir, exist_ok=True)
+        plt.savefig(output_filename)
+    else:
+        plt.show()
+    plt.close()
+def get_cosine_ei_weight(
+    current_epoch,
+    warmup_epochs,
+    schedule_duration,
+    target_weight
+):
+    """
+    Calculates the EI loss weight for the current epoch using a cosine schedule.
+    This implements a curriculum learning strategy:
+    1. For `warmup_epochs`, the weight is 0 (MC loss only).
+    2. Over the next `schedule_duration` epochs, the weight smoothly ramps
+       up from 0 to `target_weight` following a cosine curve.
+    3. After the schedule is complete, the weight stays at `target_weight`.
+    Args:
+        current_epoch (int): The current training epoch (starting from 1).
+        warmup_epochs (int): Number of epochs to train with only MC loss.
+        schedule_duration (int): Number of epochs for the ramp-up.
+        target_weight (float): The final EI loss weight to reach.
+    Returns:
+        float: The EI loss weight for the current epoch.
+    """
+    if current_epoch <= warmup_epochs:
+        return 0.0
+    schedule_progress_epoch = current_epoch - warmup_epochs
+    if schedule_progress_epoch >= schedule_duration:
+        return target_weight
+    cosine_multiplier = 0.5 * (1 - np.cos(np.pi * schedule_progress_epoch / schedule_duration))
+    return target_weight * cosine_multiplier
+def plot_reconstruction_sample(x_recon, title, filename, output_dir, grasp_img=None, batch_idx=0, transform=False):
+    """
+    Plot reconstruction sample showing magnitude images across timeframes.
+    Args:
+        x_recon: Reconstructed image tensor of shape (B, C, T, H, W)
+        title: Title for the plot
+        filename: Filename for saving (without extension)
+        output_dir: Directory to save the plot
+        batch_idx: Which batch element to plot (default: 0)
+    """
+    os.makedirs(output_dir, exist_ok=True)
+    if x_recon.shape[1] == 2:
+        x_recon_mag = torch.sqrt(x_recon[:, 0, ...] ** 2 + x_recon[:, 1, ...] ** 2)
+    else:
+        x_recon_mag = x_recon
+    grasp_img_mag = torch.sqrt(grasp_img[:, 0, ...] ** 2 + grasp_img[:, 1, ...] ** 2)
+    if grasp_img_mag.shape[-1] == 320 and grasp_img_mag.shape[-2] == 320:
+        n_timeframes = grasp_img_mag.shape[1]
+    elif grasp_img_mag.shape[-1] == 320 and grasp_img_mag.shape[1] == 320:
+        n_timeframes = grasp_img_mag.shape[-2]
+    else:
+        n_timeframes = grasp_img_mag.shape[-1]
+    fig, axes = plt.subplots(
+        nrows=2,
+        ncols=n_timeframes,
+        figsize=(n_timeframes * 3, 8),
+        squeeze=False,
+    )
+    if transform:
+        axes[0, 0].set_ylabel("Transformed Image", fontsize=14, labelpad=10)
+        axes[1, 0].set_ylabel("Model Output", fontsize=14, labelpad=10)
+        os.makedirs(os.path.join(output_dir, "transforms"), exist_ok=True)
+    else:
+        axes[0, 0].set_ylabel("Model Output", fontsize=14, labelpad=10)
+        axes[1, 0].set_ylabel("GRASP Benchmark", fontsize=14, labelpad=10)
+    for t in range(n_timeframes):
+        if x_recon_mag.shape[1] == n_timeframes:
+            img = x_recon_mag[batch_idx, t, :, :].cpu().detach().numpy()
         else:
-            N_time = self.N_time
-            N_samples = kspace_slice.shape[-1]
-            spokes_per_frame = kspace_slice.shape[-2]
-        real_part = kspace_slice.real
-        imag_part = kspace_slice.imag
-        kspace_final = torch.stack([real_part, imag_part], dim=0).float()
-        kspace_final = torch.flip(kspace_final, dims=[-1])
-        csmap_tensor = torch.from_numpy(csmap)
-        csmap_tensor = torch.rot90(csmap_tensor, k=2, dims=[-2, -1]) # Assuming dims 0,1 are H,W
-        csmap = csmap_tensor.numpy()
-        return kspace_final, csmap, grasp_img, N_samples, spokes_per_frame, N_time
-class SimulatedDataset(Dataset):
-    """
-    Dataset for loading the simulated data generated by your script.
-    It loads the simulated k-space, coil sensitivity maps, and the
-    ground truth dynamic image (DRO).
-    """
-    def __init__(self, root_dir, model_type, patient_ids):
-        self.model_type = model_type
-        self.sample_paths = sorted(glob.glob(os.path.join(root_dir, 'sample_*')))
-        if not self.sample_paths:
-            raise FileNotFoundError(f"No sample directories found in {root_dir}. "
-                                    "Please check the path to your simulated dataset.")
-        filtered = []
-        for fp in self.sample_paths:
-            fname = os.path.basename(fp)
-            if any(pid in fname for pid in patient_ids):
-                filtered.append(fp)
-        self.sample_paths = filtered
-        print(f"Found {len(self.sample_paths)} simulated samples in {root_dir} for this dataset.")
-        self.TISSUE_NAMES = [
-            'glandular', 'benign', 'malignant', 'muscle',
-            'skin', 'liver', 'heart', 'vascular'
-        ]
-    def __len__(self):
-        return len(self.sample_paths)
-    def __getitem__(self, idx):
-        sample_dir = self.sample_paths[idx]
-        kspace_complex = np.load(os.path.join(sample_dir, 'simulated_kspace.npy'))
-        csmaps = np.load(os.path.join(sample_dir, 'csmaps.npy'))
-        dro = np.load(os.path.join(sample_dir, 'dro_ground_truth.npz'))
-        grasp_recon = np.load(os.path.join(sample_dir, 'grasp_recon.npy'))
-        ground_truth_complex = dro['ground_truth_images']
-        parMap = dro['parMap']
-        aif = dro['aif']
-        S0 = dro['S0']
-        T10 = dro['T10']
-        mask_dictionary_rebuilt = {}
-        for tissue_name in self.TISSUE_NAMES:
-            if tissue_name in dro:
-                mask_dictionary_rebuilt[tissue_name] = dro[tissue_name]
-        mask = mask_dictionary_rebuilt
-        ground_truth_torch = torch.from_numpy(ground_truth_complex).permute(2, 0, 1) # T, H, W
-        ground_truth_torch = torch.stack([ground_truth_torch.real, ground_truth_torch.imag], dim=0)
-        grasp_recon_torch = torch.from_numpy(grasp_recon).permute(2, 0, 1) # T, H, W
-        grasp_recon_torch = torch.stack([grasp_recon_torch.real, grasp_recon_torch.imag], dim=0)
-        csmaps_torch = torch.from_numpy(csmaps).permute(2, 0, 1).unsqueeze(0)
-        if self.model_type == "CRNN":
-            kspace_real_imag = np.stack([kspace_complex.real, kspace_complex.imag]) # (2, C, Samples, T)
-            kspace_torch = torch.from_numpy(kspace_real_imag)
-            kspace_torch = kspace_torch.permute(2, 0, 1, 3).unsqueeze(0) # (B, C, 2, Samples, T)
-        elif self.model_type == "LSFPNet":
-            kspace_torch = torch.from_numpy(kspace_complex)
+            img = x_recon_mag[batch_idx, ..., t].cpu().detach().numpy()
+        if grasp_img_mag.shape[1] == n_timeframes:
+            grasp_img = grasp_img_mag[batch_idx, t, :, :].cpu().detach().numpy()
+        elif grasp_img_mag.shape[-1] == n_timeframes:
+            grasp_img = grasp_img_mag[batch_idx, :, :, t].cpu().detach().numpy()
         else:
-            raise ValueError(f"Unsupported model_type for SimulatedDataset: {self.model_type}")
-        grasp_recon_torch = torch.flip(grasp_recon_torch, dims=[-3])
-        grasp_recon_torch = torch.rot90(grasp_recon_torch, k=3, dims=[-3,-1])
-        return kspace_torch, csmaps_torch, ground_truth_torch, grasp_recon_torch, mask#, parMap, aif, S0, T10, mask
-class SimulatedSPFDataset(Dataset):
-    """
-    Dataset for loading the simulated data generated by your script.
-    It loads the simulated k-space, coil sensitivity maps, and the
-    ground truth dynamic image (DRO).
-    """
-    def __init__(self, root_dir, model_type, patient_ids):
-        self.model_type = model_type
-        self.sample_paths = sorted(glob.glob(os.path.join(root_dir, 'sample_*')))
-        if not self.sample_paths:
-            raise FileNotFoundError(f"No sample directories found in {root_dir}. "
-                                    "Please check the path to your simulated dataset.")
-        filtered = []
-        for fp in self.sample_paths:
-            fname = os.path.basename(fp)
-            if any(pid in fname for pid in patient_ids):
-                filtered.append(fp)
-        self.sample_paths = filtered
-        print(f"Found {len(self.sample_paths)} simulated samples in {root_dir} for this dataset.")
-        self.TISSUE_NAMES = [
-            'glandular', 'benign', 'malignant', 'muscle',
-            'skin', 'liver', 'heart', 'vascular'
-        ]
-        self.spokes_per_frame = 16
-        self.num_frames = 20
-        self.window = slice(1, 21)
-    def __len__(self):
-        return len(self.sample_paths)
-    def __getitem__(self, idx):
-        sample_dir = self.sample_paths[idx]
-        print(f"  Testing {self.spokes_per_frame} spokes/frame with {self.num_frames} frames.")
-        csmaps = np.load(os.path.join(sample_dir, 'csmaps.npy'))
-        dro = np.load(os.path.join(sample_dir, 'dro_ground_truth.npz'))
-        grasp_path = os.path.join(sample_dir, f'grasp_spf{self.spokes_per_frame}_frames{self.num_frames}.npy')
-        if os.path.exists(grasp_path):
-            grasp_recon = np.load(grasp_path)
-            grasp_recon_torch = torch.from_numpy(grasp_recon).permute(2, 0, 1) # T, H, W
-            grasp_recon_torch = torch.stack([grasp_recon_torch.real, grasp_recon_torch.imag], dim=0)
-            grasp_recon_torch = torch.flip(grasp_recon_torch, dims=[-3])
-            grasp_recon_torch = torch.rot90(grasp_recon_torch, k=3, dims=[-3,-1])
-        else:
-            print("setting grasp img to zero")
-            grasp_recon_torch = 0
-        ground_truth_complex = dro['ground_truth_images']
-        ground_truth_complex = ground_truth_complex[..., self.window]
-        smap_torch = rearrange(torch.tensor(csmaps), 'h w c -> c h w').unsqueeze(0)
-        simImg_torch = torch.tensor(ground_truth_complex).to(torch.cfloat)
-        parMap = dro['parMap']
-        aif = dro['aif']
-        S0 = dro['S0']
-        T10 = dro['T10']
-        mask_dictionary_rebuilt = {}
-        for tissue_name in self.TISSUE_NAMES:
-            if tissue_name in dro:
-                mask_dictionary_rebuilt[tissue_name] = dro[tissue_name]
-        mask = mask_dictionary_rebuilt
-        ground_truth_torch = torch.from_numpy(ground_truth_complex).permute(2, 0, 1) # T, H, W
-        ground_truth_torch = torch.stack([ground_truth_torch.real, ground_truth_torch.imag], dim=0)
-        return smap_torch, simImg_torch, grasp_recon_torch, mask, grasp_path #, parMap, aif, S0, T10, mask
+            grasp_img = grasp_img_mag[batch_idx, :, t, :].cpu().detach().numpy()
+        ax1 = axes[0, t]
+        ax1.imshow(img, cmap="gray")
+        ax1.set_title(f"t = {t}")
+        ax1.set_xticks([])
+        ax1.set_yticks([])
+        ax2 = axes[1, t]
+        ax2.imshow(grasp_img, cmap="gray")
+        ax2.set_title(f"t = {t}")
+        ax2.set_xticks([])
+        ax2.set_yticks([])
+    fig.suptitle(title, fontsize=16)
+    plt.tight_layout(rect=[0, 0.03, 1, 0.95])
+    plt.savefig(os.path.join(output_dir, f"{filename}.png"))
+    plt.close(fig)
+def get_git_commit():
+    try:
+        commit_hash = (
+            subprocess.check_output(["git", "rev-parse", "HEAD"])
+            .strip()
+            .decode("utf-8")
+        )
+        return commit_hash
+    except Exception as e:
+        print(f"Error retrieving Git commit: {e}")
+        return "unknown"
+def remove_module_prefix(state_dict):
+    new_state_dict = {}
+    for k, v in state_dict.items():
+        new_key = k.replace('module.', '')  # Remove 'module.' prefix
+        new_state_dict[new_key] = v
+    return new_state_dict
+def save_checkpoint(model, optimizer, epoch,
+                    train_curves, val_curves, eval_curves, filename):
+    checkpoint = {
+        "epoch": epoch,
+        "model_state_dict": model.state_dict(),
+        "optimizer_state_dict": optimizer.state_dict(),
+        **train_curves,   # unpack the dicts
+        **val_curves,
+        **eval_curves,
+    }
+    torch.save(checkpoint, filename)
+    print(f"Checkpoint saved at epoch {epoch} to {filename}")
+def load_checkpoint(model, optimizer, filename):
+    ckpt = torch.load(filename, map_location="cpu")
+    model.load_state_dict(remove_module_prefix(ckpt["model_state_dict"]))
+    optimizer.load_state_dict(remove_module_prefix(ckpt["optimizer_state_dict"]))
+    train_curves = {
+        "train_mc_losses": ckpt.get("train_mc_losses", []),
+        "train_ei_losses": ckpt.get("train_ei_losses", []),
+        "train_adj_losses": ckpt.get("train_adj_losses", []),
+        "weighted_train_mc_losses": ckpt.get("weighted_train_mc_losses", []),
+        "weighted_train_ei_losses": ckpt.get("weighted_train_ei_losses", []),
+        "weighted_train_adj_losses": ckpt.get("weighted_train_adj_losses", []),
+    }
+    val_curves = {
+        "val_mc_losses": ckpt.get("val_mc_losses", []),
+        "val_ei_losses": ckpt.get("val_ei_losses", []),
+        "val_adj_losses": ckpt.get("val_adj_losses", []),
+    }
+    eval_curves = {
+        "eval_ssims": ckpt.get("eval_ssims", []),
+        "eval_psnrs": ckpt.get("eval_psnrs", []),
+        "eval_mses": ckpt.get("eval_mses", []),
+        "eval_lpipses": ckpt.get("eval_lpipses", []),
+        "eval_dc_mses": ckpt.get("eval_dc_mses", []),
+        "eval_dc_maes": ckpt.get("eval_dc_maes", []),
+        "eval_curve_corrs": ckpt.get("eval_curve_corrs", []),
+    }
+    return model, optimizer, ckpt.get("epoch", 1), train_curves, val_curves, eval_curves
+def to_torch_complex(x: torch.Tensor):
+    """(B, 2, ...) real -> (B, ...) complex"""
+    assert x.shape[1] == 2, (
+        f"Input tensor must have 2 channels (real, imag), but got shape {x.shape}"
+    )
+    return torch.view_as_complex(rearrange(x, "b c ... -> b ... c").contiguous())
+def get_traj(N_spokes=13, N_time=1, base_res=320, gind=1):
+    N_tot_spokes = N_spokes * N_time
+    N_samples = base_res * 2
+    base_lin = np.arange(N_samples).reshape(1, -1) - base_res
+    tau = 0.5 * (1 + 5**0.5)
+    base_rad = np.pi / (gind + tau - 1)
+    base_rot = np.arange(N_tot_spokes).reshape(-1, 1) * base_rad
+    traj = np.zeros((N_tot_spokes, N_samples, 2))
+    traj[..., 0] = np.cos(base_rot) @ base_lin
+    traj[..., 1] = np.sin(base_rot) @ base_lin
+    traj = traj / 2
+    traj = traj.reshape(N_time, N_spokes, N_samples, 2)
+    return np.squeeze(traj)
+def GRASPRecon(csmaps, kspace, spokes_per_frame, num_frames, grasp_path):
+    traj = get_traj(N_spokes=spokes_per_frame, N_time=num_frames)
+    device = sp.Device(0 if torch.cuda.is_available() else -1)
+    kspace = rearrange(kspace, 'c (sp sam) t -> t c sp sam', sam=640).unsqueeze(1).unsqueeze(3).cpu().numpy()
+    csmaps = rearrange(csmaps, 'b c h w -> c b h w').cpu().numpy()
+    R1 = app.HighDimensionalRecon(kspace, csmaps,
+                            combine_echo=False,
+                            lamda=0.001,
+                            coord=traj,
+                            regu='TV', regu_axes=[0],
+                            max_iter=10,
+                            solver='ADMM', rho=0.1,
+                            device=device,
+                            show_pbar=False,
+                            verbose=False).run()
+    R1 = np.squeeze(R1.get())
+    np.save(grasp_path, R1)
+    print(f"GRASP Recon with {spokes_per_frame} spokes/frame and {num_frames} timeframes saved to {grasp_path}")
+    return R1
 

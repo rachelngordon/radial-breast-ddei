@@ -11,9 +11,10 @@ data:
   samples: 640
   coils: 16
   eval_timeframes: 22
-  eval_spokes: 2
-  spf_aug: true
-  fpg: 16
+  eval_spokes: 16
+  spf_aug: false
+  fpg: 24
+  train_spokes_per_frame: 16
 
 # Experiment settings
 experiment:
@@ -53,14 +54,15 @@ model:
   losses:
     adj_loss:
       weight: 50000
-    use_ei_loss: true
+    use_ei_loss: false
     mc_loss:
       weight: 1
       metric: "MAE"
     ei_loss:
-      temporal_transform: "subsample"
-      spatial_transform: "none"
-      weight: 1
+      metric: "MSE"
+      temporal_transform: "none"
+      spatial_transform: "rotate"
+      weight: 0
       warmup: 6
       duration: 50
       subsample_ratio_min: 0.7
@@ -72,7 +74,7 @@ model:
 
 # Training settings
 training:
-  epochs: 60
+  epochs: 30
   save_interval: 1
   plot_interval: 20
   device: "cuda"  # or "cpu"

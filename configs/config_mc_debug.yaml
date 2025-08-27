@@ -6,14 +6,15 @@ data:
   val_split_ratio: 0.2
   height: 320
   width: 320
-  timeframes: 8
+  timeframes: 18
   total_spokes: 288
   samples: 640
   coils: 16
-  eval_timeframes: 22
-  eval_spokes: 2
-  spf_aug: true
+  eval_timeframes: 18
+  eval_spokes: 16
+  spf_aug: false
   fpg: 24
+  train_spokes_per_frame: 16
 
 # Experiment settings
 experiment:
@@ -58,6 +59,7 @@ model:
       weight: 1
       metric: "MAE"
     ei_loss:
+      metric: "MSE"
       temporal_transform: "none"
       spatial_transform: "rotate"
       weight: 0
@@ -79,9 +81,9 @@ training:
 
 evaluation:
   num_samples: 15
-  simulated_dataset_path: "/ess/scratch/scratch1/rachelgordon/simulated_dataset/"
+  simulated_dataset_path: "/ess/scratch/scratch1/rachelgordon/dro_dataset"
 
 debugging:
-  calc_step_0: true
+  calc_step_0: false
   enable_gradient_monitoring: true
   monitoring_interval: 5

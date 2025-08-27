@@ -369,11 +369,12 @@ def remove_module_prefix(state_dict):
 
 
 def save_checkpoint(model, optimizer, epoch,
-                    train_curves, val_curves, eval_curves, filename):
+                    train_curves, val_curves, eval_curves, ei_weight, filename):
     checkpoint = {
         "epoch": epoch,
         "model_state_dict": model.state_dict(),
         "optimizer_state_dict": optimizer.state_dict(),
+        "ei_weight": ei_weight,
         **train_curves,   # unpack the dicts
         **val_curves,
         **eval_curves,
@@ -413,7 +414,7 @@ def load_checkpoint(model, optimizer, filename):
         "eval_curve_corrs": ckpt.get("eval_curve_corrs", []),
     }
 
-    return model, optimizer, ckpt.get("epoch", 1), train_curves, val_curves, eval_curves
+    return model, optimizer, ckpt.get("epoch", 1), ckpt.get("ei_weight"), train_curves, val_curves, eval_curves
 
 def to_torch_complex(x: torch.Tensor):
     """(B, 2, ...) real -> (B, ...) complex"""

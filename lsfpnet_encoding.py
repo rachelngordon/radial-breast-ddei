@@ -154,7 +154,7 @@ class BasicBlock(nn.Module):
         if torch.isnan(stable_svd_input).any() or torch.isinf(stable_svd_input).any():
             print("!!! SVD input contains NaN or Inf values. Halting. !!!")
             # You might want to save the tensor here for debugging
-            torch.save(stable_svd_input, 'svd_input_error_tensor.pt')
+            # torch.save(stable_svd_input, 'svd_input_error_tensor.pt')
             # Or enter a debugger
             import pdb; pdb.set_trace()
 
@@ -388,7 +388,7 @@ class LSFPNet(nn.Module):
             layers_adj_L.append(layer_adj_L)
             layers_adj_S.append(layer_adj_S)
 
-            if epoch == 10:
+            if epoch == "val1" or epoch == "train1":
                 self.plot_block_output(M0, L, S, iter=ii, epoch=epoch, output_dir=output_dir)
                 
 

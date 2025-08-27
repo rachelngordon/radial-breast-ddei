@@ -21,4 +21,4 @@ source /gpfs/data/karczmar-lab/workspaces/rachelgordon/micromamba/etc/profile.d/
 micromamba activate recon_mri
 
 # Run the training script with srun
-python3 train.py --config configs/config_ei_diffeo.yaml --exp_name lsfp_ei_diffeo_aug_enc_random_slice_val2spf
+python3 train.py --config configs/config_ei_diffeo.yaml --exp_name lsfp_ei_diffeo_aug_enc_random_slice_val2spf --from_checkpoint True

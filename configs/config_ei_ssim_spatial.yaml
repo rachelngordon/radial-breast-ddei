@@ -52,14 +52,15 @@ model:
     eps: 0.000000001
   losses:
     adj_loss:
-      weight: 50000
+      weight: 5000
     use_ei_loss: true
     mc_loss:
-      weight: 1
+      weight: 10
       metric: "MAE"
     ei_loss:
-      temporal_transform: "subsample"
-      spatial_transform: "none"
+      metric: "SSIM"
+      temporal_transform: "none"
+      spatial_transform: "all"
       weight: 1
       warmup: 6
       duration: 50
@@ -72,7 +73,7 @@ model:
 
 # Training settings
 training:
-  epochs: 60
+  epochs: 30
   save_interval: 1
   plot_interval: 20
   device: "cuda"  # or "cpu"

@@ -123,7 +123,6 @@ N_time, N_samples, N_coils = (
     config["data"]["samples"],
     config["data"]["coils"]
 )
-N_time_eval, N_spokes_eval = config["data"]["eval_timeframes"], config["data"]["eval_spokes"]
 Ng = config["data"]["fpg"] 
 
 N_spokes = int(config["data"]["total_spokes"] / N_time)
@@ -137,6 +136,22 @@ if config["data"]["train_spokes_per_frame"] != "None":
     train_spokes_per_frame = config["data"]["train_spokes_per_frame"]
 else:
     train_spokes_per_frame = None
+
+
+# Curriculum Learning Configuration
+curriculum_enabled = config['training']['curriculum_learning']['enabled']
+curriculum_phases = config['training']['curriculum_learning']['phases']
+
+print(curriculum_enabled)
+print(curriculum_phases)
+
+# Initial setup for train_dataset based on the first phase if curriculum is enabled
+initial_train_spokes_range = [2, 4, 8, 16, 24, 36]
+if curriculum_enabled:
+    if not curriculum_phases:
+        raise ValueError("Curriculum learning enabled but no phases defined in config.yaml")
+    initial_train_spokes_range = curriculum_phases[0]['train_spokes_range']
+    print(f"Curriculum Learning Enabled. Initial training with spokes range: {initial_train_spokes_range}")
 
 
 # load data
@@ -173,7 +188,8 @@ if config['dataloader']['slice_range_start'] == "None" or config['dataloader']['
         N_coils=N_coils,
         spf_aug=config['data']['spf_aug'],
         spokes_per_frame=train_spokes_per_frame,
-        weight_accelerations=config['data']['weight_accelerations']
+        weight_accelerations=config['data']['weight_accelerations'],
+        initial_spokes_range=initial_train_spokes_range
     )
 else:
     train_dataset = SliceDataset(
@@ -187,17 +203,11 @@ else:
         N_coils=N_coils,
         spf_aug=config['data']['spf_aug'],
         spokes_per_frame=train_spokes_per_frame,
-        weight_accelerations=config['data']['weight_accelerations']
+        weight_accelerations=config['data']['weight_accelerations'],
+        initial_spokes_range=initial_train_spokes_range
     )
 
 
-
-val_dro_dataset = SimulatedDataset(
-    root_dir=config["evaluation"]["simulated_dataset_path"], 
-    model_type=model_type, 
-    patient_ids=val_dro_patient_ids,
-    spokes_per_frame=N_spokes_eval,
-    num_frames=N_time_eval)
 
 
 train_loader = DataLoader(
@@ -208,14 +218,14 @@ train_loader = DataLoader(
     pin_memory=True,
 )
 
-val_dro_loader = DataLoader(
-    val_dro_dataset,
-    batch_size=config["dataloader"]["batch_size"],
-    shuffle=config["dataloader"]["shuffle"],
-    num_workers=config["dataloader"]["num_workers"],
-    pin_memory=True,
-)
 
+# define eval physics model and dataset based on evaluation parameters for first curriculum learning phase
+if curriculum_enabled:
+    N_spokes_eval = curriculum_phases[0]['eval_spokes_per_frame']
+    N_time_eval = curriculum_phases[0]['eval_num_frames']
+
+else:
+    N_time_eval, N_spokes_eval = config["data"]["eval_timeframes"], config["data"]["eval_spokes"]
 
 # define physics object for evaluation
 eval_ktraj, eval_dcomp, eval_nufft_ob, eval_adjnufft_ob = prep_nufft(N_samples, N_spokes_eval, N_time_eval)
@@ -225,6 +235,25 @@ eval_nufft_ob = eval_nufft_ob.to(device)
 eval_adjnufft_ob = eval_adjnufft_ob.to(device)
 
 eval_physics = MCNUFFT(eval_nufft_ob, eval_adjnufft_ob, eval_ktraj, eval_dcomp)
+
+
+val_dro_dataset = SimulatedDataset(
+    root_dir=config["evaluation"]["simulated_dataset_path"], 
+    model_type=model_type, 
+    patient_ids=val_dro_patient_ids,
+    spokes_per_frame=N_spokes_eval,
+    num_frames=N_time_eval)
+
+
+val_dro_loader = DataLoader(
+    val_dro_dataset,
+    batch_size=config["dataloader"]["batch_size"],
+    shuffle=config["dataloader"]["shuffle"],
+    num_workers=config["dataloader"]["num_workers"],
+    pin_memory=True,
+)
+
+
 
 
 # define model
@@ -377,6 +406,7 @@ if args.from_checkpoint == False and config['debugging']['calc_step_0'] == True:
 
 
     with torch.no_grad():
+
         # Evaluate on training data
         for measured_kspace, csmap, N_samples, N_spokes, N_time in tqdm(train_loader, desc="Step 0 Training Evaluation"):
 
@@ -500,7 +530,7 @@ if args.from_checkpoint == False and config['debugging']['calc_step_0'] == True:
 
             if N_time_eval > eval_chunk_size:
                 print("Performing sliding window eval...")
-                x_recon, adj_loss = sliding_window_inference(H, W, N_samples, N_spokes, N_time_eval, eval_chunk_size, eval_chunk_overlap, measured_kspace, csmap, acceleration_encoding, model, epoch="val0", device=device)  
+                x_recon, adj_loss = sliding_window_inference(H, W, N_samples, int(N_spokes), N_time_eval, eval_chunk_size, eval_chunk_overlap, measured_kspace, csmap, acceleration_encoding, model, epoch="val0", device=device)  
             else:
                 x_recon, adj_loss, *_ = model(
                 measured_kspace.to(device), eval_physics, csmap, acceleration_encoding, epoch="val0", norm=config['model']['norm']
@@ -580,6 +610,8 @@ if (epochs + 1) == start_epoch:
 
 else: 
 
+    current_curriculum_phase_idx = -1
+
     for epoch in range(start_epoch, epochs + 1):
         model.train()
         running_mc_loss = 0.0
@@ -601,6 +633,42 @@ else:
         if hasattr(train_dataset, 'resample_slices'):
             print(f"Epoch {epoch}: Resampling training slices...")
             train_dataset.resample_slices()
+
+        if curriculum_enabled:
+            for i, phase in enumerate(curriculum_phases):
+                if epoch >= phase['start_epoch']:
+                    if i > current_curriculum_phase_idx: # Transition to a new phase
+                        print(f"\n--- Entering Curriculum Phase: {phase['name']} at Epoch {epoch} ---")
+                        # Update training spokes range
+                        train_dataset.spokes_range = phase['train_spokes_range']
+                        train_dataset.update_spokes_weights()
+
+                        current_curriculum_phase_idx = i
+
+                        # define eval physics model and dataset based on evaluation parameters for first curriculum learning phase
+                        N_spokes_eval = phase['eval_spokes_per_frame']
+                        N_time_eval = phase['eval_num_frames']
+
+                        # define physics object for evaluation
+                        eval_ktraj, eval_dcomp, eval_nufft_ob, eval_adjnufft_ob = prep_nufft(N_samples, N_spokes_eval, N_time_eval)
+                        eval_ktraj = eval_ktraj.to(device)
+                        eval_dcomp = eval_dcomp.to(device)
+                        eval_nufft_ob = eval_nufft_ob.to(device)
+                        eval_adjnufft_ob = eval_adjnufft_ob.to(device)
+
+                        eval_physics = MCNUFFT(eval_nufft_ob, eval_adjnufft_ob, eval_ktraj, eval_dcomp)
+
+                        val_dro_dataset.spokes_per_frame = N_spokes_eval
+                        val_dro_dataset.num_frames = N_time_eval
+                        val_dro_dataset._update_sample_paths()
+
+                        val_dro_loader = DataLoader(
+                            val_dro_dataset,
+                            batch_size=config["dataloader"]["batch_size"],
+                            shuffle=config["dataloader"]["shuffle"],
+                            num_workers=config["dataloader"]["num_workers"],
+                            pin_memory=True,
+                        )
 
         if use_ei_loss:
 
@@ -624,6 +692,8 @@ else:
 
 
         for measured_kspace, csmap, N_samples, N_spokes, N_time in train_loader_tqdm:  # measured_kspace shape: (B, C, I, S, T)
+
+            print("spokes per frame: ", N_spokes)
             
             start = time.time()
 
@@ -813,6 +883,13 @@ else:
                     kspace_path = val_kspace_batch[0]
 
                     # SIMULATE KSPACE
+                    print("ground_truth_for_physics: ", ground_truth_for_physics.shape)
+                    print("val_csmap: ", val_csmap.shape)
+                    print("eval_physics.ktraj: ", eval_physics.ktraj.shape)
+                    print("spokes_per_frame: ", val_dro_dataset.spokes_per_frame)
+                    print("num_frames: ", val_dro_dataset.num_frames)
+                    print("N_time_eval: ", N_time_eval)
+                    print("N_spokes_eval: ", N_spokes_eval)
                     val_kspace_batch = eval_physics(False, ground_truth_for_physics, val_csmap)
 
                     # save k-space 
@@ -846,7 +923,7 @@ else:
                     
                 if N_time_eval > eval_chunk_size:
                     print("Performing sliding window eval...")
-                    val_x_recon, val_adj_loss = sliding_window_inference(H, W, N_samples, N_spokes, N_time_eval, eval_chunk_size, eval_chunk_overlap, val_kspace_batch, val_csmap, acceleration_encoding, model, epoch=f"val{epoch}", device=device)  
+                    val_x_recon, val_adj_loss = sliding_window_inference(H, W, N_samples, int(N_spokes), N_time_eval, eval_chunk_size, eval_chunk_overlap, val_kspace_batch, val_csmap, acceleration_encoding, model, epoch=f"val{epoch}", device=device)  
                 else:
                     val_x_recon, val_adj_loss, *_ = model(
                     val_kspace_batch.to(device), eval_physics, val_csmap, acceleration_encoding, epoch=f"val{epoch}", norm=config['model']['norm']
@@ -1255,18 +1332,18 @@ MAIN_EVALUATION_PLAN = [
 # Designed to push the limits with very few spokes per frame.
 # This has a different (lower) total spoke budget.
 
-# STRESS_TEST_PLAN = [
-#     {
-#         "spokes_per_frame": 2,
-#         "num_frames": 144, # 2 * 144 = 288 total spokes
-#         "description": "Stress test: max temporal points, 2 spokes"
-#     },
-#     {
-#         "spokes_per_frame": 4,
-#         "num_frames": 72, # 4 * 72 = 288 total spokes
-#         "description": "Stress test: max temporal points, 4 spokes"
-#     },
-# ]
+STRESS_TEST_PLAN = [
+    {
+        "spokes_per_frame": 2,
+        "num_frames": 144, # 2 * 144 = 288 total spokes
+        "description": "Stress test: max temporal points, 2 spokes"
+    },
+    {
+        "spokes_per_frame": 4,
+        "num_frames": 72, # 4 * 72 = 288 total spokes
+        "description": "Stress test: max temporal points, 4 spokes"
+    },
+]
 
 
 
@@ -1275,6 +1352,7 @@ eval_spf_dataset = SimulatedSPFDataset(
     model_type=model_type, 
     patient_ids=val_dro_patient_ids,
     )
+
 
 eval_spf_loader = DataLoader(
     eval_spf_dataset,
@@ -1304,149 +1382,149 @@ with torch.no_grad():
     spf_grasp_corr = {}
 
     # NOTE: removed stress test until training on ultra-high accelerations with curriculum learning
-    # print("--- Running Stress Test Evaluation (Budget: 176 spokes) ---")
-    # for eval_config in STRESS_TEST_PLAN:
+    print("--- Running Stress Test Evaluation (Budget: 176 spokes) ---")
+    for eval_config in STRESS_TEST_PLAN:
 
-    #     stress_test_ssims = []
-    #     stress_test_psnrs = []
-    #     stress_test_mses = []
-    #     stress_test_lpipses = []
-    #     stress_test_dc_mses = []
-    #     stress_test_dc_maes = []
-    #     stress_test_corrs = []
-    #     stress_test_grasp_ssims = []
-    #     stress_test_grasp_psnrs = []
-    #     stress_test_grasp_mses = []
-    #     stress_test_grasp_lpipses = []
-    #     stress_test_grasp_dc_mses = []
-    #     stress_test_grasp_dc_maes = []
-    #     stress_test_grasp_corrs = []
+        stress_test_ssims = []
+        stress_test_psnrs = []
+        stress_test_mses = []
+        stress_test_lpipses = []
+        stress_test_dc_mses = []
+        stress_test_dc_maes = []
+        stress_test_corrs = []
+        stress_test_grasp_ssims = []
+        stress_test_grasp_psnrs = []
+        stress_test_grasp_mses = []
+        stress_test_grasp_lpipses = []
+        stress_test_grasp_dc_mses = []
+        stress_test_grasp_dc_maes = []
+        stress_test_grasp_corrs = []
 
-    #     spokes = eval_config["spokes_per_frame"]
-    #     num_frames = eval_config["num_frames"]
+        spokes = eval_config["spokes_per_frame"]
+        num_frames = eval_config["num_frames"]
 
-    #     eval_spf_dataset.spokes_per_frame = spokes
-    #     eval_spf_dataset.num_frames = num_frames
-    #     eval_spf_dataset._update_sample_paths()
-
-
-    #     for csmap, ground_truth, grasp_img, mask, grasp_path in tqdm(eval_spf_loader, desc="Variable Spokes Per Frame Evaluation"):
+        eval_spf_dataset.spokes_per_frame = spokes
+        eval_spf_dataset.num_frames = num_frames
+        eval_spf_dataset._update_sample_paths()
 
 
-    #         csmap = csmap.squeeze(0).to(device)   # Remove batch dim
-    #         ground_truth = ground_truth.to(device) # Shape: (1, 2, T, H, W)
+        for csmap, ground_truth, grasp_img, mask, grasp_path in tqdm(eval_spf_loader, desc="Variable Spokes Per Frame Evaluation"):
 
 
-    #         # SIMULATE KSPACE
-    #         ktraj, dcomp, nufft_ob, adjnufft_ob = prep_nufft(N_samples, spokes, num_frames)
-    #         physics = MCNUFFT(nufft_ob.to(device), adjnufft_ob.to(device), ktraj.to(device), dcomp.to(device))
+            csmap = csmap.squeeze(0).to(device)   # Remove batch dim
+            ground_truth = ground_truth.to(device) # Shape: (1, 2, T, H, W)
 
 
-    #         sim_kspace = physics(False, ground_truth, csmap)
-
-    #         kspace = sim_kspace.squeeze(0).to(device) # Remove batch dim
-
-    #         # calculate acceleration factor
-    #         acceleration = torch.tensor([N_full / int(spokes)], dtype=torch.float, device=device)
-
-    #         if config['model']['encode_acceleration']:
-    #             acceleration_encoding = acceleration
-    #         else: 
-    #             acceleration_encoding = None
+            # SIMULATE KSPACE
+            ktraj, dcomp, nufft_ob, adjnufft_ob = prep_nufft(N_samples, spokes, num_frames)
+            physics = MCNUFFT(nufft_ob.to(device), adjnufft_ob.to(device), ktraj.to(device), dcomp.to(device))
 
 
-    #         # check if GRASP image exists or if we need to perform GRASP recon
-    #         if type(grasp_img) is int or len(grasp_img.shape) == 1:
-    #             print(f"No GRASP file found, performing reconstruction with {spokes} spokes/frame and {num_frames} frames.")
+            sim_kspace = physics(False, ground_truth, csmap)
 
-    #             grasp_img = GRASPRecon(csmap, sim_kspace, spokes, num_frames, grasp_path[0])
+            kspace = sim_kspace.squeeze(0).to(device) # Remove batch dim
 
-    #             grasp_recon_torch = torch.from_numpy(grasp_img).permute(2, 0, 1) # T, H, W
-    #             grasp_recon_torch = torch.stack([grasp_recon_torch.real, grasp_recon_torch.imag], dim=0)
+            # calculate acceleration factor
+            acceleration = torch.tensor([N_full / int(spokes)], dtype=torch.float, device=device)
 
-    #             grasp_img = torch.flip(grasp_recon_torch, dims=[-3])
-    #             grasp_img = torch.rot90(grasp_img, k=3, dims=[-3,-1]).unsqueeze(0)
-
-    #         grasp_img = grasp_img.to(device)
-
-    #         if num_frames > eval_chunk_size:
-    #             print("Performing sliding window eval...")
-    #             x_recon, _ = sliding_window_inference(H, W, N_samples, spokes, num_frames, eval_chunk_size, eval_chunk_overlap, kspace, csmap, acceleration_encoding, model, epoch=None, device=device)  
-    #         else:
-    #             x_recon, *_ = model(
-    #                 kspace.to(device), physics, csmap, acceleration_encoding, epoch=None, norm=config['model']['norm']
-    #             )
-
-    #         ground_truth = torch.stack([ground_truth.real, ground_truth.imag], dim=1)
-    #         ground_truth = rearrange(ground_truth, 'b i h w t -> b i t h w')
+            if config['model']['encode_acceleration']:
+                acceleration_encoding = acceleration
+            else: 
+                acceleration_encoding = None
 
 
-    #         ## Evaluation
-    #         ssim, psnr, mse, lpips, dc_mse, dc_mae, recon_corr, grasp_corr = eval_sample(kspace, csmap, ground_truth, x_recon, physics, mask, grasp_img, acceleration, eval_dir, f"{spokes}spf", device)
-    #         stress_test_ssims.append(ssim)
-    #         stress_test_psnrs.append(psnr)
-    #         stress_test_mses.append(mse)
-    #         stress_test_lpipses.append(lpips)
-    #         stress_test_dc_mses.append(dc_mse)
-    #         stress_test_dc_maes.append(dc_mae)
+            # check if GRASP image exists or if we need to perform GRASP recon
+            if type(grasp_img) is int or len(grasp_img.shape) == 1:
+                print(f"No GRASP file found, performing reconstruction with {spokes} spokes/frame and {num_frames} frames.")
 
-    #         if recon_corr is not None:
-    #             stress_test_corrs.append(recon_corr)
-    #             stress_test_grasp_corrs.append(grasp_corr)
+                grasp_img = GRASPRecon(csmap, sim_kspace, spokes, num_frames, grasp_path[0])
 
+                grasp_recon_torch = torch.from_numpy(grasp_img).permute(2, 0, 1) # T, H, W
+                grasp_recon_torch = torch.stack([grasp_recon_torch.real, grasp_recon_torch.imag], dim=0)
 
-    #         ssim_grasp, psnr_grasp, mse_grasp, lpips_grasp, dc_mse_grasp, dc_mae_grasp = eval_grasp(kspace, csmap, ground_truth, grasp_img, physics, device, eval_dir)
-    #         stress_test_grasp_ssims.append(ssim_grasp)
-    #         stress_test_grasp_psnrs.append(psnr_grasp)
-    #         stress_test_grasp_mses.append(mse_grasp)
-    #         stress_test_grasp_lpipses.append(lpips_grasp)
-    #         stress_test_grasp_dc_mses.append(dc_mse_grasp)
-    #         stress_test_grasp_dc_maes.append(dc_mae_grasp)
+                grasp_img = torch.flip(grasp_recon_torch, dims=[-3])
+                grasp_img = torch.rot90(grasp_img, k=3, dims=[-3,-1]).unsqueeze(0)
 
+            grasp_img = grasp_img.to(device)
 
-    #         spf_recon_ssim[spokes] = np.mean(stress_test_ssims)
-    #         spf_recon_psnr[spokes] = np.mean(stress_test_psnrs)
-    #         spf_recon_mse[spokes] = np.mean(stress_test_mses)
-    #         spf_recon_lpips[spokes] = np.mean(stress_test_lpipses)
-    #         spf_recon_dc_mse[spokes] = np.mean(stress_test_dc_mses)
-    #         spf_recon_dc_mae[spokes] = np.mean(stress_test_dc_maes)
-    #         spf_recon_corr[spokes] = np.mean(stress_test_corrs)
+            if num_frames > eval_chunk_size:
+                print("Performing sliding window eval...")
+                x_recon, _ = sliding_window_inference(H, W, N_samples, int(spokes), num_frames, eval_chunk_size, eval_chunk_overlap, kspace, csmap, acceleration_encoding, model, epoch=None, device=device)  
+            else:
+                x_recon, *_ = model(
+                    kspace.to(device), physics, csmap, acceleration_encoding, epoch=None, norm=config['model']['norm']
+                )
 
-    #         spf_grasp_ssim[spokes] = np.mean(stress_test_grasp_ssims)
-    #         spf_grasp_psnr[spokes] = np.mean(stress_test_grasp_psnrs)
-    #         spf_grasp_mse[spokes] = np.mean(stress_test_grasp_mses)
-    #         spf_grasp_lpips[spokes] = np.mean(stress_test_grasp_lpipses)
-    #         spf_grasp_dc_mse[spokes] = np.mean(stress_test_grasp_dc_mses)
-    #         spf_grasp_dc_mae[spokes] = np.mean(stress_test_grasp_dc_maes)
-    #         spf_grasp_corr[spokes] = np.mean(stress_test_grasp_corrs)
+            ground_truth = torch.stack([ground_truth.real, ground_truth.imag], dim=1)
+            ground_truth = rearrange(ground_truth, 'b i h w t -> b i t h w')
 
 
+            ## Evaluation
+            ssim, psnr, mse, lpips, dc_mse, dc_mae, recon_corr, grasp_corr = eval_sample(kspace, csmap, ground_truth, x_recon, physics, mask, grasp_img, acceleration, eval_dir, f"{spokes}spf", device)
+            stress_test_ssims.append(ssim)
+            stress_test_psnrs.append(psnr)
+            stress_test_mses.append(mse)
+            stress_test_lpipses.append(lpips)
+            stress_test_dc_mses.append(dc_mse)
+            stress_test_dc_maes.append(dc_mae)
 
-    #     # Save Results
-    #     spf_metrics_path = os.path.join(eval_dir, "eval_metrics.csv")
-    #     with open(spf_metrics_path, 'a', newline='') as csvfile:
-    #         writer = csv.writer(csvfile)
-    #         writer.writerow(['Recon', 'Spokes Per Frame', 'SSIM', 'PSNR', 'MSE', "LPIPS", 'DC MSE', 'DC MAE', 'EC Correlation'])
+            if recon_corr is not None:
+                stress_test_corrs.append(recon_corr)
+                stress_test_grasp_corrs.append(grasp_corr)
 
-    #         writer.writerow(['DL', spokes, 
-    #         f'{np.mean(stress_test_ssims):.4f} ± {np.std(stress_test_ssims):.4f}', 
-    #         f'{np.mean(stress_test_psnrs):.4f} ± {np.std(stress_test_psnrs):.4f}', 
-    #         f'{np.mean(stress_test_mses):.4f} ± {np.std(stress_test_mses):.4f}', 
-    #         f'{np.mean(stress_test_lpipses):.4f} ± {np.std(stress_test_lpipses):.4f}', 
-    #         f'{np.mean(stress_test_dc_mses):.4f} ± {np.std(stress_test_dc_mses):.4f}',
-    #         f'{np.mean(stress_test_dc_maes):.4f} ± {np.std(stress_test_dc_maes):.4f}',
-    #         f'{np.mean(stress_test_corrs):.4f} ± {np.std(stress_test_corrs):.4f}'
-    #         ])
 
-    #         writer.writerow(['GRASP', spokes, 
-    #         f'{np.mean(stress_test_grasp_ssims):.4f} ± {np.std(stress_test_grasp_ssims):.4f}', 
-    #         f'{np.mean(stress_test_grasp_psnrs):.4f} ± {np.std(stress_test_grasp_psnrs):.4f}', 
-    #         f'{np.mean(stress_test_grasp_mses):.4f} ± {np.std(stress_test_grasp_mses):.4f}', 
-    #         f'{np.mean(stress_test_grasp_lpipses):.4f} ± {np.std(stress_test_grasp_lpipses):.4f}', 
-    #         f'{np.mean(stress_test_grasp_dc_mses):.4f} ± {np.std(stress_test_grasp_dc_mses):.4f}',
-    #         f'{np.mean(stress_test_grasp_dc_maes):.4f} ± {np.std(stress_test_grasp_dc_maes):.4f}',
-    #         f'{np.mean(stress_test_grasp_corrs):.4f} ± {np.std(stress_test_grasp_corrs):.4f}',
-    #         ])
+            ssim_grasp, psnr_grasp, mse_grasp, lpips_grasp, dc_mse_grasp, dc_mae_grasp = eval_grasp(kspace, csmap, ground_truth, grasp_img, physics, device, eval_dir)
+            stress_test_grasp_ssims.append(ssim_grasp)
+            stress_test_grasp_psnrs.append(psnr_grasp)
+            stress_test_grasp_mses.append(mse_grasp)
+            stress_test_grasp_lpipses.append(lpips_grasp)
+            stress_test_grasp_dc_mses.append(dc_mse_grasp)
+            stress_test_grasp_dc_maes.append(dc_mae_grasp)
+
+
+            spf_recon_ssim[spokes] = np.mean(stress_test_ssims)
+            spf_recon_psnr[spokes] = np.mean(stress_test_psnrs)
+            spf_recon_mse[spokes] = np.mean(stress_test_mses)
+            spf_recon_lpips[spokes] = np.mean(stress_test_lpipses)
+            spf_recon_dc_mse[spokes] = np.mean(stress_test_dc_mses)
+            spf_recon_dc_mae[spokes] = np.mean(stress_test_dc_maes)
+            spf_recon_corr[spokes] = np.mean(stress_test_corrs)
+
+            spf_grasp_ssim[spokes] = np.mean(stress_test_grasp_ssims)
+            spf_grasp_psnr[spokes] = np.mean(stress_test_grasp_psnrs)
+            spf_grasp_mse[spokes] = np.mean(stress_test_grasp_mses)
+            spf_grasp_lpips[spokes] = np.mean(stress_test_grasp_lpipses)
+            spf_grasp_dc_mse[spokes] = np.mean(stress_test_grasp_dc_mses)
+            spf_grasp_dc_mae[spokes] = np.mean(stress_test_grasp_dc_maes)
+            spf_grasp_corr[spokes] = np.mean(stress_test_grasp_corrs)
+
+
+
+        # Save Results
+        spf_metrics_path = os.path.join(eval_dir, "eval_metrics.csv")
+        with open(spf_metrics_path, 'a', newline='') as csvfile:
+            writer = csv.writer(csvfile)
+            writer.writerow(['Recon', 'Spokes Per Frame', 'SSIM', 'PSNR', 'MSE', "LPIPS", 'DC MSE', 'DC MAE', 'EC Correlation'])
+
+            writer.writerow(['DL', spokes, 
+            f'{np.mean(stress_test_ssims):.4f} ± {np.std(stress_test_ssims):.4f}', 
+            f'{np.mean(stress_test_psnrs):.4f} ± {np.std(stress_test_psnrs):.4f}', 
+            f'{np.mean(stress_test_mses):.4f} ± {np.std(stress_test_mses):.4f}', 
+            f'{np.mean(stress_test_lpipses):.4f} ± {np.std(stress_test_lpipses):.4f}', 
+            f'{np.mean(stress_test_dc_mses):.4f} ± {np.std(stress_test_dc_mses):.4f}',
+            f'{np.mean(stress_test_dc_maes):.4f} ± {np.std(stress_test_dc_maes):.4f}',
+            f'{np.mean(stress_test_corrs):.4f} ± {np.std(stress_test_corrs):.4f}'
+            ])
+
+            writer.writerow(['GRASP', spokes, 
+            f'{np.mean(stress_test_grasp_ssims):.4f} ± {np.std(stress_test_grasp_ssims):.4f}', 
+            f'{np.mean(stress_test_grasp_psnrs):.4f} ± {np.std(stress_test_grasp_psnrs):.4f}', 
+            f'{np.mean(stress_test_grasp_mses):.4f} ± {np.std(stress_test_grasp_mses):.4f}', 
+            f'{np.mean(stress_test_grasp_lpipses):.4f} ± {np.std(stress_test_grasp_lpipses):.4f}', 
+            f'{np.mean(stress_test_grasp_dc_mses):.4f} ± {np.std(stress_test_grasp_dc_mses):.4f}',
+            f'{np.mean(stress_test_grasp_dc_maes):.4f} ± {np.std(stress_test_grasp_dc_maes):.4f}',
+            f'{np.mean(stress_test_grasp_corrs):.4f} ± {np.std(stress_test_grasp_corrs):.4f}',
+            ])
 
 
 
@@ -1514,7 +1592,7 @@ with torch.no_grad():
 
             if num_frames > eval_chunk_size:
                 print("Performing sliding window eval...")
-                x_recon, _ = sliding_window_inference(H, W, N_samples, spokes, num_frames, eval_chunk_size, eval_chunk_overlap, kspace, csmap, acceleration_encoding, model, epoch=None, device=device)  
+                x_recon, _ = sliding_window_inference(H, W, N_samples, int(spokes), num_frames, eval_chunk_size, eval_chunk_overlap, kspace, csmap, acceleration_encoding, model, epoch=None, device=device)  
             else:
                 x_recon, *_ = model(
                 kspace.to(device), physics, csmap, acceleration_encoding, epoch=None, norm=config['model']['norm']

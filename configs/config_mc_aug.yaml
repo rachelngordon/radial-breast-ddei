@@ -10,10 +10,10 @@ data:
   total_spokes: 288
   samples: 640
   coils: 16
-  eval_timeframes: 8
-  eval_spokes: 36
+  eval_timeframes: 36
+  eval_spokes: 8
   spf_aug: true
-  weight_accelerations: true
+  weight_accelerations: false
   fpg: 24
   train_spokes_per_frame: None
 

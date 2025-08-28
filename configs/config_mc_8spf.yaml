@@ -6,16 +6,16 @@ data:
   val_split_ratio: 0.2
   height: 320
   width: 320
-  timeframes: 18
+  timeframes: 36
   total_spokes: 288
   samples: 640
   coils: 16
-  eval_timeframes: 8
-  eval_spokes: 36
-  spf_aug: true
+  eval_timeframes: 36
+  eval_spokes: 8
+  spf_aug: false
   weight_accelerations: false
   fpg: 24
-  train_spokes_per_frame: None
+  train_spokes_per_frame: 8
 
 # Experiment settings
 experiment:

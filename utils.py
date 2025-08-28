@@ -293,7 +293,7 @@ def plot_reconstruction_sample(x_recon, title, filename, output_dir, grasp_img=N
 
     n_timeframes = x_recon_mag.shape[-1]
 
-    if grasp_img:
+    if grasp_img is not None:
         grasp_img_mag = torch.sqrt(grasp_img[:, 0, ...] ** 2 + grasp_img[:, 1, ...] ** 2)
 
         # if grasp_img_mag.shape[-1] == 320 and grasp_img_mag.shape[-2] == 320:
@@ -338,7 +338,7 @@ def plot_reconstruction_sample(x_recon, title, filename, output_dir, grasp_img=N
         else:
             img = x_recon_mag[batch_idx, ..., t].cpu().detach().numpy()
 
-        if grasp_img:
+        if grasp_img is not None:
             if grasp_img_mag.shape[1] == n_timeframes:
                 grasp_img = grasp_img_mag[batch_idx, t, :, :].cpu().detach().numpy()
             elif grasp_img_mag.shape[-1] == n_timeframes:
@@ -356,7 +356,7 @@ def plot_reconstruction_sample(x_recon, title, filename, output_dir, grasp_img=N
         ax1.set_xticks([])
         ax1.set_yticks([])
 
-        if grasp_img:
+        if grasp_img is not None:
             ax2 = axes[1, t]
             ax2.imshow(grasp_img, cmap="gray")
             ax2.set_title(f"t = {t}")

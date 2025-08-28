@@ -388,8 +388,8 @@ class LSFPNet(nn.Module):
             layers_adj_L.append(layer_adj_L)
             layers_adj_S.append(layer_adj_S)
 
-            if epoch == "val1" or epoch == "train1":
-                self.plot_block_output(M0, L, S, iter=ii, epoch=epoch, output_dir=output_dir)
+            # if epoch == "val10" or epoch == "train10":
+            self.plot_block_output(M0, L, S, iter=ii, epoch=epoch, output_dir=output_dir)
                 
 
         L = torch.reshape(L, [nx, ny, nt])

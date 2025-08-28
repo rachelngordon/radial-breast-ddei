@@ -6,16 +6,16 @@ data:
   val_split_ratio: 0.2
   height: 320
   width: 320
-  timeframes: 36
+  timeframes: 18
   total_spokes: 288
   samples: 640
   coils: 16
   eval_timeframes: 36
   eval_spokes: 8
-  spf_aug: false
-  weight_accelerations: false
+  spf_aug: true
+  weight_accelerations: true
   fpg: 24
-  train_spokes_per_frame: 8
+  train_spokes_per_frame: None
 
 # Experiment settings
 experiment:
@@ -26,7 +26,7 @@ dataloader:
   batch_size: 1
   shuffle: false
   num_workers: 2
-  max_subjects: 2
+  max_subjects: 300
   num_random_slices: 1
   slice_idx: 41
   slice_range_start: None
@@ -79,6 +79,24 @@ training:
   save_interval: 1
   plot_interval: 20
   device: "cuda"  # or "cpu"
+  curriculum_learning:
+    enabled: True
+    phases:
+      - name: "Phase 1: Moderate Accelerations"
+        start_epoch: 1
+        train_spokes_range: [16, 24, 36]
+        eval_spokes_per_frame: 16       # Validate on the highest acceleration in this phase
+        eval_num_frames: 18 # (16 * 18 = 288 total spokes, assuming a fixed total spoke budget)
+      - name: "Phase 2: Higher Accelerations"
+        start_epoch: 2
+        train_spokes_range: [8, 16, 24, 36] # Introduces 8 spokes/frame
+        eval_spokes_per_frame: 8
+        eval_num_frames: 36 # (8 * 36 = 288 total spokes)
+      - name: "Phase 3: Ultra-High Accelerations"
+        start_epoch: 3
+        train_spokes_range: [2, 4, 8, 16, 24, 36] # Introduces 2 and 4 spokes/frame
+        eval_spokes_per_frame: 2
+        eval_num_frames: 144 # (2 * 144 = 288 total spokes)
 
 evaluation:
   num_samples: 15

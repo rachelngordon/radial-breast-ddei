@@ -566,13 +566,13 @@ def generate_sliding_window_indices(N_frames, chunk_size, overlap_size):
 
 
 
-def sliding_window_inference(H, W, N_samples, N_spokes, N_frames, chunk_size, chunk_overlap, kspace, csmap, acceleration_encoding, model, epoch, device):
+def sliding_window_inference(H, W, N_frames, ktraj, dcomp, nufft_ob, adjnufft_ob, chunk_size, chunk_overlap, kspace, csmap, acceleration_encoding, model, epoch, device):
 
     chunk_indices = generate_sliding_window_indices(N_frames, chunk_size, chunk_overlap)
 
     # define physics object for chunk of timeframes
-    ktraj_chunk, dcomp_chunk, nufft_ob_chunk, adjnufft_ob_chunk = prep_nufft(N_samples, N_spokes, chunk_size)
-    physics_chunk = MCNUFFT(nufft_ob_chunk.to(device), adjnufft_ob_chunk.to(device), ktraj_chunk.to(device), dcomp_chunk.to(device))
+    # ktraj_chunk, dcomp_chunk, nufft_ob_chunk, adjnufft_ob_chunk = prep_nufft(N_samples, N_spokes, chunk_size)
+    # physics_chunk = MCNUFFT(nufft_ob_chunk.to(device), adjnufft_ob_chunk.to(device), ktraj_chunk.to(device), dcomp_chunk.to(device))
 
     # Define tensor for stitched reconstruction
     stitched_recon = torch.zeros(1, 2, H, W, N_frames).to(device)
@@ -587,6 +587,11 @@ def sliding_window_inference(H, W, N_samples, N_spokes, N_frames, chunk_size, ch
 
         # select chunk from k-space
         kspace_chunk = kspace[..., start_idx:end_idx]
+        ktraj_chunk = ktraj[..., start_idx:end_idx]
+        dcomp_chunk = dcomp[..., start_idx:end_idx]
+
+        physics_chunk = MCNUFFT(nufft_ob, adjnufft_ob, ktraj_chunk, dcomp_chunk)
+
 
         # generate reconstruction
         x_recon_chunk, adj_loss, *_ = model(

@@ -142,11 +142,8 @@ else:
 curriculum_enabled = config['training']['curriculum_learning']['enabled']
 curriculum_phases = config['training']['curriculum_learning']['phases']
 
-print(curriculum_enabled)
-print(curriculum_phases)
-
 # Initial setup for train_dataset based on the first phase if curriculum is enabled
-initial_train_spokes_range = [2, 4, 8, 16, 24, 36]
+initial_train_spokes_range = [8, 16, 24, 36]
 if curriculum_enabled:
     if not curriculum_phases:
         raise ValueError("Curriculum learning enabled but no phases defined in config.yaml")
@@ -413,30 +410,28 @@ if args.from_checkpoint == False and config['debugging']['calc_step_0'] == True:
             # prepare inputs
             measured_kspace = to_torch_complex(measured_kspace).squeeze()
             measured_kspace = rearrange(measured_kspace, 't co sp sam -> co (sp sam) t')
+
+            # prep physics operators
+            ktraj, dcomp, nufft_ob, adjnufft_ob = prep_nufft(N_samples, N_spokes, N_time)
+            ktraj = ktraj.to(device)
+            dcomp = dcomp.to(device)
+            nufft_ob = nufft_ob.to(device)
+            adjnufft_ob = adjnufft_ob.to(device)
+
             
             if N_time > Ng:
-                # prep physics operators
-                ktraj, dcomp, nufft_ob, adjnufft_ob = prep_nufft(N_samples, N_spokes, Ng)
-                ktraj = ktraj.to(device)
-                dcomp = dcomp.to(device)
-                nufft_ob = nufft_ob.to(device)
-                adjnufft_ob = adjnufft_ob.to(device)
-
-                physics = MCNUFFT(nufft_ob, adjnufft_ob, ktraj, dcomp)
-
                 max_idx = N_time - Ng
                 random_index = random.randint(0, max_idx - 1) 
 
                 measured_kspace = measured_kspace[..., random_index:random_index + Ng]
 
-            else:
-                # prep physics operators
-                ktraj, dcomp, nufft_ob, adjnufft_ob = prep_nufft(N_samples, N_spokes, N_time)
-                ktraj = ktraj.to(device)
-                dcomp = dcomp.to(device)
-                nufft_ob = nufft_ob.to(device)
-                adjnufft_ob = adjnufft_ob.to(device)
+                ktraj_chunk = ktraj[..., random_index:random_index + Ng]
+                dcomp_chunk = dcomp[..., random_index:random_index + Ng]
 
+
+                physics = MCNUFFT(nufft_ob, adjnufft_ob, ktraj_chunk, dcomp_chunk)
+
+            else:
                 physics = MCNUFFT(nufft_ob, adjnufft_ob, ktraj, dcomp)
 
 
@@ -530,7 +525,7 @@ if args.from_checkpoint == False and config['debugging']['calc_step_0'] == True:
 
             if N_time_eval > eval_chunk_size:
                 print("Performing sliding window eval...")
-                x_recon, adj_loss = sliding_window_inference(H, W, N_samples, int(N_spokes), N_time_eval, eval_chunk_size, eval_chunk_overlap, measured_kspace, csmap, acceleration_encoding, model, epoch="val0", device=device)  
+                x_recon, adj_loss = sliding_window_inference(H, W, N_time_eval, eval_ktraj, eval_dcomp, eval_nufft_ob, eval_adjnufft_ob, eval_chunk_size, eval_chunk_overlap, measured_kspace, csmap, acceleration_encoding, model, epoch="val0", device=device)  
             else:
                 x_recon, adj_loss, *_ = model(
                 measured_kspace.to(device), eval_physics, csmap, acceleration_encoding, epoch="val0", norm=config['model']['norm']
@@ -701,31 +696,26 @@ else:
             measured_kspace = to_torch_complex(measured_kspace).squeeze()
             measured_kspace = rearrange(measured_kspace, 't co sp sam -> co (sp sam) t')
 
+            # prep physics operators
+            ktraj, dcomp, nufft_ob, adjnufft_ob = prep_nufft(N_samples, N_spokes, N_time)
+            ktraj = ktraj.to(device)
+            dcomp = dcomp.to(device)
+            nufft_ob = nufft_ob.to(device)
+            adjnufft_ob = adjnufft_ob.to(device)
+
             if N_time > Ng:
-
-                # prep physics operators
-                ktraj, dcomp, nufft_ob, adjnufft_ob = prep_nufft(N_samples, N_spokes, Ng)
-                ktraj = ktraj.to(device)
-                dcomp = dcomp.to(device)
-                nufft_ob = nufft_ob.to(device)
-                adjnufft_ob = adjnufft_ob.to(device)
-
-                physics = MCNUFFT(nufft_ob, adjnufft_ob, ktraj, dcomp)
 
                 max_idx = N_time - Ng
                 random_index = random.randint(0, max_idx - 1) 
 
                 measured_kspace = measured_kspace[..., random_index:random_index + Ng]
+                ktraj_chunk = ktraj[..., random_index:random_index + Ng]
+                dcomp_chunk = dcomp[..., random_index:random_index + Ng]
+
+                physics = MCNUFFT(nufft_ob, adjnufft_ob, ktraj_chunk, dcomp_chunk)
                 
 
             else:
-                # prep physics operators
-                ktraj, dcomp, nufft_ob, adjnufft_ob = prep_nufft(N_samples, N_spokes, N_time)
-                ktraj = ktraj.to(device)
-                dcomp = dcomp.to(device)
-                nufft_ob = nufft_ob.to(device)
-                adjnufft_ob = adjnufft_ob.to(device)
-
                 physics = MCNUFFT(nufft_ob, adjnufft_ob, ktraj, dcomp)
 
 
@@ -883,13 +873,6 @@ else:
                     kspace_path = val_kspace_batch[0]
 
                     # SIMULATE KSPACE
-                    print("ground_truth_for_physics: ", ground_truth_for_physics.shape)
-                    print("val_csmap: ", val_csmap.shape)
-                    print("eval_physics.ktraj: ", eval_physics.ktraj.shape)
-                    print("spokes_per_frame: ", val_dro_dataset.spokes_per_frame)
-                    print("num_frames: ", val_dro_dataset.num_frames)
-                    print("N_time_eval: ", N_time_eval)
-                    print("N_spokes_eval: ", N_spokes_eval)
                     val_kspace_batch = eval_physics(False, ground_truth_for_physics, val_csmap)
 
                     # save k-space 
@@ -923,7 +906,7 @@ else:
                     
                 if N_time_eval > eval_chunk_size:
                     print("Performing sliding window eval...")
-                    val_x_recon, val_adj_loss = sliding_window_inference(H, W, N_samples, int(N_spokes), N_time_eval, eval_chunk_size, eval_chunk_overlap, val_kspace_batch, val_csmap, acceleration_encoding, model, epoch=f"val{epoch}", device=device)  
+                    val_x_recon, val_adj_loss = sliding_window_inference(H, W, N_time_eval, eval_ktraj, eval_dcomp, eval_nufft_ob, eval_adjnufft_ob, eval_chunk_size, eval_chunk_overlap, val_kspace_batch, val_csmap, acceleration_encoding, model, epoch=f"val{epoch}", device=device)  
                 else:
                     val_x_recon, val_adj_loss, *_ = model(
                     val_kspace_batch.to(device), eval_physics, val_csmap, acceleration_encoding, epoch=f"val{epoch}", norm=config['model']['norm']
@@ -1449,7 +1432,7 @@ with torch.no_grad():
 
             if num_frames > eval_chunk_size:
                 print("Performing sliding window eval...")
-                x_recon, _ = sliding_window_inference(H, W, N_samples, int(spokes), num_frames, eval_chunk_size, eval_chunk_overlap, kspace, csmap, acceleration_encoding, model, epoch=None, device=device)  
+                x_recon, _ = sliding_window_inference(H, W, num_frames, ktraj, dcomp, nufft_ob, adjnufft_ob, eval_chunk_size, eval_chunk_overlap, kspace, csmap, acceleration_encoding, model, epoch=None, device=device)  
             else:
                 x_recon, *_ = model(
                     kspace.to(device), physics, csmap, acceleration_encoding, epoch=None, norm=config['model']['norm']
@@ -1592,7 +1575,7 @@ with torch.no_grad():
 
             if num_frames > eval_chunk_size:
                 print("Performing sliding window eval...")
-                x_recon, _ = sliding_window_inference(H, W, N_samples, int(spokes), num_frames, eval_chunk_size, eval_chunk_overlap, kspace, csmap, acceleration_encoding, model, epoch=None, device=device)  
+                x_recon, _ = sliding_window_inference(H, W, num_frames, ktraj, dcomp, nufft_ob, adjnufft_ob, eval_chunk_size, eval_chunk_overlap, kspace, csmap, acceleration_encoding, model, epoch=None, device=device)  
             else:
                 x_recon, *_ = model(
                 kspace.to(device), physics, csmap, acceleration_encoding, epoch=None, norm=config['model']['norm']

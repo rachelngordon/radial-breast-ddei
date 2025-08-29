@@ -40,7 +40,7 @@ class SliceDataset(Dataset):
         spf_aug=False,
         spokes_per_frame=None,
         weight_accelerations=False, 
-        initial_spokes_range=[2, 4, 8, 16, 24, 36]
+        initial_spokes_range=[8, 16, 24, 36]
     ):
         """
         Args:
@@ -215,6 +215,7 @@ class SliceDataset(Dataset):
             N_samples = kspace_slice.shape[-1]
             kspace = rearrange(kspace_slice, 't c sp sam -> t sp c sam')
             kspace_flat = kspace.contiguous().view(total_spokes, self.N_coils, N_samples)
+            # kspace_flat = kspace.contiguous().reshape(total_spokes, self.N_coils, N_samples)
 
             if self.spf_aug:
                 print("setting random spokes per frame...")
@@ -225,6 +226,7 @@ class SliceDataset(Dataset):
 
             N_time = total_spokes // spokes_per_frame
             kspace_binned = kspace_flat.view(N_time, spokes_per_frame, self.N_coils, N_samples)
+            # kspace_binned = kspace_flat.reshape(N_time, spokes_per_frame, self.N_coils, N_samples)
             kspace_slice = rearrange(kspace_binned, 't sp c sam -> t c sp sam')
         else:
             N_time = self.N_time
@@ -460,6 +462,10 @@ class SimulatedDataset(Dataset):
         # CSMaps: (H, W, C) -> (1, C, H, W) [batch, coils, h, w]
         csmaps_torch = torch.from_numpy(csmaps).permute(2, 0, 1).unsqueeze(0)
 
+        # csmaps_torch = torch.rot90(csmaps_torch, k=2, dims=[-2, -1])
+        # ground_truth_torch = torch.rot90(ground_truth_torch, k=2, dims=[-2, -1])
+        # grasp_recon_torch = torch.rot90(grasp_recon_torch, k=2, dims=[-3, -1])
+
         return kspace_torch, csmaps_torch, ground_truth_torch, grasp_recon_torch, mask, grasp_path #, parMap, aif, S0, T10, mask
     
 
@@ -577,6 +583,10 @@ class SimulatedSPFDataset(Dataset):
         # Ground truth: (H, W, T) -> (2, T, H, W) [real/imag, time, h, w]
         ground_truth_torch = torch.from_numpy(ground_truth_complex).permute(2, 0, 1) # T, H, W
         ground_truth_torch = torch.stack([ground_truth_torch.real, ground_truth_torch.imag], dim=0)
+
+        # smap_torch = torch.rot90(smap_torch, k=2, dims=[-2, -1])
+        # simImg_torch = torch.rot90(simImg_torch, k=2, dims=[0, 1])
+        # grasp_recon_torch = torch.rot90(grasp_recon_torch, k=2, dims=[-3, -1])
 
 
         return smap_torch, simImg_torch, grasp_recon_torch, mask, grasp_path #, parMap, aif, S0, T10, mask

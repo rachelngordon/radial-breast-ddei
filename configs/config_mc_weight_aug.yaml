@@ -45,6 +45,7 @@ model:
   gamma: 0.5
   lambda_step: 0.1
   encode_acceleration: true
+  encode_time_index: false
   optimizer:
     name: "Adam"
     lr: 0.0005

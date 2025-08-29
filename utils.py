@@ -566,7 +566,7 @@ def generate_sliding_window_indices(N_frames, chunk_size, overlap_size):
 
 
 
-def sliding_window_inference(H, W, N_frames, ktraj, dcomp, nufft_ob, adjnufft_ob, chunk_size, chunk_overlap, kspace, csmap, acceleration_encoding, model, epoch, device):
+def sliding_window_inference(H, W, N_frames, ktraj, dcomp, nufft_ob, adjnufft_ob, chunk_size, chunk_overlap, kspace, csmap, acceleration_encoding, start_timepoint_index, model, epoch, device):
 
     chunk_indices = generate_sliding_window_indices(N_frames, chunk_size, chunk_overlap)
 
@@ -592,10 +592,13 @@ def sliding_window_inference(H, W, N_frames, ktraj, dcomp, nufft_ob, adjnufft_ob
 
         physics_chunk = MCNUFFT(nufft_ob, adjnufft_ob, ktraj_chunk, dcomp_chunk)
 
+        if start_timepoint_index is not None:
+            start_timepoint_index = torch.tensor([start_idx], dtype=torch.float, device=device)
+
 
         # generate reconstruction
         x_recon_chunk, adj_loss, *_ = model(
-            kspace_chunk.to(device), physics_chunk, csmap, acceleration_encoding, epoch=epoch, norm="both"
+            kspace_chunk.to(device), physics_chunk, csmap, acceleration_encoding, start_timepoint_index, epoch=epoch, norm="both"
         )
 
         # Add the reconstructed chunk to the stitched_recon

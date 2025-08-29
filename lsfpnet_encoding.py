@@ -30,7 +30,8 @@ class MappingNetwork(nn.Module):
     def __init__(self, style_dim, num_layers=4):
         super().__init__()
         # We start with a linear layer to project the scalar to the style dimension
-        layers = [nn.Linear(1, style_dim), nn.ReLU(True)]
+        # layers = [nn.Linear(1, style_dim), nn.ReLU(True)]
+        layers = [nn.Linear(2, style_dim), nn.ReLU(True)]
         # Add subsequent layers
         for _ in range(num_layers - 1):
             layers.extend([nn.Linear(style_dim, style_dim), nn.ReLU(True)])
@@ -42,6 +43,7 @@ class MappingNetwork(nn.Module):
             x = x.unsqueeze(0)
         if x.dim() == 1:
             x = x.unsqueeze(1)
+
         return self.net(x)
 
 
@@ -429,7 +431,7 @@ class ArtifactRemovalLSFPNet(nn.Module):
              scale = 1.0
         return x / scale, scale
 
-    def forward(self, y, E, csmap, acceleration=None, epoch=None, norm="both", **kwargs):
+    def forward(self, y, E, csmap, acceleration=None, start_timepoint_index=None, epoch=None, norm="both", **kwargs):
 
         # 1. Get the initial ZF recon. This defines our target energy/scale.
         x_init = E(inv=True, data=y, smaps=csmap)
@@ -445,9 +447,23 @@ class ArtifactRemovalLSFPNet(nn.Module):
             y_norm = y
             scale = 1.0
 
-        # Generate style embedding from the acceleration factor
-        if acceleration:
-            style_embedding = self.mapping_network(acceleration)
+        # Generate style embedding from the acceleration factor and/or time start index
+        if acceleration or start_timepoint_index:
+
+            if start_timepoint_index is not None:
+
+                if acceleration is not None:
+                    combined_input = torch.cat(
+                        (acceleration.float().view(-1, 1), start_timepoint_index.float().view(-1, 1)),
+                        dim=1
+                    )
+
+                else:
+                    combined_input = start_timepoint_index
+            else:
+                combined_input = acceleration
+
+            style_embedding = self.mapping_network(combined_input)
 
             L, S, loss_layers_adj_L, loss_layers_adj_S, lambda_L, lambda_S, lambda_spatial_L, lambda_spatial_S, gamma, lambda_step  = self.backbone_net(x_init_norm, E, y_norm, csmap, epoch, self.output_dir, style_embedding)
 

@@ -431,8 +431,12 @@ if args.from_checkpoint == False and config['debugging']['calc_step_0'] == True:
 
                 physics = MCNUFFT(nufft_ob, adjnufft_ob, ktraj_chunk, dcomp_chunk)
 
+                start_timepoint_index = torch.tensor([random_index], dtype=torch.float, device=device)
+
             else:
                 physics = MCNUFFT(nufft_ob, adjnufft_ob, ktraj, dcomp)
+
+                start_timepoint_index = torch.tensor([0], dtype=torch.float, device=device)
 
 
             csmap = csmap.to(device).to(measured_kspace.dtype)
@@ -444,9 +448,11 @@ if args.from_checkpoint == False and config['debugging']['calc_step_0'] == True:
             else: 
                 acceleration_encoding = None
 
+            if config['model']['encode_time_index'] == False:
+                start_timepoint_index = None
 
             x_recon, adj_loss, lambda_L, lambda_S, lambda_spatial_L, lambda_spatial_S, gamma, lambda_step = model(
-                measured_kspace.to(device), physics, csmap, acceleration_encoding, epoch="train0", norm=config['model']['norm']
+                measured_kspace.to(device), physics, csmap, acceleration_encoding, start_timepoint_index, epoch="train0", norm=config['model']['norm']
             )
 
             # calculate losses
@@ -523,12 +529,17 @@ if args.from_checkpoint == False and config['debugging']['calc_step_0'] == True:
             else: 
                 acceleration_encoding = None
 
+            if config['model']['encode_time_index'] == False:
+                start_timepoint_index = None
+            else:
+                start_timepoint_index = torch.tensor([0], dtype=torch.float, device=device)
+
             if N_time_eval > eval_chunk_size:
                 print("Performing sliding window eval...")
-                x_recon, adj_loss = sliding_window_inference(H, W, N_time_eval, eval_ktraj, eval_dcomp, eval_nufft_ob, eval_adjnufft_ob, eval_chunk_size, eval_chunk_overlap, measured_kspace, csmap, acceleration_encoding, model, epoch="val0", device=device)  
+                x_recon, adj_loss = sliding_window_inference(H, W, N_time_eval, eval_ktraj, eval_dcomp, eval_nufft_ob, eval_adjnufft_ob, eval_chunk_size, eval_chunk_overlap, measured_kspace, csmap, acceleration_encoding, start_timepoint_index, model, epoch="val0", device=device)  
             else:
                 x_recon, adj_loss, *_ = model(
-                measured_kspace.to(device), eval_physics, csmap, acceleration_encoding, epoch="val0", norm=config['model']['norm']
+                measured_kspace.to(device), eval_physics, csmap, acceleration_encoding, start_timepoint_index, epoch="val0", norm=config['model']['norm']
                 )
             
 
@@ -713,10 +724,14 @@ else:
                 dcomp_chunk = dcomp[..., random_index:random_index + Ng]
 
                 physics = MCNUFFT(nufft_ob, adjnufft_ob, ktraj_chunk, dcomp_chunk)
+
+                start_timepoint_index = torch.tensor([random_index], dtype=torch.float, device=device)
                 
 
             else:
                 physics = MCNUFFT(nufft_ob, adjnufft_ob, ktraj, dcomp)
+
+                start_timepoint_index = torch.tensor([0], dtype=torch.float, device=device)
 
 
             iteration_count += 1
@@ -732,9 +747,14 @@ else:
             else: 
                 acceleration_encoding = None
 
+            if config['model']['encode_time_index'] == False:
+                start_timepoint_index = None
+            else:
+                start_timepoint_index = torch.tensor([0], dtype=torch.float, device=device)
+
 
             x_recon, adj_loss, lambda_L, lambda_S, lambda_spatial_L, lambda_spatial_S, gamma, lambda_step = model(
-                measured_kspace.to(device), physics, csmap, acceleration_encoding, epoch=f"train{epoch}", norm=config['model']['norm']
+                measured_kspace.to(device), physics, csmap, acceleration_encoding, start_timepoint_index, epoch=f"train{epoch}", norm=config['model']['norm']
             )
 
             # compute losses
@@ -903,13 +923,18 @@ else:
                     acceleration_encoding = acceleration
                 else: 
                     acceleration_encoding = None
+
+                if config['model']['encode_time_index'] == False:
+                    start_timepoint_index = None
+                else:
+                    start_timepoint_index = torch.tensor([0], dtype=torch.float, device=device)
                     
                 if N_time_eval > eval_chunk_size:
                     print("Performing sliding window eval...")
-                    val_x_recon, val_adj_loss = sliding_window_inference(H, W, N_time_eval, eval_ktraj, eval_dcomp, eval_nufft_ob, eval_adjnufft_ob, eval_chunk_size, eval_chunk_overlap, val_kspace_batch, val_csmap, acceleration_encoding, model, epoch=f"val{epoch}", device=device)  
+                    val_x_recon, val_adj_loss = sliding_window_inference(H, W, N_time_eval, eval_ktraj, eval_dcomp, eval_nufft_ob, eval_adjnufft_ob, eval_chunk_size, eval_chunk_overlap, val_kspace_batch, val_csmap, acceleration_encoding, start_timepoint_index, model, epoch=f"val{epoch}", device=device)  
                 else:
                     val_x_recon, val_adj_loss, *_ = model(
-                    val_kspace_batch.to(device), eval_physics, val_csmap, acceleration_encoding, epoch=f"val{epoch}", norm=config['model']['norm']
+                    val_kspace_batch.to(device), eval_physics, val_csmap, acceleration_encoding, start_timepoint_index, epoch=f"val{epoch}", norm=config['model']['norm']
                     )
 
 
@@ -1415,6 +1440,11 @@ with torch.no_grad():
             else: 
                 acceleration_encoding = None
 
+            if config['model']['encode_time_index'] == False:
+                start_timepoint_index = None
+            else:
+                start_timepoint_index = torch.tensor([0], dtype=torch.float, device=device)
+
 
             # check if GRASP image exists or if we need to perform GRASP recon
             if type(grasp_img) is int or len(grasp_img.shape) == 1:
@@ -1432,10 +1462,10 @@ with torch.no_grad():
 
             if num_frames > eval_chunk_size:
                 print("Performing sliding window eval...")
-                x_recon, _ = sliding_window_inference(H, W, num_frames, ktraj, dcomp, nufft_ob, adjnufft_ob, eval_chunk_size, eval_chunk_overlap, kspace, csmap, acceleration_encoding, model, epoch=None, device=device)  
+                x_recon, _ = sliding_window_inference(H, W, num_frames, ktraj, dcomp, nufft_ob, adjnufft_ob, eval_chunk_size, eval_chunk_overlap, kspace, csmap, acceleration_encoding, start_timepoint_index, model, epoch=None, device=device)  
             else:
                 x_recon, *_ = model(
-                    kspace.to(device), physics, csmap, acceleration_encoding, epoch=None, norm=config['model']['norm']
+                    kspace.to(device), physics, csmap, acceleration_encoding, start_timepoint_index, epoch=None, norm=config['model']['norm']
                 )
 
             ground_truth = torch.stack([ground_truth.real, ground_truth.imag], dim=1)
@@ -1557,6 +1587,11 @@ with torch.no_grad():
                 acceleration_encoding = acceleration
             else: 
                 acceleration_encoding = None
+            
+            if config['model']['encode_time_index'] == False:
+                start_timepoint_index = None
+            else:
+                start_timepoint_index = torch.tensor([0], dtype=torch.float, device=device)
 
 
             # check if GRASP image exists or if we need to perform GRASP recon
@@ -1575,10 +1610,10 @@ with torch.no_grad():
 
             if num_frames > eval_chunk_size:
                 print("Performing sliding window eval...")
-                x_recon, _ = sliding_window_inference(H, W, num_frames, ktraj, dcomp, nufft_ob, adjnufft_ob, eval_chunk_size, eval_chunk_overlap, kspace, csmap, acceleration_encoding, model, epoch=None, device=device)  
+                x_recon, _ = sliding_window_inference(H, W, num_frames, ktraj, dcomp, nufft_ob, adjnufft_ob, eval_chunk_size, eval_chunk_overlap, kspace, csmap, acceleration_encoding, start_timepoint_index, model, epoch=None, device=device)  
             else:
                 x_recon, *_ = model(
-                kspace.to(device), physics, csmap, acceleration_encoding, epoch=None, norm=config['model']['norm']
+                kspace.to(device), physics, csmap, acceleration_encoding, start_timepoint_index, epoch=None, norm=config['model']['norm']
                 )
 
             

@@ -58,7 +58,7 @@ model:
       weight: 1
     use_ei_loss: false
     mc_loss:
-      weight: 10
+      weight: 1
       metric: "MAE"
     ei_loss:
       metric: "MSE"

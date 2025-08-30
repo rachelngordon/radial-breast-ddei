@@ -580,15 +580,17 @@ def sliding_window_inference(H, W, N_frames, ktraj, dcomp, nufft_ob, adjnufft_ob
     # Also keep track of how many times each frame is contributed to (for averaging)
     frame_contribution_count = torch.zeros(H, W, N_frames).to(device)
 
+    csmap = csmap.to(device)
+
 
     for i, (start_idx, end_idx) in enumerate(chunk_indices):
 
         print(f"Processing chunk {i+1}: frames {start_idx}-{end_idx}")
 
         # select chunk from k-space
-        kspace_chunk = kspace[..., start_idx:end_idx]
-        ktraj_chunk = ktraj[..., start_idx:end_idx]
-        dcomp_chunk = dcomp[..., start_idx:end_idx]
+        kspace_chunk = kspace[..., start_idx:end_idx].to(device)
+        ktraj_chunk = ktraj[..., start_idx:end_idx].to(device)
+        dcomp_chunk = dcomp[..., start_idx:end_idx].to(device)
 
         physics_chunk = MCNUFFT(nufft_ob, adjnufft_ob, ktraj_chunk, dcomp_chunk)
 

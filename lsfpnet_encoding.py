@@ -27,11 +27,11 @@ def from_torch_complex(x: torch.Tensor):
 
 class MappingNetwork(nn.Module):
     """Maps a scalar input to a style vector using a simple MLP."""
-    def __init__(self, style_dim, num_layers=4):
+    def __init__(self, style_dim, channels, num_layers=4):
         super().__init__()
         # We start with a linear layer to project the scalar to the style dimension
         # layers = [nn.Linear(1, style_dim), nn.ReLU(True)]
-        layers = [nn.Linear(2, style_dim), nn.ReLU(True)]
+        layers = [nn.Linear(channels, style_dim), nn.ReLU(True)]
         # Add subsequent layers
         for _ in range(num_layers - 1):
             layers.extend([nn.Linear(style_dim, style_dim), nn.ReLU(True)])
@@ -401,14 +401,14 @@ class LSFPNet(nn.Module):
     
 
 class ArtifactRemovalLSFPNet(nn.Module):
-    def __init__(self, backbone_net, output_dir, **kwargs):
+    def __init__(self, backbone_net, output_dir, channels, **kwargs):
         super(ArtifactRemovalLSFPNet, self).__init__()
         self.backbone_net = backbone_net
         self.output_dir = output_dir
 
         # Define the style dimension and instantiate the mapping network
         self.style_dim = 128  # You can tune this hyperparameter
-        self.mapping_network = MappingNetwork(style_dim=self.style_dim)
+        self.mapping_network = MappingNetwork(style_dim=self.style_dim, channels=channels)
 
     @staticmethod
     def _normalise_both(zf: torch.Tensor, data: torch.Tensor):

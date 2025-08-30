@@ -255,7 +255,11 @@ val_dro_loader = DataLoader(
 
 # define model
 lsfp_backbone = LSFPNet(LayerNo=config["model"]["num_layers"], lambdas=initial_lambdas, channels=config['model']['channels'])
-model = ArtifactRemovalLSFPNet(lsfp_backbone, block_dir).to(device)
+
+if config['model']['encode_acceleration'] and config['model']['encode_time_index']:
+    model = ArtifactRemovalLSFPNet(lsfp_backbone, block_dir, channels=2).to(device)
+else:
+    model = ArtifactRemovalLSFPNet(lsfp_backbone, block_dir, channels=1).to(device)
 
 optimizer = torch.optim.Adam(
     model.parameters(),
@@ -463,7 +467,7 @@ if args.from_checkpoint == False and config['debugging']['calc_step_0'] == True:
 
             if use_ei_loss:
                 ei_loss, t_img = ei_loss_fn(
-                    x_recon, physics, model, csmap, acceleration_encoding
+                    x_recon, physics, model, csmap, acceleration_encoding, start_timepoint_index
                 )
 
                 initial_train_ei_loss += ei_loss.item()
@@ -551,7 +555,7 @@ if args.from_checkpoint == False and config['debugging']['calc_step_0'] == True:
 
             if use_ei_loss:
                 ei_loss, t_img = ei_loss_fn(
-                    x_recon, eval_physics, model, csmap, acceleration_encoding
+                    x_recon, eval_physics, model, csmap, acceleration_encoding, start_timepoint_index
                 )
 
                 initial_val_ei_loss += ei_loss.item()
@@ -568,7 +572,7 @@ if args.from_checkpoint == False and config['debugging']['calc_step_0'] == True:
             grasp_dc_mses.append(dc_mse_grasp)
             grasp_dc_maes.append(dc_mae_grasp)
 
-            ssim, psnr, mse, lpips, dc_mse, dc_mae, recon_corr, grasp_corr = eval_sample(measured_kspace, csmap, ground_truth, x_recon, eval_physics, mask, grasp_recon, acceleration, eval_dir, label=None, device=device)
+            ssim, psnr, mse, lpips, dc_mse, dc_mae, recon_corr, grasp_corr = eval_sample(measured_kspace, csmap, ground_truth, x_recon, eval_physics, mask, grasp_recon, acceleration, eval_dir, label='val0', device=device)
             initial_eval_ssims.append(ssim)
             initial_eval_psnrs.append(psnr)
             initial_eval_mses.append(mse)
@@ -765,7 +769,7 @@ else:
 
             if use_ei_loss:
                 ei_loss, t_img = ei_loss_fn(
-                    x_recon, physics, model, csmap, acceleration_encoding
+                    x_recon, physics, model, csmap, acceleration_encoding, start_timepoint_index
                 )
 
 
@@ -948,7 +952,7 @@ else:
 
                 if use_ei_loss:
                     val_ei_loss, val_t_img = ei_loss_fn(
-                        val_x_recon, eval_physics, model, val_csmap, acceleration_encoding
+                        val_x_recon, eval_physics, model, val_csmap, acceleration_encoding, start_timepoint_index
                     )
 
                     val_running_ei_loss += val_ei_loss.item()
@@ -1426,7 +1430,6 @@ with torch.no_grad():
             # SIMULATE KSPACE
             ktraj, dcomp, nufft_ob, adjnufft_ob = prep_nufft(N_samples, spokes, num_frames)
             physics = MCNUFFT(nufft_ob.to(device), adjnufft_ob.to(device), ktraj.to(device), dcomp.to(device))
-
 
             sim_kspace = physics(False, ground_truth, csmap)
 

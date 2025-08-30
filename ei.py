@@ -62,7 +62,7 @@ class EILoss(Loss):
         self.no_grad = no_grad
         self.model_type = model_type
 
-    def forward(self, x_net, physics, model, csmap, acceleration, **kwargs):
+    def forward(self, x_net, physics, model, csmap, acceleration, start_timepoint_index, **kwargs):
         r"""
         Computes the EI loss
 
@@ -100,7 +100,7 @@ class EILoss(Loss):
         x2_complex = to_torch_complex(x2)
         y = physics(inv=False, data=x2_complex, smaps=csmap).to(csmap.device)
     
-        x3, *_ = model(y, physics, csmap, acceleration, epoch=None)
+        x3, *_ = model(y, physics, csmap, acceleration, start_timepoint_index, epoch=None)
 
         loss_ei = self.weight * self.metric(x3, x2)
         return loss_ei, x2

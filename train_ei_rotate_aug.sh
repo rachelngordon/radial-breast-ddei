@@ -21,4 +21,4 @@ source /gpfs/data/karczmar-lab/workspaces/rachelgordon/micromamba/etc/profile.d/
 micromamba activate recon_mri
 
 # Run the training script with srun
-python3 train.py --config configs/config_ei_rotate_aug.yaml --exp_name lsfp_ei_rotate_af_aug_val8spf
+python3 train.py --config configs/config_ei_rotate_aug.yaml --exp_name lsfp_ei_rotate_af_aug_val8spf --from_checkpoint True

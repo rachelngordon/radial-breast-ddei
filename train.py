@@ -1711,7 +1711,7 @@ sns.lineplot(x=list(spf_grasp_ssim.keys()),
              ax=axes[0, 0])
 
 axes[0, 0].set_title("Evaluation SSIM vs Spokes/Frame")
-axes[0, 0].set_xlabel("Epoch")
+axes[0, 0].set_xlabel("Spokes per Frame")
 axes[0, 0].set_ylabel("SSIM")
 
 
@@ -1727,7 +1727,7 @@ sns.lineplot(x=list(spf_grasp_psnr.keys()),
              marker='o',
              ax=axes[0, 1])
 axes[0, 1].set_title("Evaluation PSNR vs Spokes/Frame")
-axes[0, 1].set_xlabel("Epoch")
+axes[0, 1].set_xlabel("Spokes per Frame")
 axes[0, 1].set_ylabel("PSNR")
 
 
@@ -1743,7 +1743,7 @@ sns.lineplot(x=list(spf_grasp_mse.keys()),
              marker='o',
              ax=axes[0, 2])
 axes[0, 2].set_title("Evaluation Image MSE vs Spokes/Frame")
-axes[0, 2].set_xlabel("Epoch")
+axes[0, 2].set_xlabel("Spokes per Frame")
 axes[0, 2].set_ylabel("MSE")
 
 
@@ -1759,7 +1759,7 @@ sns.lineplot(x=list(spf_grasp_lpips.keys()),
              marker='o',
              ax=axes[1, 0])
 axes[1, 0].set_title("Evaluation LPIPS vs Spokes/Frame")
-axes[1, 0].set_xlabel("Epoch")
+axes[1, 0].set_xlabel("Spokes per Frame")
 axes[1, 0].set_ylabel("LPIPS")
 
 sns.lineplot(x=list(spf_recon_dc_mae.keys()), 
@@ -1774,7 +1774,7 @@ sns.lineplot(x=list(spf_grasp_dc_mae.keys()),
              marker='o',
              ax=axes[1, 1])
 axes[1, 1].set_title("Evaluation k-space MAE vs Spokes/Frame")
-axes[1, 1].set_xlabel("Epoch")
+axes[1, 1].set_xlabel("Spokes per Frame")
 axes[1, 1].set_ylabel("MAE")
 
 sns.lineplot(x=list(spf_recon_corr.keys()), 
@@ -1789,7 +1789,7 @@ sns.lineplot(x=list(spf_grasp_corr.keys()),
              marker='o',
              ax=axes[1, 2])
 axes[1, 2].set_title("Tumor Enhancement Curve Correlation vs Spokes/Frame")
-axes[1, 2].set_xlabel("Epoch")
+axes[1, 2].set_xlabel("Spokes per Frame")
 axes[1, 2].set_ylabel("Pearson Correlation Coefficient")
 
 plt.tight_layout()

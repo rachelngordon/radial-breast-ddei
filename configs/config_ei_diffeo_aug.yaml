@@ -14,7 +14,7 @@ data:
   eval_spokes: 8
   spf_aug: true
   weight_accelerations: false
-  fpg: 24
+  fpg: 16
   train_spokes_per_frame: None
 
 # Experiment settings

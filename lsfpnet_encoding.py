@@ -68,6 +68,12 @@ class BasicBlock(nn.Module):
         self.style_injector_L = nn.Linear(self.style_dim, self.channels * 2) # *2 for scale and bias
         self.style_injector_S = nn.Linear(self.style_dim, self.channels * 2)
 
+        # identity-init the FiLM so training starts from no modulation
+        # nn.init.zeros_(self.style_injector_L.weight)
+        # nn.init.zeros_(self.style_injector_L.bias)
+        # nn.init.zeros_(self.style_injector_S.weight)
+        # nn.init.zeros_(self.style_injector_S.bias)
+
 
         self.conv1_forward_l = nn.Parameter(init.xavier_normal_(torch.Tensor(self.channels, 1, 3, 3, 3)))
         self.conv2_forward_l = nn.Parameter(init.xavier_normal_(torch.Tensor(self.channels, self.channels, 3, 3, 3)))
@@ -117,93 +123,90 @@ class BasicBlock(nn.Module):
 
         # --- START OF THE ROBUST COMPLEX SVD FIX ---
 
-        svd_input_complex = c * y_L + pt_L
+        svd_input = c * y_L + pt_L                                # (nx*ny, nt) complex
+        U, Svals, Vh = torch.linalg.svd(svd_input, full_matrices=False)
+        U_d = U.detach()                                           # break phase-dependent path
+        Vh_d = Vh.detach()
+        St_shrunk = Project_inf(Svals, self.lambda_L)#, to_complex=False)
+        pt_L = U_d @ torch.diag_embed(St_shrunk) @ Vh_d    
 
-        # 1. Store the original magnitude and phase of the complex matrix.
-        #    Add a small epsilon to the magnitude to prevent division by zero when calculating phase.
-        svd_input_mag = svd_input_complex.abs() + 1e-8
-        original_phase = svd_input_complex / svd_input_mag
+        # svd_input_complex = c * y_L + pt_L
 
-        noise_std = 1e-3 # A small standard deviation for the noise
-        noise = torch.randn_like(svd_input_mag) * noise_std
+        # # 1. Store the original magnitude and phase of the complex matrix.
+        # #    Add a small epsilon to the magnitude to prevent division by zero when calculating phase.
+        # svd_input_mag = svd_input_complex.abs() + 1e-8
+        # original_phase = svd_input_complex / svd_input_mag
 
-        stable_svd_input = svd_input_mag + noise #epsilon
+        # noise_std = 1e-3 # A small standard deviation for the noise
+        # noise = torch.randn_like(svd_input_mag) * noise_std
 
-        # # Assume 'stable_svd_input' is your original non-square matrix A that causes the error
-        # # It has shape (m, n)
-        # A = stable_svd_input
-
-        # # 1. Choose a small regularization parameter
-        # alpha = 1e-6 # This is a hyperparameter you can tune
-
-        # # 2. Get the dimensions
-        # m, n = A.shape
-        # device = A.device
-        # dtype = A.dtype
-
-        # # 3. Create the identity matrix for augmentation. It must be n x n.
-        # #    Note: We take the square root of alpha for the augmentation.
-        # identity_aug = torch.sqrt(torch.tensor(alpha)) * torch.eye(n, device=device, dtype=dtype)
-
-        # # 4. Stack the original matrix A on top of the scaled identity
-        # A_aug = torch.cat([A, identity_aug], dim=0)
+        # stable_svd_input = svd_input_mag + noise #epsilon
 
 
-        # print(f"Checking 'some_tensor' for NaNs before SVD: {torch.isnan(stable_svd_input).any().item()}")
+        # # # Assume 'stable_svd_input' is your original non-square matrix A that causes the error
+        # # # It has shape (m, n)
+        # # A = stable_svd_input
+
+        # # # 1. Choose a small regularization parameter
+        # # alpha = 1e-6 # This is a hyperparameter you can tune
+
+        # # # 2. Get the dimensions
+        # # m, n = A.shape
+        # # device = A.device
+        # # dtype = A.dtype
+
+        # # # 3. Create the identity matrix for augmentation. It must be n x n.
+        # # #    Note: We take the square root of alpha for the augmentation.
+        # # identity_aug = torch.sqrt(torch.tensor(alpha)) * torch.eye(n, device=device, dtype=dtype)
+
+        # # # 4. Stack the original matrix A on top of the scaled identity
+        # # A_aug = torch.cat([A, identity_aug], dim=0)
 
 
-        # Right before your SVD call
-        if torch.isnan(stable_svd_input).any() or torch.isinf(stable_svd_input).any():
-            print("!!! SVD input contains NaN or Inf values. Halting. !!!")
-            # You might want to save the tensor here for debugging
-            # torch.save(stable_svd_input, 'svd_input_error_tensor.pt')
-            # Or enter a debugger
-            import pdb; pdb.set_trace()
+        # # print(f"Checking 'some_tensor' for NaNs before SVD: {torch.isnan(stable_svd_input).any().item()}")
+
+
+        # # Right before your SVD call
+        # if torch.isnan(stable_svd_input).any() or torch.isinf(stable_svd_input).any():
+        #     print("!!! SVD input contains NaN or Inf values. Halting. !!!")
+        #     # You might want to save the tensor here for debugging
+        #     # torch.save(stable_svd_input, 'svd_input_error_tensor.pt')
+        #     # Or enter a debugger
+        #     import pdb; pdb.set_trace()
 
         
-        # # 5. Perform SVD on the well-conditioned augmented matrix
-        # #    This should now converge without an error.
-        # U_aug, S, Vh = torch.linalg.svd(A_aug, full_matrices=False)
+        # # # 5. Perform SVD on the well-conditioned augmented matrix
+        # # #    This should now converge without an error.
+        # # U_aug, S, Vh = torch.linalg.svd(A_aug, full_matrices=False)
 
-        # # The resulting S and Vh are the regularized singular values and right singular vectors you need.
-        # # Note: U_aug corresponds to the augmented (m+n) x n matrix. If you need U for the
-        # # original m x n matrix, you would typically only use the first m rows of U_aug.
-        # Ut = U_aug[:m, :]
-        # Vt = Vh
-        # # St is just S, but you can give it the same name for consistency
-        # St = S #torch.diag(S) # or just use the vector S depending on your needs
+        # # # The resulting S and Vh are the regularized singular values and right singular vectors you need.
+        # # # Note: U_aug corresponds to the augmented (m+n) x n matrix. If you need U for the
+        # # # original m x n matrix, you would typically only use the first m rows of U_aug.
+        # # Ut = U_aug[:m, :]
+        # # Vt = Vh
+        # # # St is just S, but you can give it the same name for consistency
+        # # St = S #torch.diag(S) # or just use the vector S depending on your needs
 
 
-        # 2. Perform SVD on the REAL-VALUED magnitude matrix. 
-        #    This completely avoids the complex svd_backward error.
-        #    Using linalg.svd is fine here since the input is real.
-        Ut, St, Vt = torch.linalg.svd(stable_svd_input, full_matrices=False)
+        # # 2. Perform SVD on the REAL-VALUED magnitude matrix. 
+        # #    This completely avoids the complex svd_backward error.
+        # #    Using linalg.svd is fine here since the input is real.
+        # Ut, St, Vt = torch.linalg.svd(stable_svd_input, full_matrices=False)
 
-         # 3. Apply the shrinkage/thresholding to the real singular values.
-        #    (Project_inf operates on magnitudes, so this is correct).
-        St_shrunk = Project_inf(St, self.lambda_L, to_complex=False)
+        #  # 3. Apply the shrinkage/thresholding to the real singular values.
+        # #    (Project_inf operates on magnitudes, so this is correct).
+        # St_shrunk = Project_inf(St, self.lambda_L, to_complex=False)
 
-        # 4. Reconstruct the new, thresholded MAGNITUDE matrix.
-        pt_L_mag = Ut @ torch.diag_embed(St_shrunk) @ Vt
+        # # 4. Reconstruct the new, thresholded MAGNITUDE matrix.
+        # pt_L_mag = Ut @ torch.diag_embed(St_shrunk) @ Vt
 
-        # 5. Re-apply the original phase to our new magnitude matrix to get the
-        #    final complex-valued update term.
-        pt_L = pt_L_mag * original_phase
+        # # 5. Re-apply the original phase to our new magnitude matrix to get the
+        # #    final complex-valued update term.
+        # pt_L = pt_L_mag * original_phase
 
+        # Ut, St, Vt = torch.linalg.svd((c * y_L + pt_L), full_matrices=False)
         # temp_St = torch.diag(Project_inf(St, self.lambda_L))
         # pt_L = Ut.mm(temp_St).mm(Vt)
-
-
-        # 3. Apply the shrinkage/thresholding to the real singular values.
-        #    (Project_inf operates on magnitudes, so this is correct).
-        St_shrunk = Project_inf(St, self.lambda_L, to_complex=False)
-
-        # 4. Reconstruct the new, thresholded MAGNITUDE matrix.
-        pt_L_mag = Ut @ torch.diag_embed(St_shrunk) @ Vt
-
-        # 5. Re-apply the original phase to our new magnitude matrix to get the
-        #    final complex-valued update term.
-        pt_L = pt_L_mag * original_phase
 
 
         # update p_L
@@ -229,6 +232,22 @@ class BasicBlock(nn.Module):
             temp_y_L = F.relu(temp_y_L * (scale_L + 1) + bias_L)
         else: 
             temp_y_L = F.relu(temp_y_L)
+
+        # # L branch FiLM (bounded modulation; identity at init)
+        # style_params_L = self.style_injector_L(style_embedding) if style_embedding is not None else None
+        # if style_params_L is not None:
+        #     scale_L_raw, bias_L_raw = style_params_L.chunk(2, dim=-1)
+        #     # keep modulation small and well-behaved
+        #     scale_L = 0.1 * torch.tanh(scale_L_raw)
+        #     bias_L  = 0.1 * torch.tanh(bias_L_raw)
+
+        #     # reshape for broadcasting over (H, W, T)
+        #     scale_L = scale_L.view(-1, self.channels, 1, 1, 1)
+        #     bias_L  = bias_L.view(-1, self.channels, 1, 1, 1)
+
+        #     temp_y_L = F.relu(temp_y_L * (1.0 + scale_L) + bias_L)
+        # else:
+        #     temp_y_L = F.relu(temp_y_L)
         
 
         temp_y_L_output = F.conv3d(temp_y_L, self.conv3_forward_l, padding=1)
@@ -289,6 +308,21 @@ class BasicBlock(nn.Module):
             temp_y_S = F.relu(temp_y_S * (scale_S + 1) + bias_S)
         else:
             temp_y_S = F.relu(temp_y_S)
+
+        # # S branch FiLM (same idea)
+        # style_params_S = self.style_injector_S(style_embedding) if style_embedding is not None else None
+        # if style_params_S is not None:
+        #     scale_S_raw, bias_S_raw = style_params_S.chunk(2, dim=-1)
+        #     scale_S = 0.1 * torch.tanh(scale_S_raw)
+        #     bias_S  = 0.1 * torch.tanh(bias_S_raw)
+
+        #     # reshape for broadcasting over (H, W, T)
+        #     scale_S = scale_S.view(-1, self.channels, 1, 1, 1)
+        #     bias_S  = bias_S.view(-1, self.channels, 1, 1, 1)
+
+        #     temp_y_S = F.relu(temp_y_S * (1.0 + scale_S) + bias_S)
+        # else:
+        #     temp_y_S = F.relu(temp_y_S)
 
 
         temp_y_S_output = F.conv3d(temp_y_S, self.conv3_forward_s, padding=1)
@@ -419,6 +453,17 @@ class ArtifactRemovalLSFPNet(nn.Module):
         scale = zf.abs().max() + 1e-8                     # scalar, grads OK
         return zf / scale, data / scale, scale
     
+
+    @staticmethod
+    def _normalise_baseline(zf: torch.Tensor, data: torch.Tensor):
+        """
+        Per-dynamic-series max-magnitude scaling (paper default).
+        Both `zf` (image) and `data` (k-space) share the SAME scalar.
+        """
+        scale = zf[..., 0].abs().mean() + 1e-8                     # scalar, grads OK
+        return zf / scale, data / scale, scale
+    
+    
     @staticmethod
     def _normalise_indep(x: torch.Tensor):
         """
@@ -442,6 +487,8 @@ class ArtifactRemovalLSFPNet(nn.Module):
             # 2. Normalize the image and k-space INDEPENDENTLY.
             x_init_norm, scale = self._normalise_indep(x_init)
             y_norm, scale_y = self._normalise_indep(y)
+        elif norm == "baseline":
+            x_init_norm, y_norm, scale = self._normalise_baseline(x_init, y)
         elif norm == "none":
             x_init_norm = x_init
             y_norm = y
@@ -449,10 +496,21 @@ class ArtifactRemovalLSFPNet(nn.Module):
 
         # Generate style embedding from the acceleration factor and/or time start index
         if acceleration or start_timepoint_index:
+            # # feature 1: inv acceleration (≈ spf / (H*pi/2)), roughly in [~0.02, ~0.07]
+            # H = x_init_norm.shape[-2]
+            # N_full = H * np.pi / 2.0
+            # inv_af = (1.0 / acceleration.clamp_min(1e-6)).view(-1, 1)          # smaller numbers are safer
+            # # spf_est = (N_full / acceleration.clamp_min(1e-6)).view(-1, 1)      # useful too
+            # inv_af_feat = inv_af                                             # already small
 
             if start_timepoint_index is not None:
+                # # feature 2: start index as fraction of total frames
+                # T = x_init_norm.shape[-1]
+                # start_frac = (start_timepoint_index / max(T - 1, 1)).view(-1, 1)
 
                 if acceleration is not None:
+                    # concatenate normalized features
+                    # combined_input = torch.cat([inv_af_feat, start_frac], dim=1).to(x_init_norm.device)
                     combined_input = torch.cat(
                         (acceleration.float().view(-1, 1), start_timepoint_index.float().view(-1, 1)),
                         dim=1
@@ -460,8 +518,10 @@ class ArtifactRemovalLSFPNet(nn.Module):
 
                 else:
                     combined_input = start_timepoint_index
+                    # combined_input = start_frac
             else:
                 combined_input = acceleration
+                # combined_input = inv_af_feat
 
             style_embedding = self.mapping_network(combined_input)
 

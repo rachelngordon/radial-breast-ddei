@@ -597,6 +597,7 @@ def sliding_window_inference(H, W, N_frames, ktraj, dcomp, nufft_ob, adjnufft_ob
         if start_timepoint_index is not None:
             start_timepoint_index = torch.tensor([start_idx], dtype=torch.float, device=device)
 
+        # print("Time encoding: ", start_timepoint_index.item())
 
         # generate reconstruction
         x_recon_chunk, adj_loss, *_ = model(

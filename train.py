@@ -455,6 +455,8 @@ if args.from_checkpoint == False and config['debugging']['calc_step_0'] == True:
             if config['model']['encode_time_index'] == False:
                 start_timepoint_index = None
 
+            # print("Time encoding: ", start_timepoint_index.item())
+
             x_recon, adj_loss, lambda_L, lambda_S, lambda_spatial_L, lambda_spatial_S, gamma, lambda_step = model(
                 measured_kspace.to(device), physics, csmap, acceleration_encoding, start_timepoint_index, epoch="train0", norm=config['model']['norm']
             )
@@ -572,7 +574,7 @@ if args.from_checkpoint == False and config['debugging']['calc_step_0'] == True:
             grasp_dc_mses.append(dc_mse_grasp)
             grasp_dc_maes.append(dc_mae_grasp)
 
-            ssim, psnr, mse, lpips, dc_mse, dc_mae, recon_corr, grasp_corr = eval_sample(measured_kspace, csmap, ground_truth, x_recon, eval_physics, mask, grasp_recon, acceleration, eval_dir, label='val0', device=device)
+            ssim, psnr, mse, lpips, dc_mse, dc_mae, recon_corr, grasp_corr = eval_sample(measured_kspace, csmap, ground_truth, x_recon, eval_physics, mask, grasp_recon, acceleration, int(N_spokes), eval_dir, label='val0', device=device)
             initial_eval_ssims.append(ssim)
             initial_eval_psnrs.append(psnr)
             initial_eval_mses.append(mse)
@@ -753,8 +755,10 @@ else:
 
             if config['model']['encode_time_index'] == False:
                 start_timepoint_index = None
-            else:
-                start_timepoint_index = torch.tensor([0], dtype=torch.float, device=device)
+            # else:
+            #     start_timepoint_index = torch.tensor([0], dtype=torch.float, device=device)
+
+            # print("Time encoding: ", start_timepoint_index.item())
 
 
             x_recon, adj_loss, lambda_L, lambda_S, lambda_spatial_L, lambda_spatial_S, gamma, lambda_step = model(
@@ -824,7 +828,7 @@ else:
 
             plot_reconstruction_sample(
                 x_recon,
-                f"Training Sample - Epoch {epoch} (AF = {round(acceleration.item(), 1)})",
+                f"Training Sample - Epoch {epoch} (AF = {round(acceleration.item(), 1)}, SPF = {int(N_spokes)})",
                 f"train_sample_epoch_{epoch}",
                 output_dir,
             )
@@ -839,7 +843,7 @@ else:
 
                 plot_reconstruction_sample(
                     t_img,
-                    f"Transformed Train Sample - Epoch {epoch} (AF = {round(acceleration.item(), 1)})",
+                    f"Transformed Train Sample - Epoch {epoch} (AF = {round(acceleration.item(), 1)}, SPF = {int(N_spokes)})",
                     f"transforms/transform_train_sample_epoch_{epoch}",
                     output_dir,
                     x_recon,
@@ -964,7 +968,7 @@ else:
 
 
                 ## Evaluation
-                ssim, psnr, mse, lpips, dc_mse, dc_mae, recon_corr, _ = eval_sample(val_kspace_batch, val_csmap, val_ground_truth, val_x_recon, eval_physics, val_mask, val_grasp_img_tensor, acceleration, eval_dir, f'epoch{epoch}', device)
+                ssim, psnr, mse, lpips, dc_mse, dc_mae, recon_corr, _ = eval_sample(val_kspace_batch, val_csmap, val_ground_truth, val_x_recon, eval_physics, val_mask, val_grasp_img_tensor, acceleration, int(N_spokes), eval_dir, f'epoch{epoch}', device)
                 epoch_eval_ssims.append(ssim)
                 epoch_eval_psnrs.append(psnr)
                 epoch_eval_mses.append(mse)
@@ -999,7 +1003,7 @@ else:
             
             plot_reconstruction_sample(
                 val_x_recon,
-                f"Validation Sample - Epoch {epoch} (AF = {round(acceleration.item(), 1)})",
+                f"Validation Sample - Epoch {epoch} (AF = {round(acceleration.item(), 1)}, SPF = {int(N_spokes)})",
                 f"val_sample_epoch_{epoch}",
                 output_dir,
                 val_grasp_img
@@ -1019,7 +1023,7 @@ else:
             if use_ei_loss:
                 plot_reconstruction_sample(
                     val_t_img,
-                    f"Transformed Validation Sample - Epoch {epoch} (AF = {round(acceleration.item(), 1)})",
+                    f"Transformed Validation Sample - Epoch {epoch} (AF = {round(acceleration.item(), 1)}, SPF = {int(N_spokes)})",
                     f"transforms/transform_val_sample_epoch_{epoch}",
                     output_dir,
                     val_x_recon,
@@ -1476,7 +1480,7 @@ with torch.no_grad():
 
 
             ## Evaluation
-            ssim, psnr, mse, lpips, dc_mse, dc_mae, recon_corr, grasp_corr = eval_sample(kspace, csmap, ground_truth, x_recon, physics, mask, grasp_img, acceleration, eval_dir, f"{spokes}spf", device)
+            ssim, psnr, mse, lpips, dc_mse, dc_mae, recon_corr, grasp_corr = eval_sample(kspace, csmap, ground_truth, x_recon, physics, mask, grasp_img, acceleration, int(spokes), eval_dir, f"{spokes}spf", device)
             stress_test_ssims.append(ssim)
             stress_test_psnrs.append(psnr)
             stress_test_mses.append(mse)
@@ -1626,7 +1630,7 @@ with torch.no_grad():
 
 
             ## Evaluation
-            ssim, psnr, mse, lpips, dc_mse, dc_mae, recon_corr, grasp_corr = eval_sample(kspace, csmap, ground_truth, x_recon, physics, mask, grasp_img, acceleration, eval_dir, f'{spokes}spf', device)
+            ssim, psnr, mse, lpips, dc_mse, dc_mae, recon_corr, grasp_corr = eval_sample(kspace, csmap, ground_truth, x_recon, physics, mask, grasp_img, acceleration, int(spokes), eval_dir, f'{spokes}spf', device)
             spf_eval_ssims.append(ssim)
             spf_eval_psnrs.append(psnr)
             spf_eval_mses.append(mse)

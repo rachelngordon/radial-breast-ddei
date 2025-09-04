@@ -263,6 +263,7 @@ def plot_spatial_quality(
     grasp_comparison_filename: str,
     data_range: float, 
     acceleration: float,
+    spokes_per_frame: int, 
 ):
     """
     Generates a comparison plot for a single time frame in a 2x4 grid.
@@ -286,7 +287,7 @@ def plot_spatial_quality(
 
     # Create a 2x4 plot grid
     fig, axes = plt.subplots(2, 4, figsize=(24, 12))
-    fig.suptitle(f"Spatial Quality Comparison at Time Frame {time_frame_index} with AF {acceleration}", fontsize=20)
+    fig.suptitle(f"Spatial Quality Comparison at Time Frame {time_frame_index} with AF {acceleration} and SPF {spokes_per_frame}", fontsize=20)
 
     # --- Top Row: DL Reconstruction Comparison ---
     axes[0, 0].imshow(gt_img, cmap='gray')
@@ -337,7 +338,7 @@ def plot_spatial_quality(
 
     # Create a 1x4 plot grid
     fig, axes = plt.subplots(1, 4, figsize=(24, 6))
-    fig.suptitle(f"DL vs GRASP Comparison at Time Frame {time_frame_index} with AF {acceleration}", fontsize=20)
+    fig.suptitle(f"DL vs GRASP Comparison at Time Frame {time_frame_index} with AF {acceleration} and SPF {spokes_per_frame}", fontsize=20)
 
     # --- Top Row: DL Reconstruction Comparison ---
     axes[0].imshow(grasp_img, cmap='gray')
@@ -376,6 +377,7 @@ def plot_temporal_curves(
     time_points: np.ndarray,
     filename: str, 
     acceleration: float,
+    spokes_per_frame: int, 
 ):
     """
     Plots the mean signal intensity vs. time for different tissue regions.
@@ -397,7 +399,7 @@ def plot_temporal_curves(
 
     fig, axes = plt.subplots(1, len(regions), figsize=(7 * len(regions), 5), sharey=True)
     if len(regions) == 1: axes = [axes] # Ensure axes is always a list
-    fig.suptitle(f"Temporal Fidelity: Mean Signal vs. Time (AF = {acceleration})", fontsize=16)
+    fig.suptitle(f"Temporal Fidelity: Mean Signal vs. Time (AF = {acceleration}, SPF = {spokes_per_frame})", fontsize=16)
 
     for i, region in enumerate(regions):
         mask = masks[region]
@@ -491,6 +493,7 @@ def plot_single_temporal_curve(
     num_frames: int,
     filename: str,
     acceleration: float,
+    spokes_per_frame: int,
     # New arguments required for this specific plot style:
     frames_to_show: List[int] = None,
 ):
@@ -532,7 +535,7 @@ def plot_single_temporal_curve(
 
     # --- 1. Setup Figure and Layout ---
     fig = plt.figure(figsize=(20, 8.5))
-    fig.suptitle(f"Tumor Enhancement Over Time (AF = {acceleration})")
+    fig.suptitle(f"Tumor Enhancement Over Time (AF = {acceleration}, SPF = {spokes_per_frame})")
     gs = gridspec.GridSpec(2, 4, figure=fig, hspace=0.1, wspace=0.1)
 
     ax_curve = fig.add_subplot(gs[:, 0:2])
@@ -598,6 +601,7 @@ def plot_time_series(
     grasp_img_stack: np.ndarray,
     filename: str,
     acceleration: float,
+    spokes_per_frame: int, 
 ):
     """
     Plots the middle 5 time points for Ground Truth, DL Recon, and GRASP.
@@ -614,7 +618,7 @@ def plot_time_series(
     indices = np.linspace(0, num_frames - 1, 5, dtype=int)
     
     fig, axes = plt.subplots(3, 5, figsize=(25, 15))
-    fig.suptitle(f"Temporal Series Comparison (AF = {acceleration})", fontsize=20)
+    fig.suptitle(f"Temporal Series Comparison (AF = {acceleration}, SPF = {spokes_per_frame})", fontsize=20)
 
     # --- Row 1: Ground Truth ---
     for i, frame_idx in enumerate(indices):
@@ -870,7 +874,7 @@ def eval_grasp(kspace, csmap, ground_truth, grasp_recon, physics, device, output
     return ssim_grasp, psnr_grasp, mse_grasp, lpips_grasp, dc_mse_grasp, dc_mae_grasp
 
 
-def eval_sample(kspace, csmap, ground_truth, x_recon, physics, mask, grasp_img, acceleration, output_dir, label, device):
+def eval_sample(kspace, csmap, ground_truth, x_recon, physics, mask, grasp_img, acceleration, spokes_per_frame, output_dir, label, device):
 
     acceleration = round(acceleration.item(), 1)
 
@@ -982,6 +986,13 @@ def eval_sample(kspace, csmap, ground_truth, x_recon, physics, mask, grasp_img, 
 
     aif_time_points = np.linspace(0, 150, num_frames)
 
+    ssim = torchmetrics.image.StructuralSimilarityIndexMeasure(data_range=data_range).to(device)
+
+    test_ssim = ssim(recon_mag_scaled, torch.tensor(recon_mag_np, device=recon_mag_scaled.device))
+    print(f"---- Debugging step: SSIM between ssim input and plot input: {test_ssim}")
+
+    
+
     print("\nGenerating diagnostic plots...")
     if mask['malignant'].any() and label is not None:
         
@@ -998,6 +1009,7 @@ def eval_sample(kspace, csmap, ground_truth, x_recon, physics, mask, grasp_img, 
             grasp_comparison_filename=os.path.join(output_dir, f"grasp_comparison_{label}.png"),
             data_range=data_range,
             acceleration=acceleration,
+            spokes_per_frame=spokes_per_frame,
         )
 
         # --- Plot Temporal Curves for Key Regions ---
@@ -1010,6 +1022,7 @@ def eval_sample(kspace, csmap, ground_truth, x_recon, physics, mask, grasp_img, 
             time_points=aif_time_points,
             filename=os.path.join(output_dir, f"temporal_curves_{label}.png"),
             acceleration=acceleration,
+            spokes_per_frame=spokes_per_frame,
         )
 
         plot_single_temporal_curve(
@@ -1019,6 +1032,7 @@ def eval_sample(kspace, csmap, ground_truth, x_recon, physics, mask, grasp_img, 
             num_frames=num_frames,
             filename=os.path.join(output_dir, f"recon_temporal_curve_{label}.png"),
             acceleration=acceleration,
+            spokes_per_frame=spokes_per_frame,
         )
 
         # plot_single_temporal_curve(
@@ -1043,6 +1057,7 @@ def eval_sample(kspace, csmap, ground_truth, x_recon, physics, mask, grasp_img, 
             grasp_img_stack=grasp_mag_np,
             filename=os.path.join(output_dir, f"time_points_{label}.png"),
             acceleration=acceleration,
+            spokes_per_frame=spokes_per_frame,
         )
 
         print("Diagnostic plots saved.")

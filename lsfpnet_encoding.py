@@ -25,6 +25,26 @@ def from_torch_complex(x: torch.Tensor):
     return rearrange(torch.view_as_real(x), "b ... c -> b c ...").contiguous()
 
 
+def _realify(a: torch.Tensor) -> torch.Tensor:
+    """2x2 real block representation of complex matrix
+    returns R(a) = [[Re a, -Im a], [Im a, Re a]] with shape (2m, 2n)
+    """
+    ar = torch.view_as_real(a)                              # (m, n, 2)
+    x = ar[..., 0]                                          # Re
+    y = ar[..., 1]                                          # Im
+    top = torch.cat([x, -y], dim=-1)                        # (m, 2n)
+    bot = torch.cat([y,  x], dim=-1)                        # (m, 2n)
+    return torch.cat([top, bot], dim=-2)                    # (2m, 2n)
+
+def _de_realify(r: torch.Tensor) -> torch.Tensor:
+    """inverse of _realify; expects r with shape (2m, 2n) laid out as [[X, -Y], [Y, X]]"""
+    m2, n2 = r.shape[-2], r.shape[-1]
+    m, n = m2 // 2, n2 // 2
+    x = r[..., :m, :n]
+    y = r[..., m:, :n]
+    return x + 1j * y
+
+
 class MappingNetwork(nn.Module):
     """Maps a scalar input to a style vector using a simple MLP."""
     def __init__(self, style_dim, channels, num_layers=4):
@@ -45,6 +65,8 @@ class MappingNetwork(nn.Module):
             x = x.unsqueeze(1)
 
         return self.net(x)
+
+
 
 
 # define LSFP-Net Block
@@ -69,10 +91,10 @@ class BasicBlock(nn.Module):
         self.style_injector_S = nn.Linear(self.style_dim, self.channels * 2)
 
         # identity-init the FiLM so training starts from no modulation
-        # nn.init.zeros_(self.style_injector_L.weight)
-        # nn.init.zeros_(self.style_injector_L.bias)
-        # nn.init.zeros_(self.style_injector_S.weight)
-        # nn.init.zeros_(self.style_injector_S.bias)
+        nn.init.zeros_(self.style_injector_L.weight)
+        nn.init.zeros_(self.style_injector_L.bias)
+        nn.init.zeros_(self.style_injector_S.weight)
+        nn.init.zeros_(self.style_injector_S.bias)
 
 
         self.conv1_forward_l = nn.Parameter(init.xavier_normal_(torch.Tensor(self.channels, 1, 3, 3, 3)))
@@ -122,6 +144,16 @@ class BasicBlock(nn.Module):
         # pt_L
 
         # --- START OF THE ROBUST COMPLEX SVD FIX ---
+
+        # """
+        # real SVD proximal on the 2x2 block realification (exact, phase-safe)
+        # """
+        # svd_input = c * y_L + pt_L                                 # (nx*ny, nt) complex
+        # R = _realify(svd_input)                                     # (2M, 2N) real
+        # Ur, Sr, VrT = torch.linalg.svd(R, full_matrices=False)
+        # Sr_shrunk = torch.clamp(Sr - self.lambda_L, min=0.0)        # same tau as complex case
+        # R_prox = Ur @ torch.diag_embed(Sr_shrunk) @ VrT
+        # pt_L = _de_realify(R_prox)                                  # back to complex
 
         svd_input = c * y_L + pt_L                                # (nx*ny, nt) complex
         U, Svals, Vh = torch.linalg.svd(svd_input, full_matrices=False)
@@ -216,38 +248,38 @@ class BasicBlock(nn.Module):
         temp_y_L = F.relu(temp_y_L)
         temp_y_L = F.conv3d(temp_y_L, self.conv2_forward_l, padding=1)
 
-        if style_embedding is not None:
-            # print("encoding acceleration...")
-            # Inject style here
-            style_params_L = self.style_injector_L(style_embedding)
-            # Assuming style_embedding is [1, style_dim], params will be [1, channels * 2]
-            scale_L, bias_L = style_params_L.chunk(2, dim=-1) # Split into [1, channels] each
+        # if style_embedding is not None:
+        #     # print("encoding acceleration...")
+        #     # Inject style here
+        #     style_params_L = self.style_injector_L(style_embedding)
+        #     # Assuming style_embedding is [1, style_dim], params will be [1, channels * 2]
+        #     scale_L, bias_L = style_params_L.chunk(2, dim=-1) # Split into [1, channels] each
 
-            # Reshape for broadcasting over the feature map: [2, channels, nx, ny, nt]
-            # We apply the same style to real and imaginary parts.
-            scale_L = scale_L.view(1, self.channels, 1, 1, 1)
-            bias_L = bias_L.view(1, self.channels, 1, 1, 1)
+        #     # Reshape for broadcasting over the feature map: [2, channels, nx, ny, nt]
+        #     # We apply the same style to real and imaginary parts.
+        #     scale_L = scale_L.view(1, self.channels, 1, 1, 1)
+        #     bias_L = bias_L.view(1, self.channels, 1, 1, 1)
 
-            # Modulate and then apply ReLU. Add 1 to scale to initialize near identity.
-            temp_y_L = F.relu(temp_y_L * (scale_L + 1) + bias_L)
-        else: 
-            temp_y_L = F.relu(temp_y_L)
-
-        # # L branch FiLM (bounded modulation; identity at init)
-        # style_params_L = self.style_injector_L(style_embedding) if style_embedding is not None else None
-        # if style_params_L is not None:
-        #     scale_L_raw, bias_L_raw = style_params_L.chunk(2, dim=-1)
-        #     # keep modulation small and well-behaved
-        #     scale_L = 0.1 * torch.tanh(scale_L_raw)
-        #     bias_L  = 0.1 * torch.tanh(bias_L_raw)
-
-        #     # reshape for broadcasting over (H, W, T)
-        #     scale_L = scale_L.view(-1, self.channels, 1, 1, 1)
-        #     bias_L  = bias_L.view(-1, self.channels, 1, 1, 1)
-
-        #     temp_y_L = F.relu(temp_y_L * (1.0 + scale_L) + bias_L)
-        # else:
+        #     # Modulate and then apply ReLU. Add 1 to scale to initialize near identity.
+        #     temp_y_L = F.relu(temp_y_L * (scale_L + 1) + bias_L)
+        # else: 
         #     temp_y_L = F.relu(temp_y_L)
+
+        # L branch FiLM (bounded modulation; identity at init)
+        style_params_L = self.style_injector_L(style_embedding) if style_embedding is not None else None
+        if style_params_L is not None:
+            scale_L_raw, bias_L_raw = style_params_L.chunk(2, dim=-1)
+            # keep modulation small and well-behaved
+            scale_L = 0.1 * torch.tanh(scale_L_raw)
+            bias_L  = 0.1 * torch.tanh(bias_L_raw)
+
+            # reshape for broadcasting over (H, W, T)
+            scale_L = scale_L.view(-1, self.channels, 1, 1, 1)
+            bias_L  = bias_L.view(-1, self.channels, 1, 1, 1)
+
+            temp_y_L = F.relu(temp_y_L * (1.0 + scale_L) + bias_L)
+        else:
+            temp_y_L = F.relu(temp_y_L)
         
 
         temp_y_L_output = F.conv3d(temp_y_L, self.conv3_forward_l, padding=1)
@@ -297,32 +329,32 @@ class BasicBlock(nn.Module):
         temp_y_S = F.relu(temp_y_S)
         temp_y_S = F.conv3d(temp_y_S, self.conv2_forward_s, padding=1)
 
-        if style_embedding is not None:
-            # print("encoding acceleration...")
-            # Inject style here
-            style_params_S = self.style_injector_S(style_embedding)
-            scale_S, bias_S = style_params_S.chunk(2, dim=-1)
-            scale_S = scale_S.view(1, self.channels, 1, 1, 1)
-            bias_S = bias_S.view(1, self.channels, 1, 1, 1)
+        # if style_embedding is not None:
+        #     # print("encoding acceleration...")
+        #     # Inject style here
+        #     style_params_S = self.style_injector_S(style_embedding)
+        #     scale_S, bias_S = style_params_S.chunk(2, dim=-1)
+        #     scale_S = scale_S.view(1, self.channels, 1, 1, 1)
+        #     bias_S = bias_S.view(1, self.channels, 1, 1, 1)
 
-            temp_y_S = F.relu(temp_y_S * (scale_S + 1) + bias_S)
-        else:
-            temp_y_S = F.relu(temp_y_S)
-
-        # # S branch FiLM (same idea)
-        # style_params_S = self.style_injector_S(style_embedding) if style_embedding is not None else None
-        # if style_params_S is not None:
-        #     scale_S_raw, bias_S_raw = style_params_S.chunk(2, dim=-1)
-        #     scale_S = 0.1 * torch.tanh(scale_S_raw)
-        #     bias_S  = 0.1 * torch.tanh(bias_S_raw)
-
-        #     # reshape for broadcasting over (H, W, T)
-        #     scale_S = scale_S.view(-1, self.channels, 1, 1, 1)
-        #     bias_S  = bias_S.view(-1, self.channels, 1, 1, 1)
-
-        #     temp_y_S = F.relu(temp_y_S * (1.0 + scale_S) + bias_S)
+        #     temp_y_S = F.relu(temp_y_S * (scale_S + 1) + bias_S)
         # else:
         #     temp_y_S = F.relu(temp_y_S)
+
+        # S branch FiLM (same idea)
+        style_params_S = self.style_injector_S(style_embedding) if style_embedding is not None else None
+        if style_params_S is not None:
+            scale_S_raw, bias_S_raw = style_params_S.chunk(2, dim=-1)
+            scale_S = 0.1 * torch.tanh(scale_S_raw)
+            bias_S  = 0.1 * torch.tanh(bias_S_raw)
+
+            # reshape for broadcasting over (H, W, T)
+            scale_S = scale_S.view(-1, self.channels, 1, 1, 1)
+            bias_S  = bias_S.view(-1, self.channels, 1, 1, 1)
+
+            temp_y_S = F.relu(temp_y_S * (1.0 + scale_S) + bias_S)
+        else:
+            temp_y_S = F.relu(temp_y_S)
 
 
         temp_y_S_output = F.conv3d(temp_y_S, self.conv3_forward_s, padding=1)
@@ -496,32 +528,32 @@ class ArtifactRemovalLSFPNet(nn.Module):
 
         # Generate style embedding from the acceleration factor and/or time start index
         if acceleration or start_timepoint_index:
-            # # feature 1: inv acceleration (≈ spf / (H*pi/2)), roughly in [~0.02, ~0.07]
-            # H = x_init_norm.shape[-2]
-            # N_full = H * np.pi / 2.0
-            # inv_af = (1.0 / acceleration.clamp_min(1e-6)).view(-1, 1)          # smaller numbers are safer
-            # # spf_est = (N_full / acceleration.clamp_min(1e-6)).view(-1, 1)      # useful too
-            # inv_af_feat = inv_af                                             # already small
+            # feature 1: inv acceleration (≈ spf / (H*pi/2)), roughly in [~0.02, ~0.07]
+            H = x_init_norm.shape[-2]
+            N_full = H * np.pi / 2.0
+            inv_af = (1.0 / acceleration.clamp_min(1e-6)).view(-1, 1)          # smaller numbers are safer
+            spf_est = (N_full / acceleration.clamp_min(1e-6)).view(-1, 1)      # useful too
+            inv_af_feat = inv_af                                             # already small
 
             if start_timepoint_index is not None:
-                # # feature 2: start index as fraction of total frames
-                # T = x_init_norm.shape[-1]
-                # start_frac = (start_timepoint_index / max(T - 1, 1)).view(-1, 1)
+                # feature 2: start index as fraction of total frames
+                T = x_init_norm.shape[-1]
+                start_frac = (start_timepoint_index / max(T - 1, 1)).view(-1, 1)
 
                 if acceleration is not None:
                     # concatenate normalized features
-                    # combined_input = torch.cat([inv_af_feat, start_frac], dim=1).to(x_init_norm.device)
-                    combined_input = torch.cat(
-                        (acceleration.float().view(-1, 1), start_timepoint_index.float().view(-1, 1)),
-                        dim=1
-                    )
+                    combined_input = torch.cat([inv_af_feat, start_frac], dim=1).to(x_init_norm.device)
+                    # combined_input = torch.cat(
+                    #     (acceleration.float().view(-1, 1), start_timepoint_index.float().view(-1, 1)),
+                    #     dim=1
+                    # )
 
                 else:
-                    combined_input = start_timepoint_index
-                    # combined_input = start_frac
+                    # combined_input = start_timepoint_index
+                    combined_input = start_frac
             else:
-                combined_input = acceleration
-                # combined_input = inv_af_feat
+                # combined_input = acceleration
+                combined_input = inv_af_feat
 
             style_embedding = self.mapping_network(combined_input)
 

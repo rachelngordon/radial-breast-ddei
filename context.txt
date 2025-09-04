@@ -576,7 +576,7 @@ else:
         if epoch % save_interval == 0:
             plot_reconstruction_sample(
                 x_recon,
-                f"Training Sample - Epoch {epoch} (AF = {round(acceleration.item(), 1)})",
+                f"Training Sample - Epoch {epoch} (AF = {round(acceleration.item(), 1)}, SPF = {int(N_spokes)})",
                 f"train_sample_epoch_{epoch}",
                 output_dir,
             )
@@ -587,7 +587,7 @@ else:
             if use_ei_loss:
                 plot_reconstruction_sample(
                     t_img,
-                    f"Transformed Train Sample - Epoch {epoch} (AF = {round(acceleration.item(), 1)})",
+                    f"Transformed Train Sample - Epoch {epoch} (AF = {round(acceleration.item(), 1)}, SPF = {int(N_spokes)})",
                     f"transforms/transform_train_sample_epoch_{epoch}",
                     output_dir,
                     x_recon,
@@ -695,7 +695,7 @@ else:
         if epoch % save_interval == 0:
             plot_reconstruction_sample(
                 val_x_recon,
-                f"Validation Sample - Epoch {epoch} (AF = {round(acceleration.item(), 1)})",
+                f"Validation Sample - Epoch {epoch} (AF = {round(acceleration.item(), 1)}, SPF = {int(N_spokes)})",
                 f"val_sample_epoch_{epoch}",
                 output_dir,
                 val_grasp_img
@@ -710,7 +710,7 @@ else:
             if use_ei_loss:
                 plot_reconstruction_sample(
                     val_t_img,
-                    f"Transformed Validation Sample - Epoch {epoch} (AF = {round(acceleration.item(), 1)})",
+                    f"Transformed Validation Sample - Epoch {epoch} (AF = {round(acceleration.item(), 1)}, SPF = {int(N_spokes)})",
                     f"transforms/transform_val_sample_epoch_{epoch}",
                     output_dir,
                     val_x_recon,
@@ -1993,7 +1993,6 @@ def sliding_window_inference(H, W, N_frames, ktraj, dcomp, nufft_ob, adjnufft_ob
         physics_chunk = MCNUFFT(nufft_ob, adjnufft_ob, ktraj_chunk, dcomp_chunk)
         if start_timepoint_index is not None:
             start_timepoint_index = torch.tensor([start_idx], dtype=torch.float, device=device)
-        print("Time encoding: ", start_timepoint_index.item())
         x_recon_chunk, adj_loss, *_ = model(
             kspace_chunk.to(device), physics_chunk, csmap, acceleration_encoding, start_timepoint_index, epoch=epoch, norm="both"
         )
@@ -2533,6 +2532,9 @@ def eval_sample(kspace, csmap, ground_truth, x_recon, physics, mask, grasp_img, 
     masks_np = {key: val.cpu().numpy().squeeze().astype(bool) for key, val in mask.items()}
     num_frames = recon_mag_np.shape[2]
     aif_time_points = np.linspace(0, 150, num_frames)
+    ssim = torchmetrics.image.StructuralSimilarityIndexMeasure(data_range=data_range).to(device)
+    test_ssim = ssim(recon_mag_scaled, torch.tensor(recon_mag_np, device=recon_mag_scaled.device))
+    print(f"---- Debugging step: SSIM between ssim input and plot input: {test_ssim}")
     print("\nGenerating diagnostic plots...")
     if mask['malignant'].any() and label is not None:
         peak_frame = num_frames // 3
@@ -2939,4 +2941,390 @@ class SimulatedSPFDataset(Dataset):
         ground_truth_torch = torch.from_numpy(ground_truth_complex).permute(2, 0, 1) # T, H, W
         ground_truth_torch = torch.stack([ground_truth_torch.real, ground_truth_torch.imag], dim=0)
         return smap_torch, simImg_torch, grasp_recon_torch, mask, grasp_path #, parMap, aif, S0, T10, mask
+
+=== ei.py ===
+from typing import Union
+import torch
+import torch.nn as nn
+from deepinv.loss.loss import Loss
+from deepinv.loss.metric.metric import Metric
+from deepinv.transform.base import Transform
+from einops import rearrange
+from radial import to_torch_complex
+class EILoss(Loss):
+    r"""
+    Equivariant imaging self-supervised loss.
+    Assumes that the set of signals is invariant to a group of transformations (rotations, translations, etc.)
+    in order to learn from incomplete measurement data alone https://https://arxiv.org/pdf/2103.14756.pdf.
+    The EI loss is defined as
+    .. math::
+        \| T_g \hat{x} - \inverse{\forw{T_g \hat{x}}}\|^2
+    where :math:`\hat{x}=\inverse{y}` is a reconstructed signal and
+    :math:`T_g` is a transformation sampled at random from a group :math:`g\sim\group`.
+    By default, the error is computed using the MSE metric, however any other metric (e.g., :math:`\ell_1`)
+    can be used as well.
+    :param deepinv.transform.Transform transform: Transform to generate the virtually augmented measurement.
+        It can be any torch-differentiable function (e.g., a :class:`torch.nn.Module`)
+        including `torchvision transforms <https://pytorch.org/vision/stable/transforms.html>`_.
+    :param Metric, torch.nn.Module metric: Metric used to compute the error between the reconstructed augmented measurement and the reference
+        image.
+    :param bool apply_noise: if ``True``, the augmented measurement is computed with the full sensing model
+        :math:`\sensor{\noise{\forw{\hat{x}}}}` (i.e., noise and sensor model),
+        otherwise is generated as :math:`\forw{\hat{x}}`.
+    :param float weight: Weight of the loss.
+    :param bool no_grad: if ``True``, the gradient does not propagate through :math:`T_g`. Default: ``False``.
+        This option is useful for super-resolution problems, see https://arxiv.org/abs/2312.11232.
+    """
+    def __init__(
+        self,
+        transform: Transform,
+        model_type: str,
+        metric: Union[Metric, nn.Module] = torch.nn.MSELoss(),
+        apply_noise=True,
+        weight=1.0,
+        no_grad=False,
+        *args,
+        **kwargs,
+    ):
+        super(EILoss, self).__init__(*args, **kwargs)
+        self.name = "ei"
+        self.metric = metric
+        self.weight = weight
+        self.T = transform
+        self.noise = apply_noise
+        self.no_grad = no_grad
+        self.model_type = model_type
+    def forward(self, x_net, physics, model, csmap, acceleration, start_timepoint_index, **kwargs):
+        r"""
+        Computes the EI loss
+        :param torch.Tensor x_net: Reconstructed image :math:`\inverse{y}`.
+        :param deepinv.physics.Physics physics: Forward operator associated with the measurements.
+        :param torch.nn.Module model: Reconstruction function.
+        :return: (:class:`torch.Tensor`) loss.
+        """
+        if self.no_grad:
+            with torch.no_grad():
+                x_net_rearranged = rearrange(x_net, 'b c h w t -> b c t h w')
+                x2_rearranged = self.T(x_net_rearranged)
+                x2 = rearrange(x2_rearranged, 'b c t h w -> b c h w t')
+                x2 = x2.detach()
+        else:
+            x_net_rearranged = rearrange(x_net, 'b c h w t -> b c t h w')
+            x2_rearranged = self.T(x_net_rearranged)
+            x2 = rearrange(x2_rearranged, 'b c t h w -> b c h w t')
+        x2_complex = to_torch_complex(x2)
+        y = physics(inv=False, data=x2_complex, smaps=csmap).to(csmap.device)
+        x3, *_ = model(y, physics, csmap, acceleration, start_timepoint_index, epoch=None)
+        loss_ei = self.weight * self.metric(x3, x2)
+        return loss_ei, x2
+
+=== transform.py ===
+import deepinv as dinv
+import torch
+from deepinv.transform import Transform
+from einops import rearrange
+import torch.nn.functional as F
+from torchvision.transforms.functional import rotate
+from typing import Union
+class VideoRotate(Transform):
+    r"""
+    CORRECTED 2D Rotation for Videos (Handles deepinv composition).
+    This class correctly applies a single, consistent random rotation to all frames of a video.
+    It samples angles uniformly from a continuous range and is robust to being called
+    from a deepinv composition operator that pre-flattens the video tensor.
+    :param tuple[float, float] or float degrees: Range of degrees to select from.
+        If degrees is a number instead of sequence like (min, max), the range of degrees
+        will be (-degrees, +degrees).
+    :param str interpolation_mode: "bilinear" or "nearest".
+    :param bool constant_shape: if True, output has the same shape as the input.
+    """
+    def __init__(
+        self,
+        *args,
+        degrees: Union[float, tuple[float, float]] = 180.0,
+        interpolation_mode: str = "bilinear",
+        **kwargs,
+    ):
+        super().__init__(*args, **kwargs)
+        if isinstance(degrees, (int, float)):
+            if degrees < 0:
+                raise ValueError("If degrees is a single number, it must be non-negative.")
+            self.degrees = (-degrees, degrees)
+        else:
+            if len(degrees) != 2:
+                raise ValueError("If degrees is a sequence, it must be of length 2.")
+            self.degrees = degrees
+        self.interpolation_mode = interpolation_mode
+        self.flatten_video_input = False
+    def _get_params(self, x: torch.Tensor) -> dict:
+        """
+        Uniformly samples `n_trans` random angles from the specified continuous range.
+        """
+        angles = [
+            torch.empty(1).uniform_(self.degrees[0], self.degrees[1]).item()
+            for _ in range(self.n_trans)
+        ]
+        return {"theta": angles}
+    def _transform(
+        self,
+        x: torch.Tensor,
+        theta: Union[torch.Tensor, list] = [],
+        **kwargs,
+    ) -> torch.Tensor:
+        """
+        Applies the rotation transformations. This method now explicitly handles 5D video tensors.
+        """
+        if not self._check_x_5D(x):
+             raise ValueError("VideoRotate is designed for 5D video tensors (B, C, T, H, W).")
+        B, C, T, H, W = x.shape
+        if not theta:
+            params = self._get_params(x)
+            theta = params["theta"]
+        if not theta:
+            raise ValueError("Rotation angle 'theta' not provided.")
+        angle_for_video = theta[0]
+        angle_rad = -torch.tensor(angle_for_video) * (torch.pi / 180.0)
+        cos_a, sin_a = torch.cos(angle_rad), torch.sin(angle_rad)
+        self.last_angle = angle_for_video
+        matrix = torch.tensor(
+            [[cos_a, -sin_a, 0], [sin_a, cos_a, 0]], 
+            dtype=torch.float32, device=x.device
+        ).unsqueeze(0)
+        matrix = matrix.repeat(B, 1, 1)
+        grid_single = F.affine_grid(matrix, (B, C, H, W), align_corners=False)
+        grid_expanded = grid_single.repeat_interleave(T, dim=0)
+        x_flat = dinv.physics.TimeMixin.flatten(x)
+        transformed_flat = F.grid_sample(x_flat, grid_expanded, mode=self.interpolation_mode, padding_mode='zeros', align_corners=False)
+        return dinv.physics.TimeMixin.unflatten(transformed_flat, batch_size=B)
+class VideoDiffeo(dinv.transform.CPABDiffeomorphism):
+    """A Diffeomorphism transform that correctly handles 5D video tensors."""
+    def _transform(self, x: torch.Tensor, **params) -> torch.Tensor:
+        if not self._check_x_5D(x):
+            return super()._transform(x, **params)
+        B = x.shape[0]
+        x_flat = dinv.physics.TimeMixin.flatten(x)
+        flat_params = self.get_params(x_flat)
+        transformed_flat = super()._transform(x_flat, **flat_params)
+        return dinv.physics.TimeMixin.unflatten(transformed_flat, batch_size=B)
+class SubsampleTime(Transform):
+    r"""
+    Augments a video by taking a random contiguous temporal sub-sequence of a
+    RANDOM length, and then interpolating it back to the original length.
+    :param int n_trans: Number of transformed versions to generate per input image.
+    :param tuple[float, float] subsample_ratio_range: The min and max ratio of the
+                                                     total time frames to keep (e.g., (0.7, 0.95)).
+    :param torch.Generator rng: Random number generator.
+    """
+    def __init__(self, *args, subsample_ratio_range: tuple[float, float] = (0.7, 0.95), **kwargs):
+        super().__init__(*args, **kwargs)
+        self.flatten_video_input = False  # Operate on 5D tensor
+        min_r, max_r = subsample_ratio_range
+        assert 0.0 < min_r <= max_r <= 1.0, "subsample_ratio_range must be a valid range (min, max) between 0 and 1."
+        self.subsample_ratio_range = subsample_ratio_range
+    def _get_params(self, x: torch.Tensor) -> dict:
+        """
+        Generates a random ratio and a random start index for each transform.
+        """
+        total_time_frames = x.shape[2]  # Shape is (B, C, T, H, W)
+        min_r, max_r = self.subsample_ratio_range
+        ratios = min_r + (max_r - min_r) * torch.rand(self.n_trans, generator=self.rng)
+        start_indices = []
+        for ratio in ratios:
+            subsample_length = int(total_time_frames * ratio.item())
+            if subsample_length >= total_time_frames:
+                start_indices.append(0)
+                continue
+            max_start_index = total_time_frames - subsample_length
+            start_idx = torch.randint(
+                low=0, high=max_start_index + 1, size=(1,), generator=self.rng
+            ).item()
+            start_indices.append(start_idx)
+        return {"ratios": ratios, "start_indices": torch.tensor(start_indices, dtype=torch.long)}
+    def _transform(
+        self, x: torch.Tensor, ratios: torch.Tensor, start_indices: torch.Tensor, **kwargs
+    ) -> torch.Tensor:
+        """Performs the temporal subsampling and resizing for each requested transform."""
+        B, C, total_time_frames, H, W = x.shape
+        assert B == 1, "This transform implementation assumes a batch size of 1 for simplicity."
+        output_list = []
+        for i in range(self.n_trans):
+            ratio = ratios[i]
+            start_idx = start_indices[i]
+            subsample_length = int(total_time_frames * ratio.item())
+            if subsample_length >= total_time_frames:
+                output_list.append(x.clone()) # Use clone to avoid issues
+                continue
+            sub_sequence = x[:, :, start_idx : start_idx + subsample_length, :, :]
+            flat_for_interp = rearrange(sub_sequence, "b c t h w -> b (c h w) t")
+            resized_flat = torch.nn.functional.interpolate(
+                flat_for_interp,
+                size=total_time_frames,
+                mode="linear",
+                align_corners=False,
+            )
+            resized_sequence = rearrange(
+                resized_flat, "b (c h w) t -> b c t h w", c=C, h=H, w=W
+            )
+            output_list.append(resized_sequence)
+        return torch.cat(output_list, dim=0)
+class PeakAwareBiPhasicWarp(Transform):
+    r"""
+    An enhancement-peak-aware temporal augmentation that warps BOTH the wash-in
+    and wash-out phases independently with different random ratios.
+    It finds the time of peak enhancement, splits the video, and then
+    time-warps (compresses/stretches) both phases before reassembling them.
+    :param tuple[float, float] warp_ratio_range: The min/max ratio for
+                                                 compressing a phase. e.g., (0.6, 0.95).
+    """
+    def __init__(self, *args, warp_ratio_range: tuple[float, float] = (0.6, 0.95), **kwargs):
+        super().__init__(*args, **kwargs)
+        self.flatten_video_input = False
+        min_r, max_r = warp_ratio_range
+        assert 0.0 < min_r <= max_r <= 1.0, "warp_ratio_range must be valid."
+        self.warp_ratio_range = warp_ratio_range
+    def _get_params(self, x: torch.Tensor) -> dict:
+        """
+        Generate two independent warp ratios for each requested transform:
+        one for wash-in and one for wash-out.
+        """
+        params_list = []
+        min_r, max_r = self.warp_ratio_range
+        for _ in range(self.n_trans):
+            washin_ratio = min_r + (max_r - min_r) * torch.rand(1, generator=self.rng).item()
+            washout_ratio = min_r + (max_r - min_r) * torch.rand(1, generator=self.rng).item()
+            params_list.append({
+                "washin_ratio": washin_ratio,
+                "washout_ratio": washout_ratio
+            })
+        return {"params_list": params_list}
+    def _transform(self, x: torch.Tensor, params_list: list[dict], **kwargs) -> torch.Tensor:
+        """Applies the independent, bi-phasic warp."""
+        assert x.shape[0] == 1, "This transform assumes a batch size of 1 for the input."
+        mean_signal_curve = torch.mean(x, dim=(0, 1, 3, 4)) # Avg over B, C, H, W
+        peak_idx = torch.argmax(mean_signal_curve)
+        if peak_idx <= 0 or peak_idx >= x.shape[2] - 1:
+            return x.repeat(self.n_trans, 1, 1, 1, 1)
+        output_list = []
+        for params in params_list:
+            wash_in_phase = x[:, :, :peak_idx, :, :]
+            peak_frame = x[:, :, peak_idx:peak_idx+1, :, :]
+            wash_out_phase = x[:, :, peak_idx+1:, :, :]
+            warped_wash_in = self._warp_phase(wash_in_phase, params["washin_ratio"])
+            warped_wash_out = self._warp_phase(wash_out_phase, params["washout_ratio"])
+            new_x = torch.cat([warped_wash_in, peak_frame, warped_wash_out], dim=2)
+            output_list.append(new_x)
+        return torch.cat(output_list, dim=0)
+    def _warp_phase(self, phase_tensor: torch.Tensor, ratio: float) -> torch.Tensor:
+        """Helper function to subsample and interpolate a video phase."""
+        B, C, T_phase, H, W = phase_tensor.shape
+        if T_phase <= 1: # Cannot warp a single frame or empty tensor
+            return phase_tensor
+        subsample_len = max(1, int(T_phase * ratio)) # Ensure at least 1 frame
+        flat_for_interp = rearrange(phase_tensor, "b c t h w -> b (c h w) t")
+        subsampled_flat = F.interpolate(flat_for_interp, size=subsample_len, mode='linear', align_corners=False)
+        resized_flat = F.interpolate(subsampled_flat, size=T_phase, mode='linear', align_corners=False)
+        warped_phase = rearrange(resized_flat, "b (c h w) t -> b c t h w", c=C, h=H, w=W)
+        return warped_phase
+class MonophasicTimeWarp(Transform):
+    r"""
+    A temporal augmentation specifically designed for monophasic enhancement curves
+    (e.g., persistent or plateau types) where there is no wash-out phase.
+    This transform keeps the first (pre-contrast) frame fixed and applies a
+    single, smooth time-warp to the entire subsequent enhancement phase.
+    :param tuple[float, float] warp_ratio_range: The min/max ratio for
+        compressing/stretching the enhancement phase. e.g., (0.7, 1.3).
+        Values < 1 compress time, values > 1 stretch time.
+    """
+    def __init__(self, *args, warp_ratio_range: tuple[float, float] = (0.7, 1.3), **kwargs):
+        super().__init__(*args, **kwargs)
+        self.flatten_video_input = False
+        min_r, max_r = warp_ratio_range
+        assert 0.0 < min_r <= max_r, "warp_ratio_range must be a valid positive range."
+        self.warp_ratio_range = warp_ratio_range
+    def _get_params(self, x: torch.Tensor) -> dict:
+        """
+        Generates a single random warp ratio for the entire enhancement phase.
+        """
+        min_r, max_r = self.warp_ratio_range
+        ratios = [min_r + (max_r - min_r) * torch.rand(1, generator=self.rng) for _ in range(self.n_trans)]
+        return {"ratios": ratios}
+    def _transform(self, x: torch.Tensor, ratios: list[float], **kwargs) -> torch.Tensor:
+        """Applies the monophasic time warp."""
+        assert x.shape[0] == 1, "This transform assumes a batch size of 1 for the input."
+        if x.shape[2] <= 1: # Cannot warp if there's only one frame
+             return x.repeat(self.n_trans, 1, 1, 1, 1)
+        output_list = []
+        for ratio in ratios:
+            pre_contrast_frame = x[:, :, :1, :, :]
+            enhancement_phase = x[:, :, 1:, :, :]
+            warped_enhancement_phase = self._warp_phase(enhancement_phase, ratio)
+            new_x = torch.cat([pre_contrast_frame, warped_enhancement_phase], dim=2)
+            output_list.append(new_x)
+        return torch.cat(output_list, dim=0)
+    def _warp_phase(self, phase_tensor: torch.Tensor, ratio: float) -> torch.Tensor:
+        """Helper function to interpolate a video phase to a new length."""
+        B, C, T_phase, H, W = phase_tensor.shape
+        if T_phase == 0:
+            return phase_tensor
+        ratio = ratio.item()
+        new_length = int(round(T_phase * ratio))
+        if new_length == 0: new_length = 1 # Ensure at least one frame
+        flat_for_interp = rearrange(phase_tensor, "b c t h w -> b (c h w) t")
+        resized_flat = F.interpolate(flat_for_interp, size=new_length, mode='linear', align_corners=False)
+        if new_length != T_phase:
+            resized_flat = F.interpolate(resized_flat, size=T_phase, mode='linear', align_corners=False)
+        warped_phase = rearrange(resized_flat, "b (c h w) t -> b c t h w", c=C, h=H, w=W)
+        return warped_phase
+class TemporalNoise(Transform):
+    """ 
+    Adds low-frequency random noise to the temporal signal of a video.
+    This simulates smooth, slowly varying noise sources over time.
+    """
+    def __init__(self, *args, noise_strength: float = 0.5, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.flatten_video_input = False
+        self.noise_strength = noise_strength
+    def _get_params(self, x: torch.Tensor) -> dict:
+        """
+        Generates a single low-frequency noise vector for the transformation.
+        """
+        B, C, T, H, W = x.shape
+        low_res_T = max(1, T // 4) 
+        noise_low_res = torch.randn(B, 1, low_res_T, device=x.device)
+        noise_high_res = F.interpolate(noise_low_res, size=T, mode='linear', align_corners=False)
+        noise_norm = (noise_high_res - noise_high_res.mean(dim=-1, keepdim=True)) / (noise_high_res.std(dim=-1, keepdim=True) + 1e-8)
+        final_noise = noise_norm * self.noise_strength
+        return {'noise': final_noise}
+    def _transform(self, x: torch.Tensor, noise: torch.Tensor, **kwargs) -> torch.Tensor:
+        """
+        Applies the pre-generated noise to the image tensor.
+        """
+        B, C, T, H, W = x.shape
+        x_noisy = x + noise.view(B, 1, T, 1, 1)
+        return x_noisy
+class TimeReverse(Transform):
+    r"""
+    Reverses the temporal order of frames in a video tensor.
+    This transform flips the video along the time axis, effectively playing it
+    backwards. This is a deterministic transformation.
+    :param int n_trans: Number of transformed versions to generate per input image.
+                        Since this is deterministic, it will just repeat the same
+                        output if n_trans > 1.
+    """
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.flatten_video_input = False
+    def _get_params(self, x: torch.Tensor) -> dict:
+        """
+        No random parameters are needed for time reversal as it's a
+        deterministic operation.
+        """
+        return {}
+    def _transform(self, x: torch.Tensor, **kwargs) -> torch.Tensor:
+        """
+        Applies the time reversal transformation using torch.flip().
+        """
+        if len(x.shape) != 5:
+            raise ValueError(f"TimeReverse expects a 5D tensor (B, C, T, H, W), but got shape {x.shape}.")
+        return torch.flip(x, dims=[2])
 

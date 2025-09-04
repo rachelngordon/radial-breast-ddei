@@ -986,10 +986,10 @@ def eval_sample(kspace, csmap, ground_truth, x_recon, physics, mask, grasp_img, 
 
     aif_time_points = np.linspace(0, 150, num_frames)
 
-    ssim = torchmetrics.image.StructuralSimilarityIndexMeasure(data_range=data_range).to(device)
-
-    test_ssim = ssim(recon_mag_scaled, torch.tensor(recon_mag_np, device=recon_mag_scaled.device))
-    print(f"---- Debugging step: SSIM between ssim input and plot input: {test_ssim}")
+    # ssim = torchmetrics.image.StructuralSimilarityIndexMeasure(data_range=data_range).to(device)
+    # recon_mag_scaled = rearrange(recon_mag_scaled.squeeze(), 't h w -> h w t')
+    # test_ssim = ssim(recon_mag_scaled.unsqueeze(0), torch.tensor(recon_mag_np, device=recon_mag_scaled.device).unsqueeze(0))
+    # print(f"---- Debugging step: SSIM between ssim input and plot input: {test_ssim}")
 
     
 

@@ -67,36 +67,66 @@ class MappingNetwork(nn.Module):
         return self.net(x)
 
 
-
-
-# define LSFP-Net Block
+# new BasicBlock with FiLM bounding and configurable SVD methods
 class BasicBlock(nn.Module):
-    def __init__(self, lambdas, channels=32, style_dim=128):
-        super(BasicBlock, self).__init__()
+    """
+    one unrolled LS+S block with:
+      - nuclear-norm prox via SVD (two modes: 'detached_uv' or 'mag')
+      - positivity via softplus on all hyper-parameters
+      - optional hard low-k projection inside the DC gradient
+      - FiLM conditioning with identity init and bounded modulation
 
+    Args:
+        lambdas: dict with keys {'lambda_L','lambda_S','lambda_spatial_L','lambda_spatial_S','gamma','lambda_step'}
+        channels: conv width
+        style_dim: FiLM MLP latent dim
+        svd_mode: 'detached_uv' (recommended) or 'mag' (real-SVD on |Z|)
+        use_lowk_dc: if True, replace low-k residual with measured data inside gradient
+        lowk_frac: fraction of radii treated as “low-k” (e.g., 0.10–0.15)
+        lowk_alpha: blend for low-k (1.0 hard replace, 0.9 soft blend)
+        film_bounded: if True, use tanh-bounded modulation; else raw scale+1, bias
+        film_gain: magnitude of modulation when film_bounded=True
+        film_identity_init: if True, FiLM heads are zero-initialized (identity)
+        svd_mag_noise_std: optional noise std added to |Z| in 'mag' mode (0 means none)
+    """
+    def __init__(
+        self,
+        lambdas,
+        channels=32,
+        style_dim=128,
+        svd_mode: str = "detached_uv",
+        use_lowk_dc: bool = True,
+        lowk_frac: float = 0.125,
+        lowk_alpha: float = 1.0,
+        film_bounded: bool = True,
+        film_gain: float = 0.10,
+        film_identity_init: bool = True,
+        svd_noise_std: float = 0.0,
+        film_L: bool = True,
+    ):
+        super().__init__()
         self.channels = channels
         self.style_dim = style_dim
+        self.film_L = film_L
 
-        self.lambda_L = nn.Parameter(torch.tensor([lambdas['lambda_L']]))
-        self.lambda_S = nn.Parameter(torch.tensor([lambdas['lambda_S']]))
-        self.lambda_spatial_L = nn.Parameter(torch.tensor([lambdas['lambda_spatial_L']]))
-        self.lambda_spatial_S = nn.Parameter(torch.tensor([lambdas['lambda_spatial_S']]))
+        # learnable raw params; we will softplus them in forward
+        self.lambda_L        = nn.Parameter(torch.tensor([lambdas['lambda_L']]))
+        self.lambda_S        = nn.Parameter(torch.tensor([lambdas['lambda_S']]))
+        self.lambda_spatial_L= nn.Parameter(torch.tensor([lambdas['lambda_spatial_L']]))
+        self.lambda_spatial_S= nn.Parameter(torch.tensor([lambdas['lambda_spatial_S']]))
+        self.gamma           = nn.Parameter(torch.tensor([lambdas['gamma']]))
+        self.lambda_step     = nn.Parameter(torch.tensor([lambdas['lambda_step']]))
 
-        self.gamma = nn.Parameter(torch.tensor([lambdas['gamma']]))
-        self.lambda_step = nn.Parameter(torch.tensor([lambdas['lambda_step']]))
-
-
-        # Linear layers to project style vector to scale and bias
-        self.style_injector_L = nn.Linear(self.style_dim, self.channels * 2) # *2 for scale and bias
+        # FiLM heads
+        if self.film_L:
+            self.style_injector_L = nn.Linear(self.style_dim, self.channels * 2)
         self.style_injector_S = nn.Linear(self.style_dim, self.channels * 2)
+        if film_identity_init:
+            if self.film_L:
+                init.zeros_(self.style_injector_L.weight); init.zeros_(self.style_injector_L.bias)
+            init.zeros_(self.style_injector_S.weight); init.zeros_(self.style_injector_S.bias)
 
-        # identity-init the FiLM so training starts from no modulation
-        nn.init.zeros_(self.style_injector_L.weight)
-        nn.init.zeros_(self.style_injector_L.bias)
-        nn.init.zeros_(self.style_injector_S.weight)
-        nn.init.zeros_(self.style_injector_S.bias)
-
-
+        # 3D conv (real/imag packed as channel=2 at input)
         self.conv1_forward_l = nn.Parameter(init.xavier_normal_(torch.Tensor(self.channels, 1, 3, 3, 3)))
         self.conv2_forward_l = nn.Parameter(init.xavier_normal_(torch.Tensor(self.channels, self.channels, 3, 3, 3)))
         self.conv3_forward_l = nn.Parameter(init.xavier_normal_(torch.Tensor(self.channels, self.channels, 3, 3, 3)))
@@ -113,280 +143,520 @@ class BasicBlock(nn.Module):
         self.conv2_backward_s = nn.Parameter(init.xavier_normal_(torch.Tensor(self.channels, self.channels, 3, 3, 3)))
         self.conv3_backward_s = nn.Parameter(init.xavier_normal_(torch.Tensor(1, self.channels, 3, 3, 3)))
 
+        # runtime knobs for A/B
+        self.svd_mode          = svd_mode
+        self.use_lowk_dc       = use_lowk_dc
+        self.lowk_frac         = lowk_frac
+        self.lowk_alpha        = lowk_alpha
+        self.film_bounded      = film_bounded
+        self.film_gain         = film_gain
+        self.svd_noise_std = svd_noise_std
+
+    @staticmethod
+    def _film(x, style_head, style_embedding, bounded: bool, gain: float):
+        """apply FiLM modulation; identity at init; bounded if requested"""
+        params = style_head(style_embedding)
+        scale_raw, bias_raw = params.chunk(2, dim=-1)
+        if bounded:
+            scale = gain * torch.tanh(scale_raw)
+            bias  = gain * torch.tanh(bias_raw)
+            scale = scale.view(1, -1, 1, 1, 1)
+            bias  = bias.view(1, -1, 1, 1, 1)
+            return F.relu(x * (1.0 + scale) + bias)
+        else:
+            scale = scale_raw.view(1, -1, 1, 1, 1)
+            bias  = bias_raw.view(1, -1, 1, 1, 1)
+            return F.relu(x * (scale + 1.0) + bias)
+
+    @staticmethod
+    def _lowk_project(k_pred: torch.Tensor, y: torch.Tensor, ktraj: torch.Tensor, frac: float, alpha: float):
+        """replace (or blend) low-k samples with measurements (vectorized, complex-safe)"""
+        # ktraj: (2, S, T) -> radii (S, T)
+        r = (ktraj[0]**2 + ktraj[1]**2).sqrt()
+        thr = torch.quantile(r.reshape(-1), frac)
+        M = (r <= thr)
+        M = rearrange(M, 's t -> 1 s t')  # broadcast over coils
+        return torch.where(M, alpha * y + (1.0 - alpha) * k_pred, k_pred)
+
     def forward(self, M0, param_E, param_d, L, S, pt_L, pt_S, p_L, p_S, csmaps, style_embedding=None):
+        """
+        runs one LS+S iteration
+        inputs are complex in (nx, ny, nt) except p_*, pt_* which are packed as in your code
+        returns same tuple as your original implementation
+        """
 
-        # print(f"Checking M0 for NaNs: {torch.isnan(M0).any().item()}")
-        # print(f"Checking L for NaNs: {torch.isnan(L).any().item()}")
-        # print(f"Checking S for NaNs: {torch.isnan(S).any().item()}")
+        # positivity + stable scaling
+        gamma          = F.softplus(self.gamma) + 1e-6
+        lambda_step    = F.softplus(self.lambda_step) + 1e-6
+        lambda_L_eff   = F.softplus(self.lambda_L) + 1e-8
+        lambda_S_eff   = F.softplus(self.lambda_S) + 1e-8
+        lam_sp_L_eff   = F.softplus(self.lambda_spatial_L) + 1e-8
+        lam_sp_S_eff   = F.softplus(self.lambda_spatial_S) + 1e-8
+        c = lambda_step / gamma
 
-        c = self.lambda_step / self.gamma
         nx, ny, nt = M0.size()
 
-        # gradient
-        temp_data = torch.reshape(L + S, [nx, ny, nt])
-        temp_data = param_E(inv=False, data=temp_data, smaps=csmaps).to(param_d.device)
-        gradient = param_E(inv=True, data=temp_data - param_d, smaps=csmaps)
-        gradient = torch.reshape(gradient, [nx * ny, nt]).to(param_d.device)
+        # ----- gradient with optional low‑k projection
+        x_sum  = torch.reshape(L + S, [nx, ny, nt])
+        k_pred = param_E(inv=False, data=x_sum, smaps=csmaps)
+        k_meas = param_d
+        if self.use_lowk_dc:
+            k_proj = self._lowk_project(k_pred, k_meas, param_E.ktraj, self.lowk_frac, self.lowk_alpha)
+        else:
+            k_proj = k_pred
+        gradient = param_E(inv=True, data=k_proj - k_meas, smaps=csmaps)
+        gradient = torch.reshape(gradient, [nx * ny, nt])
 
-        # pb_L
-        pb_L = F.conv3d(p_L, self.conv1_backward_l, padding=1)
-        pb_L = F.relu(pb_L)
-        pb_L = F.conv3d(pb_L, self.conv2_backward_l, padding=1)
-        pb_L = F.relu(pb_L)
+        # ===== L branch ======================================================
+        # conv backprop on p_L
+        pb_L = F.conv3d(p_L, self.conv1_backward_l, padding=1); pb_L = F.relu(pb_L)
+        pb_L = F.conv3d(pb_L, self.conv2_backward_l, padding=1); pb_L = F.relu(pb_L)
         pb_L = F.conv3d(pb_L, self.conv3_backward_l, padding=1)
-
-        pb_L = torch.reshape(torch.squeeze(pb_L), [2, nx * ny, nt])
+        pb_L = rearrange(pb_L.squeeze(), 'two nx ny nt -> two (nx ny) nt', nx=nx, ny=ny)  # already flattened
         pb_L = pb_L[0, :, :] + 1j * pb_L[1, :, :]
 
-        # y_L
-        y_L = L - self.gamma * gradient - self.gamma * pt_L - self.gamma * pb_L
+        y_L = L - gamma * gradient - gamma * pt_L - gamma * pb_L
 
-        # pt_L
+        # prox for nuclear norm on complex matrix
+        Z = c * y_L + pt_L  # (nx*ny, nt) complex
 
-        # --- START OF THE ROBUST COMPLEX SVD FIX ---
+        if self.svd_mode == "detached_uv":
+            U, Svals, Vh = torch.linalg.svd(Z, full_matrices=False)
+            U_d, Vh_d = U.detach(), Vh.detach()
+            S_shrunk = Project_inf(Svals, lambda_L_eff)
+            pt_L = U_d @ torch.diag_embed(S_shrunk) @ Vh_d
 
-        # """
-        # real SVD proximal on the 2x2 block realification (exact, phase-safe)
-        # """
-        # svd_input = c * y_L + pt_L                                 # (nx*ny, nt) complex
-        # R = _realify(svd_input)                                     # (2M, 2N) real
-        # Ur, Sr, VrT = torch.linalg.svd(R, full_matrices=False)
-        # Sr_shrunk = torch.clamp(Sr - self.lambda_L, min=0.0)        # same tau as complex case
-        # R_prox = Ur @ torch.diag_embed(Sr_shrunk) @ VrT
-        # pt_L = _de_realify(R_prox)                                  # back to complex
+        elif self.svd_mode == "mag":
+            mag   = Z.abs() + 1e-8
+            if self.svd_noise_std > 0.0:
+                mag = mag + self.svd_noise_std * torch.randn_like(mag)
+            phase = Z / mag
+            U, Svals, Vh = torch.linalg.svd(mag, full_matrices=False)
+            S_shrunk = Project_inf(Svals, lambda_L_eff, to_complex=False)
+            pt_L_mag = U @ torch.diag_embed(S_shrunk) @ Vh
+            pt_L = pt_L_mag * phase
 
-        svd_input = c * y_L + pt_L                                # (nx*ny, nt) complex
-        U, Svals, Vh = torch.linalg.svd(svd_input, full_matrices=False)
-        U_d = U.detach()                                           # break phase-dependent path
-        Vh_d = Vh.detach()
-        St_shrunk = Project_inf(Svals, self.lambda_L)#, to_complex=False)
-        pt_L = U_d @ torch.diag_embed(St_shrunk) @ Vh_d    
+        elif self.svd_mode == "real":
+            R = _realify(Z)                                     # (2M, 2N) real
+            if self.svd_noise_std > 0.0:
+                R = R + self.svd_noise_std * torch.randn_like(R)
+            Ur, Sr, VrT = torch.linalg.svd(R, full_matrices=False)
+            Sr_shrunk = torch.clamp(Sr - self.lambda_L, min=0.0)        # same tau as complex case
+            R_prox = Ur @ torch.diag_embed(Sr_shrunk) @ VrT
+            pt_L = _de_realify(R_prox) 
 
-        # svd_input_complex = c * y_L + pt_L
-
-        # # 1. Store the original magnitude and phase of the complex matrix.
-        # #    Add a small epsilon to the magnitude to prevent division by zero when calculating phase.
-        # svd_input_mag = svd_input_complex.abs() + 1e-8
-        # original_phase = svd_input_complex / svd_input_mag
-
-        # noise_std = 1e-3 # A small standard deviation for the noise
-        # noise = torch.randn_like(svd_input_mag) * noise_std
-
-        # stable_svd_input = svd_input_mag + noise #epsilon
-
-
-        # # # Assume 'stable_svd_input' is your original non-square matrix A that causes the error
-        # # # It has shape (m, n)
-        # # A = stable_svd_input
-
-        # # # 1. Choose a small regularization parameter
-        # # alpha = 1e-6 # This is a hyperparameter you can tune
-
-        # # # 2. Get the dimensions
-        # # m, n = A.shape
-        # # device = A.device
-        # # dtype = A.dtype
-
-        # # # 3. Create the identity matrix for augmentation. It must be n x n.
-        # # #    Note: We take the square root of alpha for the augmentation.
-        # # identity_aug = torch.sqrt(torch.tensor(alpha)) * torch.eye(n, device=device, dtype=dtype)
-
-        # # # 4. Stack the original matrix A on top of the scaled identity
-        # # A_aug = torch.cat([A, identity_aug], dim=0)
-
-
-        # # print(f"Checking 'some_tensor' for NaNs before SVD: {torch.isnan(stable_svd_input).any().item()}")
-
-
-        # # Right before your SVD call
-        # if torch.isnan(stable_svd_input).any() or torch.isinf(stable_svd_input).any():
-        #     print("!!! SVD input contains NaN or Inf values. Halting. !!!")
-        #     # You might want to save the tensor here for debugging
-        #     # torch.save(stable_svd_input, 'svd_input_error_tensor.pt')
-        #     # Or enter a debugger
-        #     import pdb; pdb.set_trace()
-
-        
-        # # # 5. Perform SVD on the well-conditioned augmented matrix
-        # # #    This should now converge without an error.
-        # # U_aug, S, Vh = torch.linalg.svd(A_aug, full_matrices=False)
-
-        # # # The resulting S and Vh are the regularized singular values and right singular vectors you need.
-        # # # Note: U_aug corresponds to the augmented (m+n) x n matrix. If you need U for the
-        # # # original m x n matrix, you would typically only use the first m rows of U_aug.
-        # # Ut = U_aug[:m, :]
-        # # Vt = Vh
-        # # # St is just S, but you can give it the same name for consistency
-        # # St = S #torch.diag(S) # or just use the vector S depending on your needs
-
-
-        # # 2. Perform SVD on the REAL-VALUED magnitude matrix. 
-        # #    This completely avoids the complex svd_backward error.
-        # #    Using linalg.svd is fine here since the input is real.
-        # Ut, St, Vt = torch.linalg.svd(stable_svd_input, full_matrices=False)
-
-        #  # 3. Apply the shrinkage/thresholding to the real singular values.
-        # #    (Project_inf operates on magnitudes, so this is correct).
-        # St_shrunk = Project_inf(St, self.lambda_L, to_complex=False)
-
-        # # 4. Reconstruct the new, thresholded MAGNITUDE matrix.
-        # pt_L_mag = Ut @ torch.diag_embed(St_shrunk) @ Vt
-
-        # # 5. Re-apply the original phase to our new magnitude matrix to get the
-        # #    final complex-valued update term.
-        # pt_L = pt_L_mag * original_phase
-
-        # Ut, St, Vt = torch.linalg.svd((c * y_L + pt_L), full_matrices=False)
-        # temp_St = torch.diag(Project_inf(St, self.lambda_L))
-        # pt_L = Ut.mm(temp_St).mm(Vt)
-
-
-        # update p_L
-        temp_y_L_input = torch.cat((torch.real(y_L), torch.imag(y_L)), 0).to(torch.float32)
-        temp_y_L_input = torch.reshape(temp_y_L_input, [2, nx, ny, nt]).unsqueeze(1)
-        temp_y_L = F.conv3d(temp_y_L_input, self.conv1_forward_l, padding=1)
-        temp_y_L = F.relu(temp_y_L)
-        temp_y_L = F.conv3d(temp_y_L, self.conv2_forward_l, padding=1)
-
-        # if style_embedding is not None:
-        #     # print("encoding acceleration...")
-        #     # Inject style here
-        #     style_params_L = self.style_injector_L(style_embedding)
-        #     # Assuming style_embedding is [1, style_dim], params will be [1, channels * 2]
-        #     scale_L, bias_L = style_params_L.chunk(2, dim=-1) # Split into [1, channels] each
-
-        #     # Reshape for broadcasting over the feature map: [2, channels, nx, ny, nt]
-        #     # We apply the same style to real and imaginary parts.
-        #     scale_L = scale_L.view(1, self.channels, 1, 1, 1)
-        #     bias_L = bias_L.view(1, self.channels, 1, 1, 1)
-
-        #     # Modulate and then apply ReLU. Add 1 to scale to initialize near identity.
-        #     temp_y_L = F.relu(temp_y_L * (scale_L + 1) + bias_L)
-        # else: 
-        #     temp_y_L = F.relu(temp_y_L)
-
-        # L branch FiLM (bounded modulation; identity at init)
-        style_params_L = self.style_injector_L(style_embedding) if style_embedding is not None else None
-        if style_params_L is not None:
-            scale_L_raw, bias_L_raw = style_params_L.chunk(2, dim=-1)
-            # keep modulation small and well-behaved
-            scale_L = 0.1 * torch.tanh(scale_L_raw)
-            bias_L  = 0.1 * torch.tanh(bias_L_raw)
-
-            # reshape for broadcasting over (H, W, T)
-            scale_L = scale_L.view(-1, self.channels, 1, 1, 1)
-            bias_L  = bias_L.view(-1, self.channels, 1, 1, 1)
-
-            temp_y_L = F.relu(temp_y_L * (1.0 + scale_L) + bias_L)
         else:
-            temp_y_L = F.relu(temp_y_L)
-        
+            raise ValueError(f"unsupported svd_mode: {self.svd_mode}")
 
-        temp_y_L_output = F.conv3d(temp_y_L, self.conv3_forward_l, padding=1)
+        # conv forward L (+ FiLM)
+        # tL_in  = torch.cat((torch.real(y_L), torch.imag(y_L)), 0).to(torch.float32)
+        tL_in = from_torch_complex(y_L)
+        tL_in  = rearrange(tL_in, '(nx ny) two nt -> two 1 nx ny nt', nx=nx, ny=ny)
+        tL     = F.conv3d(tL_in, self.conv1_forward_l, padding=1); tL = F.relu(tL)
+        tL     = F.conv3d(tL,    self.conv2_forward_l, padding=1)
+        if style_embedding is not None and self.film_L:
+            tL = self._film(tL, self.style_injector_L, style_embedding, self.film_bounded, self.film_gain)
+        else:
+            tL = F.relu(tL)
+        tL_out = F.conv3d(tL, self.conv3_forward_l, padding=1)
 
-        temp_y_L = temp_y_L_output + p_L
-        temp_y_L = temp_y_L[0, :, :, :, :] + 1j * temp_y_L[1, :, :, :, :]
-        p_L = Project_inf(c * temp_y_L, self.lambda_spatial_L)
+        tL_out_c = tL_out + p_L
+        tL_out_c = tL_out_c[0, :, :, :, :] + 1j * tL_out_c[1, :, :, :, :]
+        p_L = Project_inf(c * tL_out_c, lam_sp_L_eff)
 
         # new pb_L
-        p_L = torch.cat((torch.real(p_L), torch.imag(p_L)), 0).to(torch.float32)
-        p_L = torch.reshape(p_L, [2, self.channels, nx, ny, nt])
-        pb_L = F.conv3d(p_L, self.conv1_backward_l, padding=1)
-        pb_L = F.relu(pb_L)
-        pb_L = F.conv3d(pb_L, self.conv2_backward_l, padding=1)
-        pb_L = F.relu(pb_L)
-        pb_L_output = F.conv3d(pb_L, self.conv3_backward_l, padding=1)
-
-        pb_L = torch.reshape(pb_L_output, [2, nx * ny, nt])
+        # p_L = torch.cat((torch.real(p_L), torch.imag(p_L)), 0).to(torch.float32)
+        p_L = from_torch_complex(p_L)
+        p_L = rearrange(p_L, 'ch two nx ny nt -> two ch nx ny nt')
+        pb_L = F.conv3d(p_L, self.conv1_backward_l, padding=1); pb_L = F.relu(pb_L)
+        pb_L = F.conv3d(pb_L, self.conv2_backward_l, padding=1); pb_L = F.relu(pb_L)
+        pb_L_out = F.conv3d(pb_L, self.conv3_backward_l, padding=1)
+        pb_L = rearrange(pb_L_out.squeeze(), 'two nx ny nt -> two (nx ny) nt', nx=nx, ny=ny)
+        # pb_L = rearrange(pb_L_out, 'two (nx ny) nt -> two (nx ny) nt', nx=nx, ny=ny)
         pb_L = pb_L[0, :, :] + 1j * pb_L[1, :, :]
 
-        # L
-        L = L - self.gamma * gradient - self.gamma * pt_L - self.gamma * pb_L
+        L = L - gamma * gradient - gamma * pt_L - gamma * pb_L
+        adjloss_L = tL_out * p_L - pb_L_out * tL_in
 
-        # adjoint loss: adjloss_L = psi * x * y - psi_t * y * x
-        adjloss_L = temp_y_L_output * p_L - pb_L_output * temp_y_L_input
-
-        # pb_S
-        pb_S = F.conv3d(p_S, self.conv1_backward_s, padding=1)
-        pb_S = F.relu(pb_S)
-        pb_S = F.conv3d(pb_S, self.conv2_backward_s, padding=1)
-        pb_S = F.relu(pb_S)
+        # ===== S branch ======================================================
+        pb_S = F.conv3d(p_S, self.conv1_backward_s, padding=1); pb_S = F.relu(pb_S)
+        pb_S = F.conv3d(pb_S, self.conv2_backward_s, padding=1); pb_S = F.relu(pb_S)
         pb_S = F.conv3d(pb_S, self.conv3_backward_s, padding=1)
-
-        pb_S = torch.reshape(pb_S, [2, nx * ny, nt])
+        pb_S = rearrange(pb_S.squeeze(), 'two nx ny nt -> two (nx ny) nt', nx=nx, ny=ny)
+        # pb_S = rearrange(pb_S, 'two (nx ny) nt -> two (nx ny) nt', nx=nx, ny=ny)
         pb_S = pb_S[0, :, :] + 1j * pb_S[1, :, :]
 
-        # y_S
-        y_S = S - self.gamma * gradient - self.gamma * Wtxs(pt_S) - self.gamma * pb_S
+        y_S  = S - gamma * gradient - gamma * Wtxs(pt_S) - gamma * pb_S
+        pt_S = Project_inf(c * Wxs(y_S) + pt_S, lambda_S_eff)
 
-        # pt_S
-        pt_S = Project_inf(c * Wxs(y_S) + pt_S, self.lambda_S)
-
-        # update p_S
-        temp_y_S_input = torch.cat((torch.real(y_S), torch.imag(y_S)), 0).to(torch.float32)
-        temp_y_S_input = torch.reshape(temp_y_S_input, [2, nx, ny, nt]).unsqueeze(1)
-        temp_y_S = F.conv3d(temp_y_S_input, self.conv1_forward_s, padding=1)
-        temp_y_S = F.relu(temp_y_S)
-        temp_y_S = F.conv3d(temp_y_S, self.conv2_forward_s, padding=1)
-
-        # if style_embedding is not None:
-        #     # print("encoding acceleration...")
-        #     # Inject style here
-        #     style_params_S = self.style_injector_S(style_embedding)
-        #     scale_S, bias_S = style_params_S.chunk(2, dim=-1)
-        #     scale_S = scale_S.view(1, self.channels, 1, 1, 1)
-        #     bias_S = bias_S.view(1, self.channels, 1, 1, 1)
-
-        #     temp_y_S = F.relu(temp_y_S * (scale_S + 1) + bias_S)
-        # else:
-        #     temp_y_S = F.relu(temp_y_S)
-
-        # S branch FiLM (same idea)
-        style_params_S = self.style_injector_S(style_embedding) if style_embedding is not None else None
-        if style_params_S is not None:
-            scale_S_raw, bias_S_raw = style_params_S.chunk(2, dim=-1)
-            scale_S = 0.1 * torch.tanh(scale_S_raw)
-            bias_S  = 0.1 * torch.tanh(bias_S_raw)
-
-            # reshape for broadcasting over (H, W, T)
-            scale_S = scale_S.view(-1, self.channels, 1, 1, 1)
-            bias_S  = bias_S.view(-1, self.channels, 1, 1, 1)
-
-            temp_y_S = F.relu(temp_y_S * (1.0 + scale_S) + bias_S)
+        # tS_in  = torch.cat((torch.real(y_S), torch.imag(y_S)), 0).to(torch.float32)
+        tS_in = from_torch_complex(y_S)
+        tS_in  = rearrange(tS_in, '(nx ny) two nt -> two 1 nx ny nt', nx=nx, ny=ny)
+        tS     = F.conv3d(tS_in, self.conv1_forward_s, padding=1); tS = F.relu(tS)
+        tS     = F.conv3d(tS,    self.conv2_forward_s, padding=1)
+        if style_embedding is not None:
+            tS = self._film(tS, self.style_injector_S, style_embedding, self.film_bounded, self.film_gain)
         else:
-            temp_y_S = F.relu(temp_y_S)
+            tS = F.relu(tS)
+        tS_out = F.conv3d(tS, self.conv3_forward_s, padding=1)
 
+        tS_out_c = tS_out + p_S
+        tS_out_c = tS_out_c[0, :, :, :, :] + 1j * tS_out_c[1, :, :, :, :]
+        p_S = Project_inf(c * tS_out_c, lam_sp_S_eff)
 
-        temp_y_S_output = F.conv3d(temp_y_S, self.conv3_forward_s, padding=1)
-
-        temp_y_Sp = temp_y_S_output + p_S
-        temp_y_Sp = temp_y_Sp[0, :, :, :, :] + 1j * temp_y_Sp[1, :, :, :, :]
-        p_S = Project_inf(c * temp_y_Sp, self.lambda_spatial_S)
-
-        # new pb_S
-        p_S = torch.cat((torch.real(p_S), torch.imag(p_S)), 0).to(torch.float32)
-        p_S = torch.reshape(p_S, [2, self.channels, nx, ny, nt])
-        pb_S = F.conv3d(p_S, self.conv1_backward_s, padding=1)
-        pb_S = F.relu(pb_S)
-        pb_S = F.conv3d(pb_S, self.conv2_backward_s, padding=1)
-        pb_S = F.relu(pb_S)
-        pb_S_output = F.conv3d(pb_S, self.conv3_backward_s, padding=1)
-
-        pb_S = torch.reshape(pb_S_output, [2, nx * ny, nt])
+        # p_S = torch.cat((torch.real(p_S), torch.imag(p_S)), 0).to(torch.float32)
+        p_S = from_torch_complex(p_S)
+        p_S = rearrange(p_S, 'ch two nx ny nt -> two ch nx ny nt')
+        pb_S = F.conv3d(p_S, self.conv1_backward_s, padding=1); pb_S = F.relu(pb_S)
+        pb_S = F.conv3d(pb_S, self.conv2_backward_s, padding=1); pb_S = F.relu(pb_S)
+        pb_S_out = F.conv3d(pb_S, self.conv3_backward_s, padding=1)
+        pb_S = rearrange(pb_S_out.squeeze(), 'two nx ny nt -> two (nx ny) nt', nx=nx, ny=ny)
+        # pb_S = rearrange(pb_S_out, 'two (nx ny) nt -> two (nx ny) nt', nx=nx, ny=ny)
         pb_S = pb_S[0, :, :] + 1j * pb_S[1, :, :]
 
-        # S
-        S = S - self.gamma * gradient - self.gamma * Wtxs(pt_S) - self.gamma * pb_S
+        S = S - gamma * gradient - gamma * Wtxs(pt_S) - gamma * pb_S
+        adjloss_S = tS_out * p_S - pb_S_out * tS_in
 
-        # adjoint loss: adjloss_S = psi * x * y - psi_t * y * x
-        adjloss_S = temp_y_S_output * p_S - pb_S_output * temp_y_S_input
+        # return the positive (reparam’d) scalars for logging
+        return [
+            L, S, adjloss_L, adjloss_S, pt_L, pt_S, p_L, p_S,
+            lambda_L_eff, lambda_S_eff, lam_sp_L_eff, lam_sp_S_eff, gamma, lambda_step
+        ]
+    
 
-        return [L, S, adjloss_L, adjloss_S, pt_L, pt_S, p_L, p_S, self.lambda_L, self.lambda_S, self.lambda_spatial_L, self.lambda_spatial_S, self.gamma, self.lambda_step]
+
+# define LSFP-Net Block
+# class BasicBlock(nn.Module):
+#     def __init__(self, lambdas, channels=32, style_dim=128):
+#         super(BasicBlock, self).__init__()
+
+#         self.channels = channels
+#         self.style_dim = style_dim
+
+#         self.lambda_L = nn.Parameter(torch.tensor([lambdas['lambda_L']]))
+#         self.lambda_S = nn.Parameter(torch.tensor([lambdas['lambda_S']]))
+#         self.lambda_spatial_L = nn.Parameter(torch.tensor([lambdas['lambda_spatial_L']]))
+#         self.lambda_spatial_S = nn.Parameter(torch.tensor([lambdas['lambda_spatial_S']]))
+
+#         self.gamma = nn.Parameter(torch.tensor([lambdas['gamma']]))
+#         self.lambda_step = nn.Parameter(torch.tensor([lambdas['lambda_step']]))
+
+
+#         # Linear layers to project style vector to scale and bias
+#         self.style_injector_L = nn.Linear(self.style_dim, self.channels * 2) # *2 for scale and bias
+#         self.style_injector_S = nn.Linear(self.style_dim, self.channels * 2)
+
+#         # identity-init the FiLM so training starts from no modulation
+#         nn.init.zeros_(self.style_injector_L.weight)
+#         nn.init.zeros_(self.style_injector_L.bias)
+#         nn.init.zeros_(self.style_injector_S.weight)
+#         nn.init.zeros_(self.style_injector_S.bias)
+
+
+#         self.conv1_forward_l = nn.Parameter(init.xavier_normal_(torch.Tensor(self.channels, 1, 3, 3, 3)))
+#         self.conv2_forward_l = nn.Parameter(init.xavier_normal_(torch.Tensor(self.channels, self.channels, 3, 3, 3)))
+#         self.conv3_forward_l = nn.Parameter(init.xavier_normal_(torch.Tensor(self.channels, self.channels, 3, 3, 3)))
+
+#         self.conv1_backward_l = nn.Parameter(init.xavier_normal_(torch.Tensor(self.channels, self.channels, 3, 3, 3)))
+#         self.conv2_backward_l = nn.Parameter(init.xavier_normal_(torch.Tensor(self.channels, self.channels, 3, 3, 3)))
+#         self.conv3_backward_l = nn.Parameter(init.xavier_normal_(torch.Tensor(1, self.channels, 3, 3, 3)))
+
+#         self.conv1_forward_s = nn.Parameter(init.xavier_normal_(torch.Tensor(self.channels, 1, 3, 3, 3)))
+#         self.conv2_forward_s = nn.Parameter(init.xavier_normal_(torch.Tensor(self.channels, self.channels, 3, 3, 3)))
+#         self.conv3_forward_s = nn.Parameter(init.xavier_normal_(torch.Tensor(self.channels, self.channels, 3, 3, 3)))
+
+#         self.conv1_backward_s = nn.Parameter(init.xavier_normal_(torch.Tensor(self.channels, self.channels, 3, 3, 3)))
+#         self.conv2_backward_s = nn.Parameter(init.xavier_normal_(torch.Tensor(self.channels, self.channels, 3, 3, 3)))
+#         self.conv3_backward_s = nn.Parameter(init.xavier_normal_(torch.Tensor(1, self.channels, 3, 3, 3)))
+
+#     def forward(self, M0, param_E, param_d, L, S, pt_L, pt_S, p_L, p_S, csmaps, style_embedding=None):
+
+#         # print(f"Checking M0 for NaNs: {torch.isnan(M0).any().item()}")
+#         # print(f"Checking L for NaNs: {torch.isnan(L).any().item()}")
+#         # print(f"Checking S for NaNs: {torch.isnan(S).any().item()}")
+
+#         c = self.lambda_step / self.gamma
+#         nx, ny, nt = M0.size()
+
+#         # gradient
+#         temp_data = torch.reshape(L + S, [nx, ny, nt])
+#         temp_data = param_E(inv=False, data=temp_data, smaps=csmaps).to(param_d.device)
+#         gradient = param_E(inv=True, data=temp_data - param_d, smaps=csmaps)
+#         gradient = torch.reshape(gradient, [nx * ny, nt]).to(param_d.device)
+
+#         # pb_L
+#         pb_L = F.conv3d(p_L, self.conv1_backward_l, padding=1)
+#         pb_L = F.relu(pb_L)
+#         pb_L = F.conv3d(pb_L, self.conv2_backward_l, padding=1)
+#         pb_L = F.relu(pb_L)
+#         pb_L = F.conv3d(pb_L, self.conv3_backward_l, padding=1)
+
+#         pb_L = torch.reshape(torch.squeeze(pb_L), [2, nx * ny, nt])
+#         pb_L = pb_L[0, :, :] + 1j * pb_L[1, :, :]
+
+#         # y_L
+#         y_L = L - self.gamma * gradient - self.gamma * pt_L - self.gamma * pb_L
+
+#         # pt_L
+
+#         # --- START OF THE ROBUST COMPLEX SVD FIX ---
+
+#         # """
+#         # real SVD proximal on the 2x2 block realification (exact, phase-safe)
+#         # """
+#         # svd_input = c * y_L + pt_L                                 # (nx*ny, nt) complex
+#         # R = _realify(svd_input)                                     # (2M, 2N) real
+#         # Ur, Sr, VrT = torch.linalg.svd(R, full_matrices=False)
+#         # Sr_shrunk = torch.clamp(Sr - self.lambda_L, min=0.0)        # same tau as complex case
+#         # R_prox = Ur @ torch.diag_embed(Sr_shrunk) @ VrT
+#         # pt_L = _de_realify(R_prox)                                  # back to complex
+
+#         svd_input = c * y_L + pt_L                                # (nx*ny, nt) complex
+#         U, Svals, Vh = torch.linalg.svd(svd_input, full_matrices=False)
+#         U_d = U.detach()                                           # break phase-dependent path
+#         Vh_d = Vh.detach()
+#         St_shrunk = Project_inf(Svals, self.lambda_L)#, to_complex=False)
+#         pt_L = U_d @ torch.diag_embed(St_shrunk) @ Vh_d    
+
+#         # svd_input_complex = c * y_L + pt_L
+
+#         # # 1. Store the original magnitude and phase of the complex matrix.
+#         # #    Add a small epsilon to the magnitude to prevent division by zero when calculating phase.
+#         # svd_input_mag = svd_input_complex.abs() + 1e-8
+#         # original_phase = svd_input_complex / svd_input_mag
+
+#         # noise_std = 1e-3 # A small standard deviation for the noise
+#         # noise = torch.randn_like(svd_input_mag) * noise_std
+
+#         # stable_svd_input = svd_input_mag + noise #epsilon
+
+
+#         # # # Assume 'stable_svd_input' is your original non-square matrix A that causes the error
+#         # # # It has shape (m, n)
+#         # # A = stable_svd_input
+
+#         # # # 1. Choose a small regularization parameter
+#         # # alpha = 1e-6 # This is a hyperparameter you can tune
+
+#         # # # 2. Get the dimensions
+#         # # m, n = A.shape
+#         # # device = A.device
+#         # # dtype = A.dtype
+
+#         # # # 3. Create the identity matrix for augmentation. It must be n x n.
+#         # # #    Note: We take the square root of alpha for the augmentation.
+#         # # identity_aug = torch.sqrt(torch.tensor(alpha)) * torch.eye(n, device=device, dtype=dtype)
+
+#         # # # 4. Stack the original matrix A on top of the scaled identity
+#         # # A_aug = torch.cat([A, identity_aug], dim=0)
+
+
+#         # # print(f"Checking 'some_tensor' for NaNs before SVD: {torch.isnan(stable_svd_input).any().item()}")
+
+
+#         # # Right before your SVD call
+#         # if torch.isnan(stable_svd_input).any() or torch.isinf(stable_svd_input).any():
+#         #     print("!!! SVD input contains NaN or Inf values. Halting. !!!")
+#         #     # You might want to save the tensor here for debugging
+#         #     # torch.save(stable_svd_input, 'svd_input_error_tensor.pt')
+#         #     # Or enter a debugger
+#         #     import pdb; pdb.set_trace()
+
+        
+#         # # # 5. Perform SVD on the well-conditioned augmented matrix
+#         # # #    This should now converge without an error.
+#         # # U_aug, S, Vh = torch.linalg.svd(A_aug, full_matrices=False)
+
+#         # # # The resulting S and Vh are the regularized singular values and right singular vectors you need.
+#         # # # Note: U_aug corresponds to the augmented (m+n) x n matrix. If you need U for the
+#         # # # original m x n matrix, you would typically only use the first m rows of U_aug.
+#         # # Ut = U_aug[:m, :]
+#         # # Vt = Vh
+#         # # # St is just S, but you can give it the same name for consistency
+#         # # St = S #torch.diag(S) # or just use the vector S depending on your needs
+
+
+#         # # 2. Perform SVD on the REAL-VALUED magnitude matrix. 
+#         # #    This completely avoids the complex svd_backward error.
+#         # #    Using linalg.svd is fine here since the input is real.
+#         # Ut, St, Vt = torch.linalg.svd(stable_svd_input, full_matrices=False)
+
+#         #  # 3. Apply the shrinkage/thresholding to the real singular values.
+#         # #    (Project_inf operates on magnitudes, so this is correct).
+#         # St_shrunk = Project_inf(St, self.lambda_L, to_complex=False)
+
+#         # # 4. Reconstruct the new, thresholded MAGNITUDE matrix.
+#         # pt_L_mag = Ut @ torch.diag_embed(St_shrunk) @ Vt
+
+#         # # 5. Re-apply the original phase to our new magnitude matrix to get the
+#         # #    final complex-valued update term.
+#         # pt_L = pt_L_mag * original_phase
+
+#         # Ut, St, Vt = torch.linalg.svd((c * y_L + pt_L), full_matrices=False)
+#         # temp_St = torch.diag(Project_inf(St, self.lambda_L))
+#         # pt_L = Ut.mm(temp_St).mm(Vt)
+
+
+#         # update p_L
+#         temp_y_L_input = torch.cat((torch.real(y_L), torch.imag(y_L)), 0).to(torch.float32)
+#         temp_y_L_input = torch.reshape(temp_y_L_input, [2, nx, ny, nt]).unsqueeze(1)
+#         temp_y_L = F.conv3d(temp_y_L_input, self.conv1_forward_l, padding=1)
+#         temp_y_L = F.relu(temp_y_L)
+#         temp_y_L = F.conv3d(temp_y_L, self.conv2_forward_l, padding=1)
+
+#         # if style_embedding is not None:
+#         #     # print("encoding acceleration...")
+#         #     # Inject style here
+#         #     style_params_L = self.style_injector_L(style_embedding)
+#         #     # Assuming style_embedding is [1, style_dim], params will be [1, channels * 2]
+#         #     scale_L, bias_L = style_params_L.chunk(2, dim=-1) # Split into [1, channels] each
+
+#         #     # Reshape for broadcasting over the feature map: [2, channels, nx, ny, nt]
+#         #     # We apply the same style to real and imaginary parts.
+#         #     scale_L = scale_L.view(1, self.channels, 1, 1, 1)
+#         #     bias_L = bias_L.view(1, self.channels, 1, 1, 1)
+
+#         #     # Modulate and then apply ReLU. Add 1 to scale to initialize near identity.
+#         #     temp_y_L = F.relu(temp_y_L * (scale_L + 1) + bias_L)
+#         # else: 
+#         #     temp_y_L = F.relu(temp_y_L)
+
+#         # L branch FiLM (bounded modulation; identity at init)
+#         style_params_L = self.style_injector_L(style_embedding) if style_embedding is not None else None
+#         if style_params_L is not None:
+#             scale_L_raw, bias_L_raw = style_params_L.chunk(2, dim=-1)
+#             # keep modulation small and well-behaved
+#             scale_L = 0.1 * torch.tanh(scale_L_raw)
+#             bias_L  = 0.1 * torch.tanh(bias_L_raw)
+
+#             # reshape for broadcasting over (H, W, T)
+#             scale_L = scale_L.view(-1, self.channels, 1, 1, 1)
+#             bias_L  = bias_L.view(-1, self.channels, 1, 1, 1)
+
+#             temp_y_L = F.relu(temp_y_L * (1.0 + scale_L) + bias_L)
+#         else:
+#             temp_y_L = F.relu(temp_y_L)
+        
+
+#         temp_y_L_output = F.conv3d(temp_y_L, self.conv3_forward_l, padding=1)
+
+#         temp_y_L = temp_y_L_output + p_L
+#         temp_y_L = temp_y_L[0, :, :, :, :] + 1j * temp_y_L[1, :, :, :, :]
+#         p_L = Project_inf(c * temp_y_L, self.lambda_spatial_L)
+
+#         # new pb_L
+#         p_L = torch.cat((torch.real(p_L), torch.imag(p_L)), 0).to(torch.float32)
+#         p_L = torch.reshape(p_L, [2, self.channels, nx, ny, nt])
+#         pb_L = F.conv3d(p_L, self.conv1_backward_l, padding=1)
+#         pb_L = F.relu(pb_L)
+#         pb_L = F.conv3d(pb_L, self.conv2_backward_l, padding=1)
+#         pb_L = F.relu(pb_L)
+#         pb_L_output = F.conv3d(pb_L, self.conv3_backward_l, padding=1)
+
+#         pb_L = torch.reshape(pb_L_output, [2, nx * ny, nt])
+#         pb_L = pb_L[0, :, :] + 1j * pb_L[1, :, :]
+
+#         # L
+#         L = L - self.gamma * gradient - self.gamma * pt_L - self.gamma * pb_L
+
+#         # adjoint loss: adjloss_L = psi * x * y - psi_t * y * x
+#         adjloss_L = temp_y_L_output * p_L - pb_L_output * temp_y_L_input
+
+#         # pb_S
+#         pb_S = F.conv3d(p_S, self.conv1_backward_s, padding=1)
+#         pb_S = F.relu(pb_S)
+#         pb_S = F.conv3d(pb_S, self.conv2_backward_s, padding=1)
+#         pb_S = F.relu(pb_S)
+#         pb_S = F.conv3d(pb_S, self.conv3_backward_s, padding=1)
+
+#         pb_S = torch.reshape(pb_S, [2, nx * ny, nt])
+#         pb_S = pb_S[0, :, :] + 1j * pb_S[1, :, :]
+
+#         # y_S
+#         y_S = S - self.gamma * gradient - self.gamma * Wtxs(pt_S) - self.gamma * pb_S
+
+#         # pt_S
+#         pt_S = Project_inf(c * Wxs(y_S) + pt_S, self.lambda_S)
+
+#         # update p_S
+#         temp_y_S_input = torch.cat((torch.real(y_S), torch.imag(y_S)), 0).to(torch.float32)
+#         temp_y_S_input = torch.reshape(temp_y_S_input, [2, nx, ny, nt]).unsqueeze(1)
+#         temp_y_S = F.conv3d(temp_y_S_input, self.conv1_forward_s, padding=1)
+#         temp_y_S = F.relu(temp_y_S)
+#         temp_y_S = F.conv3d(temp_y_S, self.conv2_forward_s, padding=1)
+
+#         # if style_embedding is not None:
+#         #     # print("encoding acceleration...")
+#         #     # Inject style here
+#         #     style_params_S = self.style_injector_S(style_embedding)
+#         #     scale_S, bias_S = style_params_S.chunk(2, dim=-1)
+#         #     scale_S = scale_S.view(1, self.channels, 1, 1, 1)
+#         #     bias_S = bias_S.view(1, self.channels, 1, 1, 1)
+
+#         #     temp_y_S = F.relu(temp_y_S * (scale_S + 1) + bias_S)
+#         # else:
+#         #     temp_y_S = F.relu(temp_y_S)
+
+#         # S branch FiLM (same idea)
+#         style_params_S = self.style_injector_S(style_embedding) if style_embedding is not None else None
+#         if style_params_S is not None:
+#             scale_S_raw, bias_S_raw = style_params_S.chunk(2, dim=-1)
+#             scale_S = 0.1 * torch.tanh(scale_S_raw)
+#             bias_S  = 0.1 * torch.tanh(bias_S_raw)
+
+#             # reshape for broadcasting over (H, W, T)
+#             scale_S = scale_S.view(-1, self.channels, 1, 1, 1)
+#             bias_S  = bias_S.view(-1, self.channels, 1, 1, 1)
+
+#             temp_y_S = F.relu(temp_y_S * (1.0 + scale_S) + bias_S)
+#         else:
+#             temp_y_S = F.relu(temp_y_S)
+
+
+#         temp_y_S_output = F.conv3d(temp_y_S, self.conv3_forward_s, padding=1)
+
+#         temp_y_Sp = temp_y_S_output + p_S
+#         temp_y_Sp = temp_y_Sp[0, :, :, :, :] + 1j * temp_y_Sp[1, :, :, :, :]
+#         p_S = Project_inf(c * temp_y_Sp, self.lambda_spatial_S)
+
+#         # new pb_S
+#         p_S = torch.cat((torch.real(p_S), torch.imag(p_S)), 0).to(torch.float32)
+#         p_S = torch.reshape(p_S, [2, self.channels, nx, ny, nt])
+#         pb_S = F.conv3d(p_S, self.conv1_backward_s, padding=1)
+#         pb_S = F.relu(pb_S)
+#         pb_S = F.conv3d(pb_S, self.conv2_backward_s, padding=1)
+#         pb_S = F.relu(pb_S)
+#         pb_S_output = F.conv3d(pb_S, self.conv3_backward_s, padding=1)
+
+#         pb_S = torch.reshape(pb_S_output, [2, nx * ny, nt])
+#         pb_S = pb_S[0, :, :] + 1j * pb_S[1, :, :]
+
+#         # S
+#         S = S - self.gamma * gradient - self.gamma * Wtxs(pt_S) - self.gamma * pb_S
+
+#         # adjoint loss: adjloss_S = psi * x * y - psi_t * y * x
+#         adjloss_S = temp_y_S_output * p_S - pb_S_output * temp_y_S_input
+
+#         return [L, S, adjloss_L, adjloss_S, pt_L, pt_S, p_L, p_S, self.lambda_L, self.lambda_S, self.lambda_spatial_L, self.lambda_spatial_S, self.gamma, self.lambda_step]
 
 
 # define LSFP-Net
 class LSFPNet(nn.Module):
-    def __init__(self, LayerNo, lambdas, channels=32, style_dim=128):
+    def __init__(self, 
+                 LayerNo: int, 
+                 lambdas: dict, 
+                 channels: int = 32, 
+                 style_dim: int = 128,
+                 svd_mode: str = "detached_uv",
+                 use_lowk_dc: bool = True,
+                 lowk_frac: float = 0.125,
+                 lowk_alpha: float = 1.0,
+                 film_bounded: bool = True,
+                 film_gain: float = 0.10,
+                 film_identity_init: bool = True,
+                 svd_noise_std: float = 0.0,
+                 film_L: bool = True,
+        ):
         super(LSFPNet, self).__init__()
         onelayer = []
         self.LayerNo = LayerNo
@@ -394,7 +664,20 @@ class LSFPNet(nn.Module):
         self.style_dim = style_dim
 
         for ii in range(LayerNo):
-            onelayer.append(BasicBlock(lambdas, channels=self.channels, style_dim=style_dim))
+            # onelayer.append(BasicBlock(lambdas, channels=self.channels, style_dim=style_dim))
+            onelayer.append(BasicBlock(lambdas=lambdas, 
+                                       channels=self.channels, 
+                                       style_dim=style_dim,
+                                       svd_mode=svd_mode,
+                                       use_lowk_dc=use_lowk_dc,
+                                       lowk_frac=lowk_frac,
+                                       lowk_alpha=lowk_alpha,
+                                       film_bounded=film_bounded,
+                                       film_gain=film_gain,
+                                       film_identity_init=film_identity_init,
+                                       svd_noise_std=svd_noise_std,
+                                       film_L=film_L,
+                                       ))
 
         self.fcs = nn.ModuleList(onelayer)
 

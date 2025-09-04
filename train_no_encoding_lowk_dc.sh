@@ -2,11 +2,11 @@
 
 # Parameters
 #SBATCH --cpus-per-task=4
-#SBATCH --error=logs/lsfp_mc_curriculum_2spf.err
-#SBATCH --output=logs/lsfp_mc_curriculum_2spf.out
+#SBATCH --error=logs/no_encoding_lowk_dc_detach_uv.err
+#SBATCH --output=logs/no_encoding_lowk_dc_detach_uv.out
 #SBATCH --exclude=''
 #SBATCH --gpus-per-node=1
-#SBATCH --job-name=lsfp_mc_curriculum_2spf
+#SBATCH --job-name=no_encoding_lowk_dc_detach_uv
 #SBATCH --mem-per-gpu=50000
 #SBATCH --nodes=1
 #SBATCH --ntasks-per-node=1
@@ -21,4 +21,4 @@ source /gpfs/data/karczmar-lab/workspaces/rachelgordon/micromamba/etc/profile.d/
 micromamba activate recon_mri
 
 # Run the training script with srun
-python3 train.py --config configs/config_mc_curriculum_2spf.yaml --exp_name lsfp_mc_curriculum_2spf
+python3 train.py --config configs/config_no_encoding_lowk_dc_detach_uv.yaml --exp_name no_encoding_lowk_dc_detach_uv

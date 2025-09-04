@@ -9,6 +9,7 @@ import csv
 import sigpy as sp
 from sigpy.mri import app
 from radial_lsfp import MCNUFFT
+import random
 
 def log_gradient_stats(model, epoch, iteration, output_dir, log_filename="gradient_stats.csv"):
     """
@@ -613,3 +614,13 @@ def sliding_window_inference(H, W, N_frames, ktraj, dcomp, nufft_ob, adjnufft_ob
     stitched_recon /= frame_contribution_count # This performs element-wise division
 
     return stitched_recon, adj_loss
+
+
+def set_seed(seed):
+    torch.manual_seed(seed)
+    np.random.seed(seed)
+    random.seed(seed)
+    # For CUDA reproducibility
+    torch.cuda.manual_seed_all(seed)
+    torch.backends.cudnn.deterministic = True
+    torch.backends.cudnn.benchmark = False

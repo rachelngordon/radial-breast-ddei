@@ -2,11 +2,11 @@
 
 # Parameters
 #SBATCH --cpus-per-task=4
-#SBATCH --error=logs/lsfp_mc_8spf_baseline_norm_no_time_encoding_detach_uv.err
-#SBATCH --output=logs/lsfp_mc_8spf_baseline_norm_no_time_encoding_detach_uv.out
+#SBATCH --error=logs/encode_both_detach_uv_no_lowk_dc.err
+#SBATCH --output=logs/encode_both_detach_uv_no_lowk_dc.out
 #SBATCH --exclude=''
 #SBATCH --gpus-per-node=1
-#SBATCH --job-name=lsfp_mc_8spf_baseline_norm_no_time_encoding_detach_uv
+#SBATCH --job-name=encode_both_detach_uv_no_lowk_dc
 #SBATCH --mem-per-gpu=50000
 #SBATCH --nodes=1
 #SBATCH --ntasks-per-node=1
@@ -21,4 +21,4 @@ source /gpfs/data/karczmar-lab/workspaces/rachelgordon/micromamba/etc/profile.d/
 micromamba activate recon_mri
 
 # Run the training script with srun
-python3 train.py --config configs/config_mc_8spf_baseline_norm.yaml --exp_name lsfp_mc_8spf_baseline_norm_no_time_encoding_detach_uv
+python3 train.py --config configs/config_encode_both_detach_uv.yaml --exp_name encode_both_detach_uv_no_lowk_dc

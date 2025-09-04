@@ -14,7 +14,7 @@ from ei import EILoss
 from mc import MCLoss
 from lsfpnet_encoding import LSFPNet, ArtifactRemovalLSFPNet
 from radial_lsfp import MCNUFFT
-from utils import prep_nufft, log_gradient_stats, plot_enhancement_curve, get_cosine_ei_weight, plot_reconstruction_sample, get_git_commit, save_checkpoint, load_checkpoint, to_torch_complex, GRASPRecon, sliding_window_inference
+from utils import prep_nufft, log_gradient_stats, plot_enhancement_curve, get_cosine_ei_weight, plot_reconstruction_sample, get_git_commit, save_checkpoint, load_checkpoint, to_torch_complex, GRASPRecon, sliding_window_inference, set_seed
 from eval import eval_grasp, eval_sample
 import csv
 import math
@@ -22,6 +22,8 @@ import random
 import time 
 import seaborn as sns
 from loss_metrics import LPIPSVideoMetric, SSIMVideoMetric
+
+set_seed(12)
 
 # Parse command-line arguments
 parser = argparse.ArgumentParser(description="Train ReconResNet model.")
@@ -205,7 +207,13 @@ else:
     )
 
 
+def seed_worker(worker_id):
+    worker_seed = torch.initial_seed() % 2**32
+    np.random.seed(worker_seed)
+    random.seed(worker_seed)
 
+g = torch.Generator()
+g.manual_seed(12)
 
 train_loader = DataLoader(
     train_dataset,
@@ -213,6 +221,8 @@ train_loader = DataLoader(
     shuffle=config["dataloader"]["shuffle"],
     num_workers=config["dataloader"]["num_workers"],
     pin_memory=True,
+    worker_init_fn=seed_worker,
+    generator=g,
 )
 
 
@@ -245,7 +255,7 @@ val_dro_dataset = SimulatedDataset(
 val_dro_loader = DataLoader(
     val_dro_dataset,
     batch_size=config["dataloader"]["batch_size"],
-    shuffle=config["dataloader"]["shuffle"],
+    shuffle=False,
     num_workers=config["dataloader"]["num_workers"],
     pin_memory=True,
 )
@@ -254,7 +264,20 @@ val_dro_loader = DataLoader(
 
 
 # define model
-lsfp_backbone = LSFPNet(LayerNo=config["model"]["num_layers"], lambdas=initial_lambdas, channels=config['model']['channels'])
+lsfp_backbone = LSFPNet(LayerNo=config["model"]["num_layers"], 
+                        lambdas=initial_lambdas, 
+                        channels=config['model']['channels'],
+                        style_dim=config['model']['style_dim'],
+                        svd_mode=config['model']['svd_mode'],
+                        use_lowk_dc=config['model']['use_lowk_dc'],
+                        lowk_frac=config['model']['lowk_frac'],
+                        lowk_alpha=config['model']['lowk_alpha'],
+                        film_bounded=config['model']['film_bounded'],
+                        film_gain=config['model']['film_gain'],
+                        film_identity_init=config['model']['film_identity_init'],
+                        svd_noise_std=config['model']['svd_noise_std'],
+                        film_L=config['model']['film_L'],
+                        )
 
 if config['model']['encode_acceleration'] and config['model']['encode_time_index']:
     model = ArtifactRemovalLSFPNet(lsfp_backbone, block_dir, channels=2).to(device)
@@ -677,7 +700,7 @@ else:
                         val_dro_loader = DataLoader(
                             val_dro_dataset,
                             batch_size=config["dataloader"]["batch_size"],
-                            shuffle=config["dataloader"]["shuffle"],
+                            shuffle=False,
                             num_workers=config["dataloader"]["num_workers"],
                             pin_memory=True,
                         )
@@ -1373,7 +1396,7 @@ eval_spf_dataset = SimulatedSPFDataset(
 eval_spf_loader = DataLoader(
     eval_spf_dataset,
     batch_size=config["dataloader"]["batch_size"],
-    shuffle=config["dataloader"]["shuffle"],
+    shuffle=False,
     num_workers=config["dataloader"]["num_workers"],
 )
 

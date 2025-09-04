@@ -6,16 +6,16 @@ data:
   val_split_ratio: 0.2
   height: 320
   width: 320
-  timeframes: 18
+  timeframes: 36
   total_spokes: 288
   samples: 640
   coils: 16
   eval_timeframes: 36
   eval_spokes: 8
-  spf_aug: true
-  weight_accelerations: true
+  spf_aug: false
+  weight_accelerations: false
   fpg: 24
-  train_spokes_per_frame: None
+  train_spokes_per_frame: 8
 
 # Experiment settings
 experiment:
@@ -24,7 +24,7 @@ experiment:
 # DataLoader settings
 dataloader:
   batch_size: 1
-  shuffle: false
+  shuffle: true
   num_workers: 2
   max_subjects: 300
   num_random_slices: 1
@@ -38,6 +38,16 @@ model:
   num_layers: 3
   cascades: 2
   channels: 16
+  style_dim: 128
+  svd_mode: "detached_uv"
+  use_lowk_dc: false
+  lowk_frac: 0.125
+  lowk_alpha: 1.0
+  film_bounded: true
+  film_gain: 0.10
+  film_identity_init: true
+  film_L: true
+  svd_noise_std: 0.001
   lambda_L: 0.0025
   lambda_S: 0.05
   lambda_spatial_L: 0.05
@@ -45,7 +55,7 @@ model:
   gamma: 0.5
   lambda_step: 0.1
   encode_acceleration: true
-  encode_time_index: true
+  encode_time_index: false
   optimizer:
     name: "Adam"
     lr: 0.0005
@@ -81,7 +91,7 @@ training:
   plot_interval: 20
   device: "cuda"  # or "cpu"
   curriculum_learning:
-    enabled: True
+    enabled: False
     phases:
       - name: "Phase 1: Moderate Accelerations"
         start_epoch: 1
@@ -89,15 +99,15 @@ training:
         eval_spokes_per_frame: 16       # Validate on the highest acceleration in this phase
         eval_num_frames: 18 # (16 * 18 = 288 total spokes, assuming a fixed total spoke budget)
       - name: "Phase 2: Higher Accelerations"
-        start_epoch: 5
+        start_epoch: 2
         train_spokes_range: [8, 16, 24, 36] # Introduces 8 spokes/frame
         eval_spokes_per_frame: 8
         eval_num_frames: 36 # (8 * 36 = 288 total spokes)
-      # - name: "Phase 3: Ultra-High Accelerations"
-      #   start_epoch: 10
-      #   train_spokes_range: [2, 4, 8, 16, 24, 36] # Introduces 2 and 4 spokes/frame
-      #   eval_spokes_per_frame: 2
-      #   eval_num_frames: 144 # (2 * 144 = 288 total spokes)
+      - name: "Phase 3: Ultra-High Accelerations"
+        start_epoch: 3
+        train_spokes_range: [2, 4, 8, 16, 24, 36] # Introduces 2 and 4 spokes/frame
+        eval_spokes_per_frame: 2
+        eval_num_frames: 144 # (2 * 144 = 288 total spokes)
 
 evaluation:
   num_samples: 15

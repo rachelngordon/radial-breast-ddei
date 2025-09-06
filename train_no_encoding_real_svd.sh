@@ -21,4 +21,4 @@ source /gpfs/data/karczmar-lab/workspaces/rachelgordon/micromamba/etc/profile.d/
 micromamba activate recon_mri
 
 # Run the training script with srun
-python3 train.py --config configs/config_no_encoding_real_svd.yaml --exp_name no_encoding_real_svd_no_lowk_dc
+python3 train.py --config configs/config_no_encoding_real_svd.yaml --exp_name no_encoding_real_svd_no_lowk_dc --from_checkpoint True

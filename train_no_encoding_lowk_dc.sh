@@ -21,4 +21,4 @@ source /gpfs/data/karczmar-lab/workspaces/rachelgordon/micromamba/etc/profile.d/
 micromamba activate recon_mri
 
 # Run the training script with srun
-python3 train.py --config configs/config_no_encoding_lowk_dc_detach_uv.yaml --exp_name no_encoding_lowk_dc_detach_uv
+python3 train.py --config configs/config_no_encoding_lowk_dc_detach_uv.yaml --exp_name no_encoding_lowk_dc_detach_uv --from_checkpoint True

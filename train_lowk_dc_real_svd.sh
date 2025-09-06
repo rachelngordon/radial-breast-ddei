@@ -2,11 +2,11 @@
 
 # Parameters
 #SBATCH --cpus-per-task=4
-#SBATCH --error=logs/no_encoding_mag_svd_no_lowk_dc.err
-#SBATCH --output=logs/no_encoding_mag_svd_no_lowk_dc.out
+#SBATCH --error=logs/no_encoding_lowk_dc_real_svd.err
+#SBATCH --output=logs/no_encoding_lowk_dc_real_svd.out
 #SBATCH --exclude=''
 #SBATCH --gpus-per-node=1
-#SBATCH --job-name=no_encoding_mag_svd_no_lowk_dc
+#SBATCH --job-name=no_encoding_lowk_dc_real_svd
 #SBATCH --mem-per-gpu=50000
 #SBATCH --nodes=1
 #SBATCH --ntasks-per-node=1
@@ -21,4 +21,4 @@ source /gpfs/data/karczmar-lab/workspaces/rachelgordon/micromamba/etc/profile.d/
 micromamba activate recon_mri
 
 # Run the training script with srun
-python3 train.py --config configs/config_no_encoding_mag_svd.yaml --exp_name no_encoding_mag_svd_no_lowk_dc --from_checkpoint True
+python3 train.py --config configs/config_no_encoding_lowk_dc.yaml --exp_name no_encoding_lowk_dc_real_svd

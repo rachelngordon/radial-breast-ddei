@@ -640,6 +640,7 @@ if args.from_checkpoint == False and config['debugging']['calc_step_0'] == True:
     print(f"Step 0 Val Losses: MC: {step0_val_mc_loss}, EI: {step0_val_ei_loss}, Adj: {step0_val_adj_loss}")
 
 # Training Loop
+svd_fail_count = 0
 if (epochs + 1) == start_epoch:
     raise(ValueError("Full training epochs already complete."))
 
@@ -783,67 +784,78 @@ else:
 
             # print("Time encoding: ", start_timepoint_index.item())
 
-
-            x_recon, adj_loss, lambda_L, lambda_S, lambda_spatial_L, lambda_spatial_S, gamma, lambda_step = model(
-                measured_kspace.to(device), physics, csmap, acceleration_encoding, start_timepoint_index, epoch=f"train{epoch}", norm=config['model']['norm']
-            )
-
-            # compute losses
-            running_adj_loss += adj_loss.item()
-
-            mc_loss = mc_loss_fn(measured_kspace.to(device), x_recon, physics, csmap)
-            running_mc_loss += mc_loss.item()
-
-            if use_ei_loss:
-                ei_loss, t_img = ei_loss_fn(
-                    x_recon, physics, model, csmap, acceleration_encoding, start_timepoint_index
+            try:
+                x_recon, adj_loss, lambda_L, lambda_S, lambda_spatial_L, lambda_spatial_S, gamma, lambda_step = model(
+                    measured_kspace.to(device), physics, csmap, acceleration_encoding, start_timepoint_index, epoch=f"train{epoch}", norm=config['model']['norm']
                 )
 
+                # compute losses
+                running_adj_loss += adj_loss.item()
 
-                ei_loss_weight = get_cosine_ei_weight(
-                    current_epoch=epoch,
-                    warmup_epochs=warmup,
-                    schedule_duration=duration,
-                    target_weight=target_w_ei
-                )
+                mc_loss = mc_loss_fn(measured_kspace.to(device), x_recon, physics, csmap)
+                running_mc_loss += mc_loss.item()
 
-
-                running_ei_loss += ei_loss.item()
-                total_loss = mc_loss * mc_loss_weight + ei_loss * ei_loss_weight + torch.mul(adj_loss_weight, adj_loss)
-                train_loader_tqdm.set_postfix(
-                    mc_loss=mc_loss.item(), ei_loss=ei_loss.item()
-                )
-
-            else:
-                total_loss = mc_loss * mc_loss_weight + torch.mul(adj_loss_weight, adj_loss)
-                train_loader_tqdm.set_postfix(mc_loss=mc_loss.item())
-
-            if torch.isnan(total_loss):
-                print(
-                    "!!! ERROR: total_loss is NaN before backward pass. Aborting. !!!"
-                )
-                raise RuntimeError("total_loss is NaN")
+                if use_ei_loss:
+                    ei_loss, t_img = ei_loss_fn(
+                        x_recon, physics, model, csmap, acceleration_encoding, start_timepoint_index
+                    )
 
 
-            total_loss.backward()
+                    ei_loss_weight = get_cosine_ei_weight(
+                        current_epoch=epoch,
+                        warmup_epochs=warmup,
+                        schedule_duration=duration,
+                        target_weight=target_w_ei
+                    )
 
 
-            if config["debugging"]["enable_gradient_monitoring"] == True and iteration_count % config["debugging"]["monitoring_interval"] == 0:
-            
-                log_gradient_stats(
-                    model=model,
-                    epoch=epoch,
-                    iteration=iteration_count,
-                    output_dir=output_dir,
-                    log_filename="gradient_stats.csv"
-                )
+                    running_ei_loss += ei_loss.item()
+                    total_loss = mc_loss * mc_loss_weight + ei_loss * ei_loss_weight + torch.mul(adj_loss_weight, adj_loss)
+                    train_loader_tqdm.set_postfix(
+                        mc_loss=mc_loss.item(), ei_loss=ei_loss.item()
+                    )
+
+                else:
+                    total_loss = mc_loss * mc_loss_weight + torch.mul(adj_loss_weight, adj_loss)
+                    train_loader_tqdm.set_postfix(mc_loss=mc_loss.item())
+
+                if torch.isnan(total_loss):
+                    print(
+                        "!!! ERROR: total_loss is NaN before backward pass. Aborting. !!!"
+                    )
+                    raise RuntimeError("total_loss is NaN")
 
 
-            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
-            optimizer.step()
+                total_loss.backward()
 
-            end = time.time()
-            print("time for one iteration: ", end-start)
+
+                if config["debugging"]["enable_gradient_monitoring"] == True and iteration_count % config["debugging"]["monitoring_interval"] == 0:
+                
+                    log_gradient_stats(
+                        model=model,
+                        epoch=epoch,
+                        iteration=iteration_count,
+                        output_dir=output_dir,
+                        log_filename="gradient_stats.csv"
+                    )
+
+
+                torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+                optimizer.step()
+
+                end = time.time()
+                print("time for one iteration: ", end-start)
+
+            except RuntimeError as e:
+                # catch only SVD-related failures
+                if "svd" in str(e).lower():
+                    svd_fail_count += 1
+                    optimizer.zero_grad()
+                    print(f"[Warning] Skipping batch {iteration_count} in epoch {epoch} due to SVD failure. "
+                        f"Total failures so far: {svd_fail_count}")
+                    continue  # skip this batch, go to next one
+                else:
+                    raise  # re-raise other errors
 
 
         # plot training samples
@@ -960,47 +972,59 @@ else:
                 else:
                     start_timepoint_index = torch.tensor([0], dtype=torch.float, device=device)
                     
-                if N_time_eval > eval_chunk_size:
-                    print("Performing sliding window eval...")
-                    val_x_recon, val_adj_loss = sliding_window_inference(H, W, N_time_eval, eval_ktraj, eval_dcomp, eval_nufft_ob, eval_adjnufft_ob, eval_chunk_size, eval_chunk_overlap, val_kspace_batch, val_csmap, acceleration_encoding, start_timepoint_index, model, epoch=f"val{epoch}", device=device)  
-                else:
-                    val_x_recon, val_adj_loss, *_ = model(
-                    val_kspace_batch.to(device), eval_physics, val_csmap, acceleration_encoding, start_timepoint_index, epoch=f"val{epoch}", norm=config['model']['norm']
-                    )
+                try:
+                    if N_time_eval > eval_chunk_size:
+                        print("Performing sliding window eval...")
+                        val_x_recon, val_adj_loss = sliding_window_inference(H, W, N_time_eval, eval_ktraj, eval_dcomp, eval_nufft_ob, eval_adjnufft_ob, eval_chunk_size, eval_chunk_overlap, val_kspace_batch, val_csmap, acceleration_encoding, start_timepoint_index, model, epoch=f"val{epoch}", device=device)  
+                    else:
+                        val_x_recon, val_adj_loss, *_ = model(
+                        val_kspace_batch.to(device), eval_physics, val_csmap, acceleration_encoding, start_timepoint_index, epoch=f"val{epoch}", norm=config['model']['norm']
+                        )
 
 
+                    
+
+                    # compute losses
+                    val_running_adj_loss += val_adj_loss.item()
+
+                    val_mc_loss = mc_loss_fn(val_kspace_batch.to(device), val_x_recon, eval_physics, val_csmap)
+                    val_running_mc_loss += val_mc_loss.item()
+
+                    if use_ei_loss:
+                        val_ei_loss, val_t_img = ei_loss_fn(
+                            val_x_recon, eval_physics, model, val_csmap, acceleration_encoding, start_timepoint_index
+                        )
+
+                        val_running_ei_loss += val_ei_loss.item()
+                        val_loader_tqdm.set_postfix(
+                            val_mc_loss=val_mc_loss.item(), val_ei_loss=val_ei_loss.item()
+                        )
+                    else:
+                        val_loader_tqdm.set_postfix(val_mc_loss=val_mc_loss.item())
+
+
+                    ## Evaluation
+                    ssim, psnr, mse, lpips, dc_mse, dc_mae, recon_corr, _ = eval_sample(val_kspace_batch, val_csmap, val_ground_truth, val_x_recon, eval_physics, val_mask, val_grasp_img_tensor, acceleration, int(N_spokes), eval_dir, f'epoch{epoch}', device)
+                    epoch_eval_ssims.append(ssim)
+                    epoch_eval_psnrs.append(psnr)
+                    epoch_eval_mses.append(mse)
+                    epoch_eval_lpipses.append(lpips)
+                    epoch_eval_dc_mses.append(dc_mse)
+                    epoch_eval_dc_maes.append(dc_mae)
+
+                    if recon_corr is not None:
+                        epoch_eval_curve_corrs.append(recon_corr)
                 
-
-                # compute losses
-                val_running_adj_loss += val_adj_loss.item()
-
-                val_mc_loss = mc_loss_fn(val_kspace_batch.to(device), val_x_recon, eval_physics, val_csmap)
-                val_running_mc_loss += val_mc_loss.item()
-
-                if use_ei_loss:
-                    val_ei_loss, val_t_img = ei_loss_fn(
-                        val_x_recon, eval_physics, model, val_csmap, acceleration_encoding, start_timepoint_index
-                    )
-
-                    val_running_ei_loss += val_ei_loss.item()
-                    val_loader_tqdm.set_postfix(
-                        val_mc_loss=val_mc_loss.item(), val_ei_loss=val_ei_loss.item()
-                    )
-                else:
-                    val_loader_tqdm.set_postfix(val_mc_loss=val_mc_loss.item())
-
-
-                ## Evaluation
-                ssim, psnr, mse, lpips, dc_mse, dc_mae, recon_corr, _ = eval_sample(val_kspace_batch, val_csmap, val_ground_truth, val_x_recon, eval_physics, val_mask, val_grasp_img_tensor, acceleration, int(N_spokes), eval_dir, f'epoch{epoch}', device)
-                epoch_eval_ssims.append(ssim)
-                epoch_eval_psnrs.append(psnr)
-                epoch_eval_mses.append(mse)
-                epoch_eval_lpipses.append(lpips)
-                epoch_eval_dc_mses.append(dc_mse)
-                epoch_eval_dc_maes.append(dc_mae)
-
-                if recon_corr is not None:
-                    epoch_eval_curve_corrs.append(recon_corr)
+                except RuntimeError as e:
+                    # catch only SVD-related failures
+                    if "svd" in str(e).lower():
+                        svd_fail_count += 1
+                        optimizer.zero_grad()
+                        print(f"[Warning] Skipping batch validation sample in epoch {epoch} due to SVD failure. "
+                            f"Total failures so far: {svd_fail_count}")
+                        continue  # skip this batch, go to next one
+                    else:
+                        raise  # re-raise other errors
 
 
 

@@ -228,9 +228,11 @@ class BasicBlock(nn.Module):
 
         elif self.svd_mode == "mag":
             mag   = Z.abs() + 1e-8
-            if self.svd_noise_std > 0.0:
-                mag = mag + self.svd_noise_std * torch.randn_like(mag)
             phase = Z / mag
+            # print("noise std: ", self.svd_noise_std)
+            if self.svd_noise_std > 0.0:
+                # print("adding noise...")
+                mag = mag + torch.randn_like(mag) * self.svd_noise_std
             U, Svals, Vh = torch.linalg.svd(mag, full_matrices=False)
             S_shrunk = Project_inf(Svals, lambda_L_eff, to_complex=False)
             pt_L_mag = U @ torch.diag_embed(S_shrunk) @ Vh
@@ -241,7 +243,8 @@ class BasicBlock(nn.Module):
             if self.svd_noise_std > 0.0:
                 R = R + self.svd_noise_std * torch.randn_like(R)
             Ur, Sr, VrT = torch.linalg.svd(R, full_matrices=False)
-            Sr_shrunk = torch.clamp(Sr - self.lambda_L, min=0.0)        # same tau as complex case
+            # Sr_shrunk_clamp = torch.clamp(Sr - self.lambda_L, min=0.0)        # same tau as complex case
+            Sr_shrunk = Project_inf(Sr, self.lambda_L, to_complex=False)        # same tau as complex case
             R_prox = Ur @ torch.diag_embed(Sr_shrunk) @ VrT
             pt_L = _de_realify(R_prox) 
 
@@ -810,13 +813,7 @@ class ArtifactRemovalLSFPNet(nn.Module):
             scale = 1.0
 
         # Generate style embedding from the acceleration factor and/or time start index
-        if acceleration or start_timepoint_index:
-            # feature 1: inv acceleration (≈ spf / (H*pi/2)), roughly in [~0.02, ~0.07]
-            H = x_init_norm.shape[-2]
-            N_full = H * np.pi / 2.0
-            inv_af = (1.0 / acceleration.clamp_min(1e-6)).view(-1, 1)          # smaller numbers are safer
-            spf_est = (N_full / acceleration.clamp_min(1e-6)).view(-1, 1)      # useful too
-            inv_af_feat = inv_af                                             # already small
+        if acceleration or start_timepoint_index:                                          # already small
 
             if start_timepoint_index is not None:
                 # feature 2: start index as fraction of total frames
@@ -824,6 +821,13 @@ class ArtifactRemovalLSFPNet(nn.Module):
                 start_frac = (start_timepoint_index / max(T - 1, 1)).view(-1, 1)
 
                 if acceleration is not None:
+                    # feature 1: inv acceleration (≈ spf / (H*pi/2)), roughly in [~0.02, ~0.07]
+                    H = x_init_norm.shape[-2]
+                    N_full = H * np.pi / 2.0
+                    inv_af = (1.0 / acceleration.clamp_min(1e-6)).view(-1, 1)          # smaller numbers are safer
+                    spf_est = (N_full / acceleration.clamp_min(1e-6)).view(-1, 1)      # useful too
+                    inv_af_feat = inv_af   
+
                     # concatenate normalized features
                     combined_input = torch.cat([inv_af_feat, start_frac], dim=1).to(x_init_norm.device)
                     # combined_input = torch.cat(
@@ -836,6 +840,12 @@ class ArtifactRemovalLSFPNet(nn.Module):
                     combined_input = start_frac
             else:
                 # combined_input = acceleration
+                # feature 1: inv acceleration (≈ spf / (H*pi/2)), roughly in [~0.02, ~0.07]
+                H = x_init_norm.shape[-2]
+                N_full = H * np.pi / 2.0
+                inv_af = (1.0 / acceleration.clamp_min(1e-6)).view(-1, 1)          # smaller numbers are safer
+                spf_est = (N_full / acceleration.clamp_min(1e-6)).view(-1, 1)      # useful too
+                inv_af_feat = inv_af   
                 combined_input = inv_af_feat
 
             style_embedding = self.mapping_network(combined_input)

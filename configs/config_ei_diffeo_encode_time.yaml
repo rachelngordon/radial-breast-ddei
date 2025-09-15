@@ -14,7 +14,7 @@ data:
   eval_spokes: 8
   spf_aug: false
   weight_accelerations: false
-  fpg: 24
+  fpg: 16
   train_spokes_per_frame: 8
 
 # Experiment settings
@@ -54,7 +54,7 @@ model:
   lambda_spatial_S: 0.05
   gamma: 0.5
   lambda_step: 0.1
-  encode_acceleration: true
+  encode_acceleration: false
   encode_time_index: true
   optimizer:
     name: "Adam"
@@ -66,17 +66,17 @@ model:
   losses:
     adj_loss:
       weight: 1
-    use_ei_loss: false
+    use_ei_loss: true
     mc_loss:
       weight: 10
       metric: "MAE"
     ei_loss:
       metric: "MSE"
       temporal_transform: "none"
-      spatial_transform: "rotate"
-      weight: 0
-      warmup: 6
-      duration: 50
+      spatial_transform: "diffeo"
+      weight: 1
+      warmup: 25
+      duration: 200
       subsample_ratio_min: 0.7
       subsample_ratio_max: 0.95
       warp_ratio_min: 0.6

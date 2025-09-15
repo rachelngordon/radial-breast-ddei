@@ -284,7 +284,7 @@ if config['model']['encode_acceleration'] and config['model']['encode_time_index
 else:
     model = ArtifactRemovalLSFPNet(lsfp_backbone, block_dir, channels=1).to(device)
 
-optimizer = torch.optim.Adam(
+optimizer = torch.optim.AdamW(
     model.parameters(),
     lr=config["model"]["optimizer"]["lr"],
     betas=(config["model"]["optimizer"]["b1"], config["model"]["optimizer"]["b2"]),
@@ -842,6 +842,16 @@ else:
 
                 torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
                 optimizer.step()
+
+                # cosine LR with 5-epoch warmup
+                total = epochs; warm = 5
+                if epoch <= warm:
+                    lr_scale = epoch / warm
+                else:
+                    p = (epoch - warm) / max(1, total - warm)
+                    lr_scale = 0.2 + 0.8 * 0.5 * (1 + math.cos(math.pi * p))
+                for pg in optimizer.param_groups:
+                    pg['lr'] = config["model"]["optimizer"]["lr"] * lr_scale
 
                 end = time.time()
                 print("time for one iteration: ", end-start)

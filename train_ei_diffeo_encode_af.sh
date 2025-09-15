@@ -2,11 +2,11 @@
 
 # Parameters
 #SBATCH --cpus-per-task=4
-#SBATCH --error=logs/debug_new_block.err
-#SBATCH --output=logs/debug_new_block.out
+#SBATCH --error=logs/ei_diffeo_encode_af.err
+#SBATCH --output=logs/ei_diffeo_encode_af.out
 #SBATCH --exclude=''
 #SBATCH --gpus-per-node=1
-#SBATCH --job-name=debug_new_block
+#SBATCH --job-name=ei_diffeo_encode_af
 #SBATCH --mem-per-gpu=50000
 #SBATCH --nodes=1
 #SBATCH --ntasks-per-node=1
@@ -20,4 +20,5 @@ source /gpfs/data/karczmar-lab/workspaces/rachelgordon/micromamba/etc/profile.d/
 # Activate your Micromamba environment
 micromamba activate recon_mri
 
-python3 train.py --config configs/config_mc_8spf.yaml --exp_name debug_new_block
+# Run the training script with srun
+python3 train.py --config configs/config_ei_diffeo_encode_af.yaml --exp_name ei_diffeo_encode_af --from_checkpoint True

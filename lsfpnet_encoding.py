@@ -96,8 +96,8 @@ class BasicBlock(nn.Module):
         style_dim=128,
         svd_mode: str = "detached_uv",
         use_lowk_dc: bool = True,
-        lowk_frac: float = 0.125,
-        lowk_alpha: float = 1.0,
+        lowk_frac: float = 0.10,
+        lowk_alpha: float = 0.7,
         film_bounded: bool = True,
         film_gain: float = 0.10,
         film_identity_init: bool = True,
@@ -108,6 +108,8 @@ class BasicBlock(nn.Module):
         self.channels = channels
         self.style_dim = style_dim
         self.film_L = film_L
+        self.lowk_alpha = lowk_alpha
+        self.lowk_radius_frac = lowk_frac
 
         # learnable raw params; we will softplus them in forward
         self.lambda_L        = nn.Parameter(torch.tensor([lambdas['lambda_L']]))
@@ -199,12 +201,33 @@ class BasicBlock(nn.Module):
         # ----- gradient with optional low‑k projection
         x_sum  = torch.reshape(L + S, [nx, ny, nt])
         k_pred = param_E(inv=False, data=x_sum, smaps=csmaps)
-        k_meas = param_d
+        # k_meas = param_d
+        # if self.use_lowk_dc:
+        #     k_proj = self._lowk_project(k_pred, k_meas, param_E.ktraj, self.lowk_frac, self.lowk_alpha)
+        # else:
+        #     k_proj = k_pred
+        # gradient = param_E(inv=True, data=k_proj - k_meas, smaps=csmaps)
+
+        residual = k_pred - param_d  
+
+        # optional low‑k residual gating (soft, on the same normalized tensors)
         if self.use_lowk_dc:
-            k_proj = self._lowk_project(k_pred, k_meas, param_E.ktraj, self.lowk_frac, self.lowk_alpha)
-        else:
-            k_proj = k_pred
-        gradient = param_E(inv=True, data=k_proj - k_meas, smaps=csmaps)
+            k = param_E.ktraj.to(param_d.device)                                         # (2, samples, t) or (2, samples)
+            if k.dim() == 3:
+                kr = (k[0]**2 + k[1]**2).sqrt()                                          # (samples, t)
+                r0 = self.lowk_radius_frac * kr.max()
+                mask = (kr <= r0).to(residual.real.dtype)                                 # 1 inside ball
+                gate = 1.0 - self.lowk_alpha * rearrange(mask, 's t -> 1 s t')                # broadcast over coils
+            else:                                                                         # single‑frame edge case
+                kr = (k[0]**2 + k[1]**2).sqrt()                                          # (samples,)
+                r0 = self.lowk_radius_frac * kr.max()
+                mask = (kr <= r0).to(residual.real.dtype)
+                gate = 1.0 - self.lowk_alpha * rearrange(mask, 's -> 1 s 1')
+            residual = residual * gate
+
+        # adjoint of gated residual gives gradient in image domain
+        gradient = param_E(inv=True, data=residual, smaps=csmaps)  
+
         gradient = torch.reshape(gradient, [nx * ny, nt])
 
         # ===== L branch ======================================================
@@ -229,9 +252,7 @@ class BasicBlock(nn.Module):
         elif self.svd_mode == "mag":
             mag   = Z.abs() + 1e-8
             phase = Z / mag
-            # print("noise std: ", self.svd_noise_std)
             if self.svd_noise_std > 0.0:
-                # print("adding noise...")
                 mag = mag + torch.randn_like(mag) * self.svd_noise_std
             U, Svals, Vh = torch.linalg.svd(mag, full_matrices=False)
             S_shrunk = Project_inf(Svals, lambda_L_eff, to_complex=False)
@@ -240,7 +261,9 @@ class BasicBlock(nn.Module):
 
         elif self.svd_mode == "real":
             R = _realify(Z)                                     # (2M, 2N) real
+            print("noise std: ", self.svd_noise_std)
             if self.svd_noise_std > 0.0:
+                print("adding noise...")
                 R = R + self.svd_noise_std * torch.randn_like(R)
             Ur, Sr, VrT = torch.linalg.svd(R, full_matrices=False)
             # Sr_shrunk_clamp = torch.clamp(Sr - self.lambda_L, min=0.0)        # same tau as complex case

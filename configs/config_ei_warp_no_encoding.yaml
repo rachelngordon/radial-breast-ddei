@@ -14,7 +14,7 @@ data:
   eval_spokes: 8
   spf_aug: false
   weight_accelerations: false
-  fpg: 24
+  fpg: 16
   train_spokes_per_frame: 8
 
 # Experiment settings
@@ -39,7 +39,7 @@ model:
   cascades: 2
   channels: 16
   style_dim: 128
-  svd_mode: "real"
+  svd_mode: "detached_uv"
   use_lowk_dc: false
   lowk_frac: 0.125
   lowk_alpha: 1.0
@@ -47,15 +47,15 @@ model:
   film_gain: 0.10
   film_identity_init: true
   film_L: true
-  svd_noise_std: 0.0
+  svd_noise_std: 0.001
   lambda_L: 0.0025
   lambda_S: 0.05
   lambda_spatial_L: 0.05
   lambda_spatial_S: 0.05
   gamma: 0.5
   lambda_step: 0.1
-  encode_acceleration: true
-  encode_time_index: true
+  encode_acceleration: false
+  encode_time_index: false
   optimizer:
     name: "Adam"
     lr: 0.0005
@@ -66,17 +66,17 @@ model:
   losses:
     adj_loss:
       weight: 1
-    use_ei_loss: false
+    use_ei_loss: true
     mc_loss:
       weight: 10
       metric: "MAE"
     ei_loss:
       metric: "MSE"
       temporal_transform: "none"
-      spatial_transform: "rotate"
-      weight: 0
-      warmup: 6
-      duration: 50
+      spatial_transform: "warp"
+      weight: 1
+      warmup: 25
+      duration: 200
       subsample_ratio_min: 0.7
       subsample_ratio_max: 0.95
       warp_ratio_min: 0.6
@@ -86,7 +86,7 @@ model:
 
 # Training settings
 training:
-  epochs: 30
+  epochs: 100
   save_interval: 1
   plot_interval: 20
   device: "cuda"  # or "cpu"

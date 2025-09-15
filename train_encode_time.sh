@@ -2,11 +2,11 @@
 
 # Parameters
 #SBATCH --cpus-per-task=4
-#SBATCH --error=logs/encode_time_detach_uv_no_lowk_dc.err
-#SBATCH --output=logs/encode_time_detach_uv_no_lowk_dc.out
+#SBATCH --error=logs/mc_baseline_encode_time.err
+#SBATCH --output=logs/mc_baseline_encode_time.out
 #SBATCH --exclude=''
 #SBATCH --gpus-per-node=1
-#SBATCH --job-name=encode_time_detach_uv_no_lowk_dc
+#SBATCH --job-name=mc_baseline_encode_time
 #SBATCH --mem-per-gpu=50000
 #SBATCH --nodes=1
 #SBATCH --ntasks-per-node=1
@@ -21,4 +21,4 @@ source /gpfs/data/karczmar-lab/workspaces/rachelgordon/micromamba/etc/profile.d/
 micromamba activate recon_mri
 
 # Run the training script with srun
-python3 train.py --config configs/config_encode_time_detach_uv.yaml --exp_name encode_time_detach_uv_no_lowk_dc --from_checkpoint True
+python3 train.py --config configs/config_encode_time_detach_uv.yaml --exp_name mc_baseline_encode_time

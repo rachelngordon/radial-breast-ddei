@@ -35,25 +35,6 @@ def cleanup():
 
 def main():
 
-    if config['training']['multigpu']:
-        setup()
-
-        # Get rank and world_size from the distributed package AFTER setup
-        global_rank = dist.get_rank()
-        world_size = dist.get_world_size()
-
-        # Get the local rank from the environment variable
-        local_rank = int(os.environ["LOCAL_RANK"])
-
-        # Set the device for this process
-        torch.cuda.set_device(local_rank)
-        device = local_rank
-
-        if global_rank == 0:
-            print(f"Starting distributed training with {world_size} GPUs.")
-        print(f"  - [Rank {global_rank}] -> Using device cuda:{device}")
-
-
     set_seed(12)
 
     # Parse command-line arguments
@@ -78,16 +59,6 @@ def main():
     args = parser.parse_args()
 
 
-    # print experiment name and git commit
-    exp_name = args.exp_name
-
-    if global_rank == 0 or config['training']['multigpu'] == False:
-        commit_hash = get_git_commit()
-        print(f"Running experiment on Git commit: {commit_hash}")
-
-        print(f"Experiment: {exp_name}")
-
-
     # Load the configuration file
     if args.from_checkpoint == True:
         with open(f"output/{exp_name}/config.yaml", "r") as file:
@@ -103,19 +74,54 @@ def main():
 
         epochs = config['training']["epochs"]
 
+        
+
+    if config['training']['multigpu']:
+        setup()
+
+        # Get rank and world_size from the distributed package AFTER setup
+        global_rank = dist.get_rank()
+        world_size = dist.get_world_size()
+
+        # Get the local rank from the environment variable
+        local_rank = int(os.environ["LOCAL_RANK"])
+
+        # Set the device for this process
+        torch.cuda.set_device(local_rank)
+        device = local_rank
+
+        if global_rank == 0:
+            print(f"Starting distributed training with {world_size} GPUs.")
+        print(f"  - [Rank {global_rank}] -> Using device cuda:{device}")
+
+    else:
+        global_rank = 0
+        device = torch.device(config["training"]["device"])
+
+
+    # print experiment name and git commit
+    exp_name = args.exp_name
+
+    if global_rank == 0 or config['training']['multigpu'] == False:
+        commit_hash = get_git_commit()
+        print(f"Running experiment on Git commit: {commit_hash}")
+
+        print(f"Experiment: {exp_name}")
+
+
+
 
     # create output directories
+    output_dir = os.path.join(config["experiment"]["output_dir"], exp_name)
+    eval_dir = os.path.join(output_dir, "eval_results")
+    block_dir = os.path.join(output_dir, "block_outputs")
+    ec_dir = os.path.join(output_dir, 'enhancement_curves')
+
     if global_rank == 0 or config['training']['multigpu'] == False:
-        output_dir = os.path.join(config["experiment"]["output_dir"], exp_name)
+        
         os.makedirs(output_dir, exist_ok=True)
-
-        eval_dir = os.path.join(output_dir, "eval_results")
         os.makedirs(eval_dir, exist_ok=True)
-
-        block_dir = os.path.join(output_dir, "block_outputs")
         os.makedirs(block_dir, exist_ok=True)
-
-        ec_dir = os.path.join(output_dir, 'enhancement_curves')
         os.makedirs(ec_dir, exist_ok=True)
 
 
@@ -149,7 +155,6 @@ def main():
 
     save_interval = config["training"]["save_interval"]
     plot_interval = config["training"]["plot_interval"]
-    device = torch.device(config["training"]["device"])
 
     model_type = config["model"]["name"]
 
@@ -1192,7 +1197,7 @@ def main():
                         eval_curve_corrs=eval_curve_corrs
                     )
                     model_save_path = os.path.join(output_dir, f'{exp_name}_model.pth')
-                    save_checkpoint(model, optimizer, epoch + 1, train_curves, val_curves, eval_curves, target_w_ei, model_save_path)
+                    save_checkpoint(model, optimizer, epoch + 1, train_curves, val_curves, eval_curves, target_w_ei, step0_train_ei_loss, epoch_train_mc_loss, model_save_path)
                     print(f'Model saved to {model_save_path}')
 
 
@@ -1408,7 +1413,7 @@ def main():
             eval_curve_corrs=eval_curve_corrs,
         )
         model_save_path = os.path.join(output_dir, f'{exp_name}_model.pth')
-        save_checkpoint(model, optimizer, epochs + 1, train_curves, val_curves, eval_curves, target_w_ei, model_save_path)
+        save_checkpoint(model, optimizer, epochs + 1, train_curves, val_curves, eval_curves, target_w_ei, step0_train_ei_loss, epoch_train_mc_loss, model_save_path)
         print(f'Model saved to {model_save_path}')
 
 
@@ -1919,3 +1924,12 @@ def main():
         plt.tight_layout()
         plt.savefig(os.path.join(output_dir, "spf_eval_metrics.png"))
         plt.close()
+
+
+    cleanup()
+
+
+if __name__ == '__main__':
+    main()
+    # world_size = torch.cuda.device_count()
+    # torch.multiprocessing.spawn(main, args=(world_size,), nprocs=world_size, join=True)

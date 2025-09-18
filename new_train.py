@@ -378,7 +378,7 @@ def main():
 
     # define EI loss transformations
     if use_ei_loss:
-        rotate = VideoRotate(n_trans=1, interpolation_mode="bilinear")
+        rotate = VideoRotate(n_trans=1, interpolation_mode="bilinear", degrees=config['model']['losses']['ei_loss'].get("rotate_range", 180))
         diffeo = VideoDiffeo(n_trans=1, device=device)
 
         subsample = SubsampleTime(n_trans=1, subsample_ratio_range=(config['model']['losses']['ei_loss']['subsample_ratio_min'], config['model']['losses']['ei_loss']['subsample_ratio_max']))
@@ -1931,5 +1931,3 @@ def main():
 
 if __name__ == '__main__':
     main()
-    # world_size = torch.cuda.device_count()
-    # torch.multiprocessing.spawn(main, args=(world_size,), nprocs=world_size, join=True)

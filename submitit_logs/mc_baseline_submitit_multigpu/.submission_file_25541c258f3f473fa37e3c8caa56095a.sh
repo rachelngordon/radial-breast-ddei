@@ -1,1 +1,0 @@
-/gpfs/data/karczmar-lab/workspaces/rachelgordon/breastMRI-recon/ddei/submitit_logs/mc_baseline_submitit_multigpu/24501_submission.sh

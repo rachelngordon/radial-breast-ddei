@@ -21,4 +21,4 @@ source /gpfs/data/karczmar-lab/workspaces/rachelgordon/micromamba/etc/profile.d/
 micromamba activate recon_mri
 
 # Run the training script with srun
-python3 train.py --config configs/config_ei_diffeo_curriculum.yaml --exp_name ei_diffeo_no_encoding_curriculum
+python3 train.py --config configs/config_ei_diffeo_curriculum.yaml --exp_name ei_diffeo_no_encoding_curriculum --from_checkpoint True

@@ -58,6 +58,9 @@ def main():
     )
     args = parser.parse_args()
 
+    # print experiment name and git commit
+    exp_name = args.exp_name
+
 
     # Load the configuration file
     if args.from_checkpoint == True:
@@ -73,6 +76,7 @@ def main():
             config = yaml.safe_load(file)
 
         epochs = config['training']["epochs"]
+
 
         
 
@@ -98,10 +102,7 @@ def main():
         global_rank = 0
         device = torch.device(config["training"]["device"])
 
-
-    # print experiment name and git commit
-    exp_name = args.exp_name
-
+    
     if global_rank == 0 or config['training']['multigpu'] == False:
         commit_hash = get_git_commit()
         print(f"Running experiment on Git commit: {commit_hash}")
@@ -383,7 +384,7 @@ def main():
 
         subsample = SubsampleTime(n_trans=1, subsample_ratio_range=(config['model']['losses']['ei_loss']['subsample_ratio_min'], config['model']['losses']['ei_loss']['subsample_ratio_max']))
         monophasic_warp = MonophasicTimeWarp(n_trans=1, warp_ratio_range=(config['model']['losses']['ei_loss']['warp_ratio_min'], config['model']['losses']['ei_loss']['warp_ratio_max']))
-        temp_noise = TemporalNoise(n_trans=1)
+        temp_noise = TemporalNoise(n_trans=1, noise_strength=config['model']['losses']['ei_loss'].get("noise_strength", 0.5))
         time_reverse = TimeReverse(n_trans=1)
 
         if config['model']['losses']['ei_loss']['temporal_transform'] == "subsample":
@@ -1180,12 +1181,15 @@ def main():
                     train_curves = dict(
                         train_mc_losses=train_mc_losses,
                         train_ei_losses=train_ei_losses,
+                        train_adj_losses=train_adj_losses,
                         weighted_train_mc_losses=weighted_train_mc_losses,
                         weighted_train_ei_losses=weighted_train_ei_losses,
+                        weighted_train_adj_losses=weighted_train_adj_losses,
                     )
                     val_curves = dict(
                         val_mc_losses=val_mc_losses,
                         val_ei_losses=val_ei_losses,
+                        val_adj_losses=val_adj_losses,
                     )
                     eval_curves = dict(
                         eval_ssims=eval_ssims,

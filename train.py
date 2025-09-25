@@ -284,6 +284,7 @@ if config['model']['encode_acceleration'] and config['model']['encode_time_index
 else:
     model = ArtifactRemovalLSFPNet(lsfp_backbone, block_dir, channels=1).to(device)
 
+
 optimizer = torch.optim.AdamW(
     model.parameters(),
     lr=config["model"]["optimizer"]["lr"],
@@ -326,7 +327,7 @@ if use_ei_loss:
 
     subsample = SubsampleTime(n_trans=1, subsample_ratio_range=(config['model']['losses']['ei_loss']['subsample_ratio_min'], config['model']['losses']['ei_loss']['subsample_ratio_max']))
     monophasic_warp = MonophasicTimeWarp(n_trans=1, warp_ratio_range=(config['model']['losses']['ei_loss']['warp_ratio_min'], config['model']['losses']['ei_loss']['warp_ratio_max']))
-    temp_noise = TemporalNoise(n_trans=1)
+    temp_noise = TemporalNoise(n_trans=1, noise_strength=config['model']['losses']['ei_loss'].get("noise_strength", 0.5))
     time_reverse = TimeReverse(n_trans=1)
 
     if config['model']['losses']['ei_loss']['temporal_transform'] == "subsample":
@@ -801,7 +802,7 @@ else:
 
 
             iteration_count += 1
-            optimizer.zero_grad()
+            optimizer.zero_grad(set_to_none=True)
 
             csmap = csmap.to(device).to(measured_kspace.dtype)
 
@@ -1148,12 +1149,15 @@ else:
             train_curves = dict(
                 train_mc_losses=train_mc_losses,
                 train_ei_losses=train_ei_losses,
+                train_adj_losses=train_adj_losses,
                 weighted_train_mc_losses=weighted_train_mc_losses,
                 weighted_train_ei_losses=weighted_train_ei_losses,
+                weighted_train_adj_losses=weighted_train_adj_losses,
             )
             val_curves = dict(
                 val_mc_losses=val_mc_losses,
                 val_ei_losses=val_ei_losses,
+                val_adj_losses=val_adj_losses,
             )
             eval_curves = dict(
                 eval_ssims=eval_ssims,

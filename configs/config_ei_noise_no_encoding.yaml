@@ -75,6 +75,7 @@ model:
       temporal_transform: "none"
       spatial_transform: "noise"
       rotate_range: 180
+      noise_strength: 0.2
       weight: 1
       warmup: 25
       duration: 200
@@ -87,7 +88,7 @@ model:
 
 # Training settings
 training:
-  epochs: 100
+  epochs: 200
   save_interval: 1
   plot_interval: 20
   device: "cuda"  # or "cpu"

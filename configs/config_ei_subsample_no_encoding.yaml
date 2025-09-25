@@ -78,16 +78,16 @@ model:
       weight: 1
       warmup: 25
       duration: 200
-      subsample_ratio_min: 0.7
-      subsample_ratio_max: 0.95
-      warp_ratio_min: 0.6
-      warp_ratio_max: 0.95
+      subsample_ratio_min: 0.75
+      subsample_ratio_max: 0.9
+      warp_ratio_min: 0.75
+      warp_ratio_max: 0.9
   norm: "both"
 
 
 # Training settings
 training:
-  epochs: 100
+  epochs: 200
   save_interval: 1
   plot_interval: 20
   device: "cuda"  # or "cpu"

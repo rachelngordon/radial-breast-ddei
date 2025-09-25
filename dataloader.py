@@ -13,6 +13,8 @@ from utils import prep_nufft
 from radial_lsfp import MCNUFFT
 import time
 from typing import Union, List, Optional
+import re
+import csv
 
 
 
@@ -207,8 +209,10 @@ class SliceDataset(Dataset):
         csmap = self.load_csmaps(patient_id, current_slice_idx)
 
         with h5py.File(file_path, "r") as f:
-            ds = torch.tensor(f[self.dataset_key][:])
-            kspace_slice = ds[current_slice_idx]
+            # ds = torch.tensor(f[self.dataset_key][:])
+            # kspace_slice = ds[current_slice_idx]
+
+            kspace_slice = torch.tensor(f[self.dataset_key][current_slice_idx])
 
         if self.spf_aug or self.spokes_per_frame:
             total_spokes = kspace_slice.shape[0] * kspace_slice.shape[2]
@@ -394,7 +398,8 @@ class SimulatedDataset(Dataset):
         self.sample_paths = filtered
 
         print(f"Found {len(self.sample_paths)} simulated samples in {self.dro_dir} for {self.num_frames} frames.")
-        
+  
+            
     def __len__(self):
         return len(self.sample_paths)
 
@@ -515,11 +520,115 @@ class SimulatedSPFDataset(Dataset):
 
         print(f"Found {len(self.sample_paths)} simulated samples in {self.dro_dir} for {self.num_frames} frames.")
 
+
+    def load_kspace_from_csv_mapping(self, sample_id: str, mapping_file_path: str, data_dir: str) -> np.ndarray:
+        """
+        Parses a sample ID to get the DRO ID, uses a CSV mapping file to find the fastMRI ID,
+        constructs the fastMRI HDF5 file path, and loads the k-space data.
+
+        Args:
+            sample_id (str): The sample ID string (e.g., "sample_020_sub20").
+                            Expected format: "sample_XXX_subYY", where XXX is the DRO ID.
+            mapping_file_path (str): The file path to the CSV file containing the
+                                    DRO to fastMRIbreast ID mapping.
+                                    Expected header: "DRO,fastMRIbreast".
+            data_dir (str): The base directory where fastMRI HDF5 files are stored.
+                            E.g., if files are in '/path/to/data/fastMRI_breast_157_2.h5',
+                            then data_dir should be '/path/to/data'.
+
+        Returns:
+            numpy.ndarray: The complex k-space data from the corresponding fastMRI file.
+
+        Raises:
+            ValueError: If the sample_id format is invalid, DRO ID not found in mapping,
+                        or the CSV mapping file is malformed.
+            FileNotFoundError: If the mapping CSV or the constructed fastMRI HDF5 file does not exist.
+            KeyError: If the 'kspace' dataset is not found within the HDF5 file.
+            RuntimeError: For other issues encountered during file loading.
+        """
+
+        # --- 1. Parse the mapping CSV file into a dictionary ---
+        dro_to_fastmri_map = {}
+        try:
+            with open(mapping_file_path, mode='r', newline='', encoding='utf-8') as csvfile:
+                reader = csv.reader(csvfile)
+                
+                # Read and validate header
+                try:
+                    header = [h.strip() for h in next(reader)]
+                except StopIteration:
+                    raise ValueError(f"Mapping file is empty: {mapping_file_path}")
+
+                if header != ['DRO', 'fastMRIbreast']:
+                    raise ValueError(f"Mapping file header is invalid. Expected ['DRO', 'fastMRIbreast'], but got {header}.")
+
+                # Parse data rows
+                for i, row in enumerate(reader):
+                    if not row:  # Skip empty lines
+                        continue
+                    try:
+                        dro_id = int(row[0].strip())
+                        fastmri_id = int(row[1].strip())
+                        dro_to_fastmri_map[dro_id] = fastmri_id
+                    except (ValueError, IndexError):
+                        raise ValueError(f"Invalid mapping data in row {i+2} of {mapping_file_path}: {row}. Expected two integers.")
+        
+        except FileNotFoundError:
+            raise FileNotFoundError(f"Mapping CSV file not found at: {mapping_file_path}")
+        except Exception as e:
+            raise RuntimeError(f"Error reading or parsing mapping file {mapping_file_path}: {e}") from e
+
+
+        # --- 2. Extract DRO ID from sample_id ---
+        match = re.match(r"sample_(\d+)_sub\d+", sample_id)
+        if not match:
+            raise ValueError(
+                f"Invalid sample_id format: '{sample_id}'. "
+                f"Expected 'sample_XXX_subYY' where XXX is the DRO ID."
+            )
+        
+        dro_id_from_sample = int(match.group(1))
+
+        # --- 3. Get fastMRI ID using the mapping ---
+        fastmri_id = dro_to_fastmri_map.get(dro_id_from_sample)
+        if fastmri_id is None:
+            raise ValueError(
+                f"DRO ID {dro_id_from_sample} from sample_id '{sample_id}' "
+                f"not found in the mapping file."
+            )
+
+        # --- 4. Construct the fastMRI file path ---
+        file_name = f"fastMRI_breast_{fastmri_id}_2.h5"
+        file_path = os.path.join(data_dir, file_name)
+
+        # --- 5. Load k-space data from the HDF5 file ---
+        if not os.path.exists(file_path):
+            raise FileNotFoundError(f"fastMRI HDF5 file not found at: {file_path}")
+
+        try:
+            with h5py.File(file_path, 'r') as f:
+                if 'ktspace' not in f:
+                    raise KeyError(f"'ktspace' dataset not found in file: {file_path}. "
+                                f"Available keys: {list(f.keys())}")
+                kspace_data = f['ktspace'][()] 
+                return kspace_data
+        except Exception as e:
+            raise RuntimeError(f"Error loading k-space from {file_path}: {e}") from e
+      
+
+
     def __len__(self):
         return len(self.sample_paths)
 
     def __getitem__(self, idx):
         sample_dir = self.sample_paths[idx]
+
+        # patient_id = os.path.basename(sample_dir)
+        # print("patient id: ", patient_id)
+
+        # # get fastMRI mapping and load real k-space
+        # real_kspace = self.load_kspace_from_csv_mapping(patient_id, mapping_file_path="/gpfs/data/karczmar-lab/workspaces/rachelgordon/breastMRI-recon/ddei/data/DROSubID_vs_fastMRIbreastID.csv", data_dir="/ess/scratch/scratch1/rachelgordon/dce-8tf/binned_kspace")
+        # print("ksapce shape: ", real_kspace.shape)
 
         print(f"  Testing {self.spokes_per_frame} spokes/frame with {self.num_frames} frames.")
 

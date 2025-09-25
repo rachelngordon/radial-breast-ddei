@@ -21,4 +21,4 @@ source /gpfs/data/karczmar-lab/workspaces/rachelgordon/micromamba/etc/profile.d/
 micromamba activate recon_mri
 
 # Run the training script with srun
-python3 train.py --config configs/config_ei_rotate_no_encoding.yaml --exp_name ei_rotate_20degrees_no_encoding
+python3 train.py --config configs/config_ei_rotate_no_encoding.yaml --exp_name ei_rotate_20degrees_no_encoding --from_checkpoint True

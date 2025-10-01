@@ -26,7 +26,7 @@ dataloader:
   batch_size: 1
   shuffle: true
   num_workers: 2
-  max_subjects: 3
+  max_subjects: 300
   num_random_slices: 1
   slice_idx: 41
   slice_range_start: None
@@ -86,12 +86,12 @@ model:
 
 # Training settings
 training:
-  epochs: 2
+  epochs: 100
   save_interval: 1
   plot_interval: 20
   device: "cuda"  # or "cpu"
   multigpu: True
-  kspace_interpolation: False
+  kspace_interpolation: True
   curriculum_learning:
     enabled: False
     phases:

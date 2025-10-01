@@ -10,6 +10,7 @@ import sigpy as sp
 from sigpy.mri import app
 from radial_lsfp import MCNUFFT
 import random
+from torch.nn.parallel import DistributedDataParallel as DDP
 
 def log_gradient_stats(model, epoch, iteration, output_dir, log_filename="gradient_stats.csv"):
     """
@@ -393,6 +394,11 @@ def remove_module_prefix(state_dict):
 
 def save_checkpoint(model, optimizer, epoch,
                     train_curves, val_curves, eval_curves, ei_weight, step0_train_ei_loss, epoch_train_mc_loss, filename):
+    
+    # If the model is a DDP model, we need to access the underlying model
+    # via the .module attribute to save a clean state_dict.
+    model_state = model.module.state_dict() if isinstance(model, DDP) else model.state_dict()
+
     checkpoint = {
         "epoch": epoch,
         "model_state_dict": model.state_dict(),
@@ -411,7 +417,9 @@ def save_checkpoint(model, optimizer, epoch,
 def load_checkpoint(model, optimizer, filename):
     ckpt = torch.load(filename, map_location="cpu")
 
-    model.load_state_dict(remove_module_prefix(ckpt["model_state_dict"]))
+    model_to_load = model.module if isinstance(model, DDP) else model
+
+    model_to_load.load_state_dict(remove_module_prefix(ckpt["model_state_dict"]))
     optimizer.load_state_dict(remove_module_prefix(ckpt["optimizer_state_dict"]))
 
     # curves come back as Python lists (or start empty if key not found)

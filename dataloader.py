@@ -17,6 +17,127 @@ import re
 import csv
 
 
+def target_positions_centered(Z_in: int, S_out: int, device=None, dtype=torch.float32) -> torch.Tensor:
+    """
+    Evenly spaced target slice positions covering the same 'z-FOV' as the input partitions.
+
+    Shapes:
+        return: (S_out,) float tensor of target slice indices in *input-partition units*
+                centered so that 0 corresponds to the mid-partition
+
+    Example:
+        Z_in=83, S_out=192  -> returns 192 positions spanning [-(Z_in-1)/2, +(Z_in-1)/2]
+    """
+    if Z_in <= 0 or S_out <= 0:
+        raise ValueError("Z_in and S_out must be positive.")
+    half = (Z_in - 1) / 2.0
+    return torch.linspace(-half, +half, S_out, device=device, dtype=dtype)
+
+
+def _kz_grid_centered(Z_in: int, device=None, dtype=torch.float32) -> torch.Tensor:
+    """
+    Centered, unitless frequency grid along partitions (kz), length Z_in.
+
+    Shapes:
+        return: (Z_in,) with values ((p - (Z_in-1)/2) / Z_in), i.e., cycles per input-partition
+
+    This pairs naturally with target_positions_centered so that W = exp(i 2π kz * z_target).
+    """
+    p = torch.arange(Z_in, device=device, dtype=dtype)
+    return (p - (Z_in - 1) / 2.0) / Z_in
+
+
+def build_reslice_weights(Z_in: int, S_out: int, device=None) -> torch.Tensor:
+    """
+    Build the complex phase matrix W that maps partitions -> slices in one matmul.
+
+    Shapes:
+        return: W with shape (S_out, Z_in), complex64
+                W[s, z] = exp(i * 2π * kz[z] * z_targets[s])
+
+    Where:
+        kz        = centered frequency grid length Z_in
+        z_targets = centered target slice indices length S_out
+    """
+    z_targets = target_positions_centered(Z_in, S_out, device=device)        # (S_out,)
+    kz = _kz_grid_centered(Z_in, device=device)                               # (Z_in,)
+    phase = 2.0 * torch.pi * (z_targets[:, None] * kz[None, :])               # (S_out, Z_in)
+    W = torch.polar(torch.ones_like(phase), phase)                             # (S_out, Z_in) complex
+    return W.to(torch.complex64)
+
+
+def collapse_partitions_to_slices(K3d: torch.Tensor, S_out: int) -> torch.Tensor:
+    """
+    Collapse the partition axis into S_out slices by a single complex matrix multiply.
+
+    Shapes:
+        K3d:            (Z_in, T, C, Sp, Sa) complex64/complex128
+        return Keff:    (S_out, T, C, Sp, Sa) complex64
+
+    Notes:
+        - O( S_out * Z_in * T*C*Sp*Sa ) but executed as one GEMM
+        - no Python loops; everything is batched and vectorized
+    """
+    if K3d.dim() != 5:
+        raise ValueError(f"expected (Z_in, T, C, Sp, Sa), got {tuple(K3d.shape)}")
+    Z_in, T, C, Sp, Sa = K3d.shape
+    device = K3d.device
+    W = build_reslice_weights(Z_in, S_out, device=device)                      # (S_out, Z_in)
+    K3d_flat = rearrange(K3d.to(torch.complex64), 'z t c sp sa -> z (t c sp sa)')  # (Z_in, M)
+    Y_flat = W @ K3d_flat                                                       # (S_out, M)
+    Keff = rearrange(Y_flat, 's (t c sp sa) -> s t c sp sa', t=T, c=C, sp=Sp, sa=Sa)
+    return Keff
+
+
+def resample_csmaps_along_partitions(S3d: torch.Tensor, S_out: int) -> torch.Tensor:
+    """
+    Linearly resample 3D coil maps along the partition axis to the same target positions.
+
+    Shapes:
+        S3d:                (1, C, H, W, Z_in) complex64/complex128
+        return Seff_stack:  (S_out, 1, C, H, W) complex64
+
+    Notes:
+        - uses straight linear interpolation in partition index space
+        - if you only have 2D maps, replace this with nearest-slice selection for the chosen target
+    """
+    if S3d.dim() != 5:
+        raise ValueError(f"expected (1, C, H, W, Z_in), got {tuple(S3d.shape)}")
+    _, C, H, W, Z_in = S3d.shape
+    device = S3d.device
+    z_targets = target_positions_centered(Z_in, S_out, device=device)          # (S_out,)
+    # map centered positions to absolute indices in [0, Z_in-1]
+    z_cont = z_targets + (Z_in - 1) / 2.0                                      # (S_out,)
+    z0 = torch.floor(z_cont).to(torch.long)                                     # (S_out,)
+    z1 = torch.clamp(z0 + 1, max=Z_in - 1)                                      # (S_out,)
+    alpha = (z_cont - z0.to(z_cont.dtype)).view(1, 1, 1, 1, -1)                 # (1,1,1,1,S_out)
+
+    idx0 = z0.view(1, 1, 1, 1, -1).expand(1, C, H, W, -1)                       # (1,C,H,W,S_out)
+    idx1 = z1.view(1, 1, 1, 1, -1).expand(1, C, H, W, -1)
+
+    S_lo = torch.take_along_dim(S3d.to(torch.complex64), idx0, dim=-1)          # (1,C,H,W,S_out)
+    S_hi = torch.take_along_dim(S3d.to(torch.complex64), idx1, dim=-1)          # (1,C,H,W,S_out)
+    Seff = (1.0 - alpha) * S_lo + alpha * S_hi                                  # (1,C,H,W,S_out)
+    Seff_stack = rearrange(Seff, 'b c h w s -> s b c h w')                       # (S_out,1,C,H,W)
+    return Seff_stack
+
+
+def pack_complex_to_2ch(x: torch.Tensor) -> torch.Tensor:
+    """
+    Pack complex tensor to 2-channel real representation.
+
+    Shapes:
+        x:       (...,) complex
+        return:  (...,)-> adds a real/imag channel at the front
+                 if x is (T,C,Sp,Sa) -> returns (2,T,C,Sp,Sa)
+                 if x is (H,W,T)     -> returns (2,H,W,T)
+    """
+    xr = x.real
+    xi = x.imag
+    return torch.stack([xr, xi], dim=0)
+
+
+
 
 class SliceDataset(Dataset):
     """
@@ -42,7 +163,9 @@ class SliceDataset(Dataset):
         spf_aug=False,
         spokes_per_frame=None,
         weight_accelerations=False, 
-        initial_spokes_range=[8, 16, 24, 36]
+        initial_spokes_range=[8, 16, 24, 36],
+        interpolate_kspace=False,
+        slices_to_interpolate=192,
     ):
         """
         Args:
@@ -66,6 +189,8 @@ class SliceDataset(Dataset):
         self.N_coils = N_coils
         self.spf_aug = spf_aug
         self.weight_acc = weight_accelerations
+        self.interpolate_kspace = interpolate_kspace
+        self.slices_to_interpolate = slices_to_interpolate
 
         # Find all matching HDF5 files under root_dir
         all_files = sorted(glob.glob(os.path.join(root_dir, file_pattern)))
@@ -195,6 +320,49 @@ class SliceDataset(Dataset):
         csmap_path = os.path.join(ground_truth_dir, patient_id + '_cs_maps', f'cs_map_slice_{slice:03d}.npy')
         csmap = np.load(csmap_path)
         return csmap.squeeze()
+    
+    def load_all_csmaps(self, patient_id):
+        """
+        Loads all csmap slices for a given patient and stacks them into a single array.
+
+        Args:
+            patient_id (str): The ID of the patient.
+
+        Returns:
+            numpy.ndarray: A NumPy array containing all the stacked csmap slices
+                        with the shape (1, C, H, W, Z_in).
+        """
+        ground_truth_dir = os.path.join(os.path.dirname(self.root_dir), 'cs_maps')
+        patient_csmap_dir = os.path.join(ground_truth_dir, patient_id + '_cs_maps')
+
+        # Find all slice files and sort them to ensure correct order
+        slice_paths = sorted(glob.glob(os.path.join(patient_csmap_dir, 'cs_map_slice_*.npy')))
+
+        if not slice_paths:
+            raise FileNotFoundError(f"No csmap slices found for patient {patient_id} in {patient_csmap_dir}")
+
+        # Load each slice and store it in a list
+        all_slices = [np.load(path) for path in slice_paths]
+
+        # Stack the slices along a new axis (the last axis)
+        # Assuming each slice has a shape of (H, W, C)
+        stacked_csmaps = np.stack(all_slices, axis=-1)
+
+        print("stacked_csmaps: ", stacked_csmaps.shape)
+
+        final_csmaps = rearrange(stacked_csmaps, 'c b h w z -> b c h w z')
+
+        print("final_csmaps: ", final_csmaps.shape)
+
+        # At this point, the shape is likely (H, W, C, Z_in)
+        # We need to rearrange the axes to (C, H, W, Z_in)
+        # The axes are indexed as H=0, W=1, C=2, Z_in=3
+        # transposed_csmaps = np.transpose(stacked_csmaps, (2, 0, 1, 3))
+
+        # # Add a new dimension at the beginning to get the final shape (1, C, H, W, Z_in)
+        # final_csmaps = np.expand_dims(transposed_csmaps, axis=0)
+
+        return final_csmaps
 
     def __len__(self):
         return len(self.slice_index_map)
@@ -206,13 +374,27 @@ class SliceDataset(Dataset):
         patient_id = file_path.split('/')[-1].strip('.h5')
 
         # grasp_img = self.load_dynamic_img(patient_id, current_slice_idx)
-        csmap = self.load_csmaps(patient_id, current_slice_idx)
+        
+        if self.interpolate_kspace:
+            csmap_stack = self.load_all_csmaps(patient_id)
+            Seff_stack = resample_csmaps_along_partitions(torch.tensor(csmap_stack), S_out=self.slices_to_interpolate)        # (192, 1, C, H, W)
+            csmap = Seff_stack[current_slice_idx].squeeze()                                            # (1, C, H, W)
+        else:
+            csmap = self.load_csmaps(patient_id, current_slice_idx)
+
+
 
         with h5py.File(file_path, "r") as f:
-            # ds = torch.tensor(f[self.dataset_key][:])
-            # kspace_slice = ds[current_slice_idx]
 
-            kspace_slice = torch.tensor(f[self.dataset_key][current_slice_idx])
+            if self.interpolate_kspace:
+                ds = torch.tensor(f[self.dataset_key][:])
+                Keff_stack = collapse_partitions_to_slices(ds, S_out=self.slices_to_interpolate)           # (192, T, C, Sp, Sa)
+                # kspace_slice = pack_complex_to_2ch(Keff_stack[current_slice_idx])                 # (2, T, C, Sp, Sa)
+                kspace_slice = Keff_stack[current_slice_idx]                 # (2, T, C, Sp, Sa)
+
+            else:
+                kspace_slice = torch.tensor(f[self.dataset_key][current_slice_idx])
+
 
         if self.spf_aug or self.spokes_per_frame:
             total_spokes = kspace_slice.shape[0] * kspace_slice.shape[2]
@@ -242,8 +424,10 @@ class SliceDataset(Dataset):
         kspace_final = torch.stack([real_part, imag_part], dim=0).float()
         kspace_final = torch.flip(kspace_final, dims=[-1])
 
-        csmap_tensor = torch.from_numpy(csmap)
-        csmap_tensor = torch.rot90(csmap_tensor, k=2, dims=[-2, -1])
+        if self.interpolate_kspace == False:
+            csmap = torch.from_numpy(csmap)
+            
+        csmap_tensor = torch.rot90(csmap, k=2, dims=[-2, -1])
         csmap = csmap_tensor.numpy()
 
         return kspace_final, csmap, N_samples, spokes_per_frame, N_time

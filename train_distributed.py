@@ -174,6 +174,8 @@ def main():
 
     eval_chunk_size = config["evaluation"]["chunk_size"]
     eval_chunk_overlap = config["evaluation"]["chunk_overlap"]
+
+    cluster = config["experiment"].get("cluster", "Randi")
     
 
 
@@ -232,7 +234,8 @@ def main():
             spokes_per_frame=train_spokes_per_frame,
             weight_accelerations=config['data']['weight_accelerations'],
             initial_spokes_range=initial_train_spokes_range,
-            interpolate_kspace=kspace_interpolation
+            interpolate_kspace=kspace_interpolation,
+            cluster=cluster
         )
     else:
         train_dataset = SliceDataset(
@@ -248,7 +251,8 @@ def main():
             spokes_per_frame=train_spokes_per_frame,
             weight_accelerations=config['data']['weight_accelerations'],
             initial_spokes_range=initial_train_spokes_range,
-            interpolate_kspace=kspace_interpolation
+            interpolate_kspace=kspace_interpolation,
+            cluster=cluster
         )
 
 

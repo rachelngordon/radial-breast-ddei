@@ -166,6 +166,7 @@ class SliceDataset(Dataset):
         initial_spokes_range=[8, 16, 24, 36],
         interpolate_kspace=False,
         slices_to_interpolate=192,
+        cluster="Randi"
     ):
         """
         Args:
@@ -191,6 +192,7 @@ class SliceDataset(Dataset):
         self.weight_acc = weight_accelerations
         self.interpolate_kspace = interpolate_kspace
         self.slices_to_interpolate = slices_to_interpolate
+        self.cluster=cluster
 
         # Find all matching HDF5 files under root_dir
         all_files = sorted(glob.glob(os.path.join(root_dir, file_pattern)))
@@ -303,7 +305,12 @@ class SliceDataset(Dataset):
         data = np.empty((2, self.N_time, H, W), dtype=np.float32)
         
         for t in range(self.N_time):
-            img_path = f'/ess/scratch/scratch1/rachelgordon/dce-{self.N_time}tf/{patient_id}/slice_{slice:03d}_frame_{t:03d}.nii'
+            if self.cluster == "Randi":
+                img_path = f'/ess/scratch/scratch1/rachelgordon/dce-{self.N_time}tf/{patient_id}/slice_{slice:03d}_frame_{t:03d}.nii'
+            elif self.cluster == "DSI":
+                img_path = f'/net/scratch2/rachelgordon/dce-{self.N_time}tf/{patient_id}/slice_{slice:03d}_frame_{t:03d}.nii'
+            else:
+                raise ValueError("Undefined cluster name.")
             img = nib.load(img_path)
             img_data = img.get_fdata()
 

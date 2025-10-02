@@ -133,6 +133,8 @@ N_full = config['data']['height'] * math.pi / 2
 eval_chunk_size = config["evaluation"]["chunk_size"]
 eval_chunk_overlap = config["evaluation"]["chunk_overlap"]
 
+cluster = config["experiment"].get("cluster", "Randi")
+
 
 if config["data"]["train_spokes_per_frame"] != "None":
     train_spokes_per_frame = config["data"]["train_spokes_per_frame"]
@@ -188,7 +190,8 @@ if config['dataloader']['slice_range_start'] == "None" or config['dataloader']['
         spf_aug=config['data']['spf_aug'],
         spokes_per_frame=train_spokes_per_frame,
         weight_accelerations=config['data']['weight_accelerations'],
-        initial_spokes_range=initial_train_spokes_range
+        initial_spokes_range=initial_train_spokes_range,
+        cluster=cluster
     )
 else:
     train_dataset = SliceDataset(
@@ -203,7 +206,8 @@ else:
         spf_aug=config['data']['spf_aug'],
         spokes_per_frame=train_spokes_per_frame,
         weight_accelerations=config['data']['weight_accelerations'],
-        initial_spokes_range=initial_train_spokes_range
+        initial_spokes_range=initial_train_spokes_range,
+        cluster=cluster
     )
 
 

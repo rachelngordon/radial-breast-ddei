@@ -381,6 +381,8 @@ class SliceDataset(Dataset):
         patient_id = file_path.split('/')[-1].strip('.h5')
 
         # grasp_img = self.load_dynamic_img(patient_id, current_slice_idx)
+
+        start = time.time()
         
         if self.interpolate_kspace:
             csmap_stack = self.load_all_csmaps(patient_id)
@@ -395,12 +397,17 @@ class SliceDataset(Dataset):
 
             if self.interpolate_kspace:
                 ds = torch.tensor(f[self.dataset_key][:])
+                print("shape before interpolation: ", ds.shape)
                 Keff_stack = collapse_partitions_to_slices(ds, S_out=self.slices_to_interpolate)           # (192, T, C, Sp, Sa)
                 # kspace_slice = pack_complex_to_2ch(Keff_stack[current_slice_idx])                 # (2, T, C, Sp, Sa)
                 kspace_slice = Keff_stack[current_slice_idx]                 # (2, T, C, Sp, Sa)
 
             else:
                 kspace_slice = torch.tensor(f[self.dataset_key][current_slice_idx])
+
+        end = time.time()
+
+        print("time for interpolation: ", end-start)
 
 
         if self.spf_aug or self.spokes_per_frame:
@@ -593,9 +600,15 @@ class SimulatedDataset(Dataset):
             
     def __len__(self):
         return len(self.sample_paths)
+    
+
 
     def __getitem__(self, idx):
         sample_dir = self.sample_paths[idx]
+        # print("sample dir: ", sample_dir) # /ess/scratch/scratch1/rachelgordon/dro_dataset/dro_36frames/sample_021_sub21
+        # sample_id = os.path.basename(sample_dir)#.split("_")[-1].strip("sub")
+        # print("sample_id: ", sample_id)
+
 
         # Load the data from .npy files
         csmaps = np.load(os.path.join(sample_dir, 'csmaps.npy'))

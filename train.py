@@ -718,39 +718,39 @@ else:
                 target_w_ei = 0.0
             elif epoch == warmup + 1:
 
-                if exp_name == 'ei_diffeo_encode_af':
-                    step0_train_ei_loss = 2.888178489460103e-10
-                elif exp_name == 'ei_diffeo_encode_both':
-                    step0_train_ei_loss = 2.8881785291364396e-10
-                elif exp_name == 'ei_diffeo_encode_time':
-                    step0_train_ei_loss = 2.8881783717989535e-10
-                elif exp_name == 'ei_diffeo_no_encoding':
-                    step0_train_ei_loss = 3.0604276849426544e-10
-                elif exp_name == 'ei_rotate_diffeo_no_encoding':
-                    step0_train_ei_loss = 2.975774622898662e-10
-                elif exp_name == 'ei_rotate_diffeo_encode_af':
-                    step0_train_ei_loss = 2.975774543732993e-10
-                    epoch_train_mc_loss = 0.000030
-                elif exp_name == 'ei_rotate_diffeo_encode_time':
-                    step0_train_ei_loss = 2.815141005566212e-10
-                    epoch_train_mc_loss = 0.000028
-                elif exp_name == 'ei_rotate_diffeo_encode_both':
-                    step0_train_ei_loss = 2.9785407323421824e-10
-                    epoch_train_mc_loss = 0.000032
-                elif exp_name == 'ei_rotate_no_encoding':
-                    step0_train_ei_loss = 2.913446773300942e-10
-                    epoch_train_mc_loss = 0.000033
-                elif exp_name == 'ei_rotate_encode_af':
-                    step0_train_ei_loss = 2.913446677225081e-10
-                    epoch_train_mc_loss = 0.000025
-                elif exp_name == 'ei_rotate_encode_time':
-                    step0_train_ei_loss = 2.759221312363757e-10
-                    epoch_train_mc_loss = 0.000029
-                elif exp_name == 'ei_rotate_encode_both':
-                    step0_train_ei_loss = 2.9095372507421176e-10
-                    epoch_train_mc_loss = 0.000030
-                else:
-                    print("no matching experiment found")
+                # if exp_name == 'ei_diffeo_encode_af':
+                #     step0_train_ei_loss = 2.888178489460103e-10
+                # elif exp_name == 'ei_diffeo_encode_both':
+                #     step0_train_ei_loss = 2.8881785291364396e-10
+                # elif exp_name == 'ei_diffeo_encode_time':
+                #     step0_train_ei_loss = 2.8881783717989535e-10
+                # elif exp_name == 'ei_diffeo_no_encoding':
+                #     step0_train_ei_loss = 3.0604276849426544e-10
+                # elif exp_name == 'ei_rotate_diffeo_no_encoding':
+                #     step0_train_ei_loss = 2.975774622898662e-10
+                # elif exp_name == 'ei_rotate_diffeo_encode_af':
+                #     step0_train_ei_loss = 2.975774543732993e-10
+                #     epoch_train_mc_loss = 0.000030
+                # elif exp_name == 'ei_rotate_diffeo_encode_time':
+                #     step0_train_ei_loss = 2.815141005566212e-10
+                #     epoch_train_mc_loss = 0.000028
+                # elif exp_name == 'ei_rotate_diffeo_encode_both':
+                #     step0_train_ei_loss = 2.9785407323421824e-10
+                #     epoch_train_mc_loss = 0.000032
+                # elif exp_name == 'ei_rotate_no_encoding':
+                #     step0_train_ei_loss = 2.913446773300942e-10
+                #     epoch_train_mc_loss = 0.000033
+                # elif exp_name == 'ei_rotate_encode_af':
+                #     step0_train_ei_loss = 2.913446677225081e-10
+                #     epoch_train_mc_loss = 0.000025
+                # elif exp_name == 'ei_rotate_encode_time':
+                #     step0_train_ei_loss = 2.759221312363757e-10
+                #     epoch_train_mc_loss = 0.000029
+                # elif exp_name == 'ei_rotate_encode_both':
+                #     step0_train_ei_loss = 2.9095372507421176e-10
+                #     epoch_train_mc_loss = 0.000030
+                # else:
+                #     print("no matching experiment found")
 
 
                 # Get the last known MC loss value from the previous epoch

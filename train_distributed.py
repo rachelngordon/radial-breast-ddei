@@ -15,7 +15,7 @@ from mc import MCLoss
 from lsfpnet_encoding import LSFPNet, ArtifactRemovalLSFPNet
 from radial_lsfp import MCNUFFT
 from utils import prep_nufft, log_gradient_stats, plot_enhancement_curve, get_cosine_ei_weight, plot_reconstruction_sample, get_git_commit, save_checkpoint, load_checkpoint, to_torch_complex, GRASPRecon, sliding_window_inference, set_seed
-from eval import eval_grasp, eval_sample
+from eval import eval_grasp, eval_sample, calc_dc
 import csv
 import math
 import random
@@ -25,6 +25,8 @@ from loss_metrics import LPIPSVideoMetric, SSIMVideoMetric
 import torch.distributed as dist
 from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.utils.data.distributed import DistributedSampler
+import h5py
+from torch.utils.tensorboard import SummaryWriter
 
 def setup():
     """Initializes the distributed process group."""
@@ -125,6 +127,10 @@ def main():
         os.makedirs(block_dir, exist_ok=True)
         os.makedirs(ec_dir, exist_ok=True)
 
+        # Initialize TensorBoard SummaryWriter
+        log_dir = os.path.join(output_dir, 'logs')
+        writer = SummaryWriter(log_dir)
+
 
 
         # Save the configuration file
@@ -169,7 +175,9 @@ def main():
     )
     Ng = config["data"]["fpg"] 
 
-    N_spokes = int(config["data"]["total_spokes"] / N_time)
+    total_spokes = config["data"]["total_spokes"]
+
+    N_spokes = int(total_spokes / N_time)
     N_full = config['data']['height'] * math.pi / 2
 
     eval_chunk_size = config["evaluation"]["chunk_size"]
@@ -563,6 +571,8 @@ def main():
                     )
 
                     initial_train_ei_loss += ei_loss.item()
+
+                    
                 
 
             # record losses
@@ -574,6 +584,13 @@ def main():
 
             step0_train_adj_loss = initial_train_adj_loss / len(train_loader)
             train_adj_losses.append(step0_train_adj_loss)
+
+
+            if global_rank == 0 or not config['training']['multigpu']:
+                writer.add_scalar('Loss/Train_MC', step0_train_mc_loss, 0)
+                writer.add_scalar('Loss/Train_EI', step0_train_ei_loss, 0)
+                writer.add_scalar('Loss/Train_Weighted_EI', 0, 0)
+                writer.add_scalar('Loss/Train_Adj', step0_train_ei_loss, 0)
 
 
             lambda_Ls.append(lambda_L.item())
@@ -632,8 +649,10 @@ def main():
 
                 if N_time_eval > eval_chunk_size:
                     print("Performing sliding window eval...")
+                    print("measured kspace input shape: ", measured_kspace.shape)
                     x_recon, adj_loss = sliding_window_inference(H, W, N_time_eval, eval_ktraj, eval_dcomp, eval_nufft_ob, eval_adjnufft_ob, eval_chunk_size, eval_chunk_overlap, measured_kspace, csmap, acceleration_encoding, start_timepoint_index, model, epoch="val0", device=device)  
                 else:
+                    print("measured kspace input shape: ", measured_kspace.shape)
                     x_recon, adj_loss, *_ = model(
                     measured_kspace.to(device), eval_physics, csmap, acceleration_encoding, start_timepoint_index, epoch="val0", norm=config['model']['norm']
                     )
@@ -687,6 +706,12 @@ def main():
             val_adj_losses.append(step0_val_adj_loss)
 
 
+            if global_rank == 0 or not config['training']['multigpu']:
+                writer.add_scalar('Loss/Val_MC', step0_val_mc_loss, 0)
+                writer.add_scalar('Loss/Val_EI', step0_val_ei_loss, 0)
+                writer.add_scalar('Loss/Val_Adj', step0_val_adj_loss, 0)
+
+
             # Calculate and store average validation evaluation metrics
             initial_eval_ssim = np.mean(initial_eval_ssims)
             initial_eval_psnr = np.mean(initial_eval_psnrs)
@@ -703,6 +728,15 @@ def main():
             eval_dc_mses.append(initial_eval_dc_mse) 
             eval_dc_maes.append(initial_eval_dc_mae) 
             eval_curve_corrs.append(initial_eval_curve_corr)
+
+
+            writer.add_scalar('Metric/SSIM', initial_eval_ssim, 0)
+            writer.add_scalar('Metric/PSNR', initial_eval_psnr, 0)
+            writer.add_scalar('Metric/MSE', initial_eval_mse, 0)
+            writer.add_scalar('Metric/LPIPS', initial_eval_lpips, 0)
+            writer.add_scalar('Metric/DC_MSE', initial_eval_dc_mse, 0)
+            writer.add_scalar('Metric/DC_MAE', initial_eval_dc_mae, 0)
+            writer.add_scalar('Metric/EC_Corr', initial_eval_curve_corr, 0)
 
         print(f"Step 0 Train Losses: MC: {step0_train_mc_loss}, EI: {step0_train_ei_loss}, Adj: {step0_train_adj_loss}")
         print(f"Step 0 Val Losses: MC: {step0_val_mc_loss}, EI: {step0_val_ei_loss}, Adj: {step0_val_adj_loss}")
@@ -975,16 +1009,23 @@ def main():
             weighted_train_mc_losses.append(epoch_train_mc_loss*mc_loss_weight)
             if use_ei_loss:
                 epoch_train_ei_loss = running_ei_loss / len(train_loader)
-                train_ei_losses.append(epoch_train_ei_loss)
-                weighted_train_ei_losses.append(epoch_train_ei_loss*ei_loss_weight)
             else:
                 # Append 0 if EI loss is not used to keep lists aligned
-                train_ei_losses.append(0.0)
-                weighted_train_ei_losses.append(0.0)
+                epoch_train_ei_loss = 0.0
+                ei_loss_weight = 0
+
+            train_ei_losses.append(epoch_train_ei_loss)
+            weighted_train_ei_losses.append(epoch_train_ei_loss*ei_loss_weight)
 
             epoch_train_adj_loss = running_adj_loss / len(train_loader)
             train_adj_losses.append(epoch_train_adj_loss)
             weighted_train_adj_losses.append(epoch_train_adj_loss*adj_loss_weight)
+
+
+            if global_rank == 0 or not config['training']['multigpu']:
+                writer.add_scalar('Loss/Train_MC', epoch_train_mc_loss, epoch)
+                writer.add_scalar('Loss/Train_EI', epoch_train_ei_loss, epoch)
+                writer.add_scalar('Loss/Train_Adj', epoch_train_adj_loss, epoch)
 
 
             lambda_Ls.append(lambda_L.item())
@@ -1130,6 +1171,18 @@ def main():
                 eval_dc_mses.append(epoch_eval_dc_mse) 
                 eval_dc_maes.append(epoch_eval_dc_mae)    
                 eval_curve_corrs.append(epoch_eval_curve_corr)  
+
+ 
+                writer.add_scalar('Metric/SSIM', epoch_eval_ssim, epoch)
+                writer.add_scalar('Metric/PSNR', epoch_eval_psnr, epoch)
+                writer.add_scalar('Metric/MSE', epoch_eval_mse, epoch)
+                writer.add_scalar('Metric/LPIPS', epoch_eval_lpips, epoch)
+                writer.add_scalar('Metric/DC_MSE', epoch_eval_dc_mse, epoch)
+                writer.add_scalar('Metric/DC_MAE', epoch_eval_dc_mae, epoch)
+                writer.add_scalar('Metric/EC_Corr', epoch_eval_curve_corr, epoch)
+
+
+                
                 
                 # save a sample from the last validation batch of the epoch
                 if epoch % save_interval == 0:
@@ -1167,16 +1220,25 @@ def main():
             # Calculate and store average validation losses
             epoch_val_mc_loss = val_running_mc_loss / len(val_dro_loader)
             val_mc_losses.append(epoch_val_mc_loss)
+
             if use_ei_loss:
                 epoch_val_ei_loss = val_running_ei_loss / len(val_dro_loader)
-                val_ei_losses.append(epoch_val_ei_loss)
             else:
-                val_ei_losses.append(0.0)
+                epoch_val_ei_loss = 0.0
+
+            val_ei_losses.append(epoch_val_ei_loss)
+
             if model_type == "LSFPNet":
                 epoch_val_adj_loss = val_running_adj_loss / len(val_dro_loader)
-                val_adj_losses.append(epoch_val_adj_loss)
             else:
-                val_adj_losses.append(0.0)
+                epoch_val_adj_loss = 0.0
+            
+            val_adj_losses.append(epoch_val_adj_loss)
+
+            if global_rank == 0 or not config['training']['multigpu']:
+                writer.add_scalar('Loss/Val_MC', epoch_val_mc_loss, epoch)
+                writer.add_scalar('Loss/Val_EI', epoch_val_ei_loss, epoch)
+                writer.add_scalar('Loss/Val_Adj', epoch_val_adj_loss, epoch)
 
 
 
@@ -1658,6 +1720,68 @@ def main():
 
 
 
+                # Compute Raw k-space Evaluation
+
+                # evaluate each acceleration with raw k-space
+                for patient_id in val_patient_ids:
+                    print(patient_id)
+
+                    # load raw k-space with the given patient id
+                    raw_kspace_path = os.path.join(config["data"]["root_dir"], f'{patient_id}.h5')
+
+                    with h5py.File(fp, "r") as f:
+                        raw_kspace = f[config["data"]["dataset_key"]]
+                    
+                    print("raw k-space shape: ", raw_kspace.shape) # (2, 288, 640, 16, 83)
+
+                    # convert to complex
+                    raw_kspace = to_torch_complex(raw_kspace) # (288, 640, 16, 83)
+
+                    # bin to desired number of timeframes
+                    N_partitions = raw_kspace.shape[-1]
+                    raw_kspace_flat = raw_kspace.contiguous().view(total_spokes, N_coils, N_samples, N_partitions)
+                    N_time = total_spokes // spokes
+                    raw_kspace_binned = raw_kspace_flat.view(N_time, spokes, N_coils, N_samples, N_partitions)
+
+                    # reshape to (P, C, S, T)
+                    raw_kspace_binned = rearrange(raw_kspace_binned, 't sp c sam p -> p c (sp sam) t')
+
+                    slice_dc_mses = []
+                    slice_dc_maes = []
+
+                    # generate recon for each slice of raw k-space
+                    for raw_kspace_slice in raw_kspace_binned:
+                        print("raw_kspace_slice: ", raw_kspace_slice.shape)
+
+                        if num_frames > eval_chunk_size:
+                            print("Performing sliding window eval...")
+                            x_recon, _ = sliding_window_inference(H, W, num_frames, ktraj, dcomp, nufft_ob, adjnufft_ob, eval_chunk_size, eval_chunk_overlap, raw_kspace_slice, csmap, acceleration_encoding, start_timepoint_index, model, epoch=None, device=device)  
+                        else:
+                            x_recon, *_ = model(
+                                raw_kspace_slice.to(device), physics, csmap, acceleration_encoding, start_timepoint_index, epoch=None, norm=config['model']['norm']
+                            )
+
+                        # calculate data consistency of output with original k-space input
+                        # simulate k-space
+                        print("x_recon: ", x_recon.shape)
+                        sim_kspace = physics(False, x_recon, csmap)
+
+                        print("sim_kspace: ", x_recon.shape)
+                        print("raw_kspace_slice: ", x_recon.shape)
+
+                        raw_dc_mse, raw_dc_mae = calc_dc(sim_kspace, raw_kspace_slice, device)
+                        slice_dc_mses.append(raw_dc_mse)
+                        slice_dc_maes.append(raw_dc_mae)
+
+
+                    # create GRASP image from raw k-space if doesn't already exist
+
+
+                    # calculate data consistency between each slice
+
+                    # plot example slice comparison
+                    
+
                 # Save Results
                 spf_metrics_path = os.path.join(eval_dir, "eval_metrics.csv")
                 with open(spf_metrics_path, 'a', newline='') as csvfile:
@@ -1683,6 +1807,10 @@ def main():
                     f'{np.mean(stress_test_grasp_dc_maes):.4f} ± {np.std(stress_test_grasp_dc_maes):.4f}',
                     f'{np.mean(stress_test_grasp_corrs):.4f} ± {np.std(stress_test_grasp_corrs):.4f}',
                     ])
+
+
+                
+
 
 
 
@@ -1939,8 +2067,13 @@ def main():
         plt.close()
 
 
+    if global_rank == 0 or not config['training']['multigpu']:
+        writer.close()
+
     cleanup()
 
 
 if __name__ == '__main__':
     main()
+
+

@@ -86,7 +86,7 @@ model:
 
 # Training settings
 training:
-  epochs: 100
+  epochs: 1
   save_interval: 1
   plot_interval: 20
   device: "cuda"  # or "cpu"
@@ -118,6 +118,6 @@ evaluation:
   chunk_overlap: 12
 
 debugging:
-  calc_step_0: true
+  calc_step_0: True
   enable_gradient_monitoring: true
   monitoring_interval: 5

@@ -1773,6 +1773,12 @@ def main():
                         slice_dc_mses.append(raw_dc_mse)
                         slice_dc_maes.append(raw_dc_mae)
 
+                    avg_dc_mse = np.mean(slice_dc_mses)
+                    avg_dc_mae = np.mean(slice_dc_maes)
+
+                    print("average mse with raw k-space: ", avg_dc_mse)
+                    print("average mae with raw k-space: ", avg_dc_mae)
+
 
                     # create GRASP image from raw k-space if doesn't already exist
 

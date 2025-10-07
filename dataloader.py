@@ -382,7 +382,6 @@ class SliceDataset(Dataset):
 
         # grasp_img = self.load_dynamic_img(patient_id, current_slice_idx)
 
-        start = time.time()
         
         if self.interpolate_kspace:
             csmap_stack = self.load_all_csmaps(patient_id)
@@ -405,9 +404,7 @@ class SliceDataset(Dataset):
             else:
                 kspace_slice = torch.tensor(f[self.dataset_key][current_slice_idx])
 
-        end = time.time()
 
-        print("time for interpolation: ", end-start)
 
 
         if self.spf_aug or self.spokes_per_frame:

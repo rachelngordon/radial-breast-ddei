@@ -105,7 +105,7 @@ def main():
         device = torch.device(config["training"]["device"])
 
     
-    if global_rank == 0 or config['training']['multigpu'] == False:
+    if global_rank == 0 or not config['training']['multigpu']:
         commit_hash = get_git_commit()
         print(f"Running experiment on Git commit: {commit_hash}")
 
@@ -120,7 +120,7 @@ def main():
     block_dir = os.path.join(output_dir, "block_outputs")
     ec_dir = os.path.join(output_dir, 'enhancement_curves')
 
-    if global_rank == 0 or config['training']['multigpu'] == False:
+    if global_rank == 0 or not config['training']['multigpu']:
         
         os.makedirs(output_dir, exist_ok=True)
         os.makedirs(eval_dir, exist_ok=True)
@@ -675,7 +675,7 @@ def main():
                 grasp_recon = grasp_img.to(device) # Shape: (1, 2, H, T, W)
 
                 # calculate grasp metrics
-                if global_rank == 0 or config['training']['multigpu']:
+                if global_rank == 0 or not config['training']['multigpu']:
                     ssim_grasp, psnr_grasp, mse_grasp, lpips_grasp, dc_mse_grasp, dc_mae_grasp = eval_grasp(measured_kspace, csmap, ground_truth, grasp_recon, eval_physics, device, eval_dir)
                     grasp_ssims.append(ssim_grasp)
                     grasp_psnrs.append(psnr_grasp)
@@ -729,14 +729,14 @@ def main():
             eval_dc_maes.append(initial_eval_dc_mae) 
             eval_curve_corrs.append(initial_eval_curve_corr)
 
-
-            writer.add_scalar('Metric/SSIM', initial_eval_ssim, 0)
-            writer.add_scalar('Metric/PSNR', initial_eval_psnr, 0)
-            writer.add_scalar('Metric/MSE', initial_eval_mse, 0)
-            writer.add_scalar('Metric/LPIPS', initial_eval_lpips, 0)
-            writer.add_scalar('Metric/DC_MSE', initial_eval_dc_mse, 0)
-            writer.add_scalar('Metric/DC_MAE', initial_eval_dc_mae, 0)
-            writer.add_scalar('Metric/EC_Corr', initial_eval_curve_corr, 0)
+            if global_rank == 0 or not config['training']['multigpu']:
+                writer.add_scalar('Metric/SSIM', initial_eval_ssim, 0)
+                writer.add_scalar('Metric/PSNR', initial_eval_psnr, 0)
+                writer.add_scalar('Metric/MSE', initial_eval_mse, 0)
+                writer.add_scalar('Metric/LPIPS', initial_eval_lpips, 0)
+                writer.add_scalar('Metric/DC_MSE', initial_eval_dc_mse, 0)
+                writer.add_scalar('Metric/DC_MAE', initial_eval_dc_mae, 0)
+                writer.add_scalar('Metric/EC_Corr', initial_eval_curve_corr, 0)
 
         print(f"Step 0 Train Losses: MC: {step0_train_mc_loss}, EI: {step0_train_ei_loss}, Adj: {step0_train_adj_loss}")
         print(f"Step 0 Val Losses: MC: {step0_val_mc_loss}, EI: {step0_val_ei_loss}, Adj: {step0_val_adj_loss}")
@@ -959,7 +959,7 @@ def main():
 
                     end = time.time()
 
-                    if global_rank == 0 or config['training']['multigpu']:
+                    if global_rank == 0 or not config['training']['multigpu']:
                         print("time for one iteration: ", end-start)
 
                 except RuntimeError as e:
@@ -977,7 +977,7 @@ def main():
             # plot training samples
             if epoch % save_interval == 0:
 
-                if global_rank == 0 or config['training']['multigpu']:
+                if global_rank == 0 or not config['training']['multigpu']:
 
                     plot_reconstruction_sample(
                         x_recon,
@@ -1129,7 +1129,7 @@ def main():
 
 
                         ## Evaluation
-                        if global_rank == 0 or config['training']['multigpu']:
+                        if global_rank == 0 or not config['training']['multigpu']:
                             ssim, psnr, mse, lpips, dc_mse, dc_mae, recon_corr, _ = eval_sample(val_kspace_batch, val_csmap, val_ground_truth, val_x_recon, eval_physics, val_mask, val_grasp_img_tensor, acceleration, int(N_spokes), eval_dir, f'epoch{epoch}', device)
                             epoch_eval_ssims.append(ssim)
                             epoch_eval_psnrs.append(psnr)
@@ -1155,7 +1155,7 @@ def main():
 
 
             # Calculate and store average validation evaluation metrics
-            if global_rank == 0 or config['training']['multigpu']:
+            if global_rank == 0 or not config['training']['multigpu']:
                 epoch_eval_ssim = np.mean(epoch_eval_ssims)
                 epoch_eval_psnr = np.mean(epoch_eval_psnrs)
                 epoch_eval_mse = np.mean(epoch_eval_mses)
@@ -1246,7 +1246,7 @@ def main():
             # --- Plotting and Logging ---
             if epoch % save_interval == 0:
 
-                if global_rank == 0 or config['training']['multigpu']:
+                if global_rank == 0 or not config['training']['multigpu']:
 
                     # Save the model checkpoint
                     train_curves = dict(
@@ -1432,7 +1432,7 @@ def main():
                     plt.savefig(os.path.join(eval_dir, "eval_dc_mses.png"))
                     plt.close()
 
-            if global_rank == 0 or config['training']['multigpu']:
+            if global_rank == 0 or not config['training']['multigpu']:
                 # Print epoch summary
                 print(
                     f"Epoch {epoch}: Training MC Loss: {epoch_train_mc_loss:.6f}, Validation MC Loss: {epoch_val_mc_loss:.6f}"
@@ -1464,7 +1464,7 @@ def main():
 
 
     # Save the model at the end of training
-    if global_rank == 0 or config['training']['multigpu']:
+    if global_rank == 0 or not config['training']['multigpu']:
         train_curves = dict(
             train_mc_losses=train_mc_losses,
             train_ei_losses=train_ei_losses,
@@ -1630,7 +1630,6 @@ def main():
                     csmap = csmap.squeeze(0).to(device)   # Remove batch dim
                     ground_truth = ground_truth.to(device) # Shape: (1, 2, T, H, W)
 
-
                     # SIMULATE KSPACE
                     ktraj, dcomp, nufft_ob, adjnufft_ob = prep_nufft(N_samples, spokes, num_frames)
                     physics = MCNUFFT(nufft_ob.to(device), adjnufft_ob.to(device), ktraj.to(device), dcomp.to(device))
@@ -1724,37 +1723,56 @@ def main():
 
                 # evaluate each acceleration with raw k-space
                 for patient_id in val_patient_ids:
-                    print(patient_id)
 
                     # load raw k-space with the given patient id
-                    raw_kspace_path = os.path.join(config["data"]["root_dir"], f'{patient_id}.h5')
+                    raw_kspace_path = os.path.join(config["data"]["root_dir"], f'{patient_id}_2.h5')
 
-                    with h5py.File(fp, "r") as f:
-                        raw_kspace = f[config["data"]["dataset_key"]]
+                    with h5py.File(raw_kspace_path, "r") as f:
+                        raw_kspace = f[config["data"]["dataset_key"]][()] 
                     
-                    print("raw k-space shape: ", raw_kspace.shape) # (2, 288, 640, 16, 83)
 
-                    # convert to complex
-                    raw_kspace = to_torch_complex(raw_kspace) # (288, 640, 16, 83)
+                    N_partitions = raw_kspace.shape[0]
 
-                    # bin to desired number of timeframes
-                    N_partitions = raw_kspace.shape[-1]
-                    raw_kspace_flat = raw_kspace.contiguous().view(total_spokes, N_coils, N_samples, N_partitions)
+                    raw_kspace = rearrange(raw_kspace, 'p t c sp sam -> t sp c sam p')
+                    raw_kspace_flat = torch.tensor(raw_kspace).contiguous().view(total_spokes, N_coils, N_samples, N_partitions)
+
                     N_time = total_spokes // spokes
                     raw_kspace_binned = raw_kspace_flat.view(N_time, spokes, N_coils, N_samples, N_partitions)
 
                     # reshape to (P, C, S, T)
                     raw_kspace_binned = rearrange(raw_kspace_binned, 't sp c sam p -> p c (sp sam) t')
 
+
                     slice_dc_mses = []
                     slice_dc_maes = []
+                    grasp_slice_dc_mses = []
+                    grasp_slice_dc_maes = []
 
                     # generate recon for each slice of raw k-space
-                    for raw_kspace_slice in raw_kspace_binned:
-                        print("raw_kspace_slice: ", raw_kspace_slice.shape)
+                    for slice_idx, raw_kspace_slice in enumerate(raw_kspace_binned):
+
+                        raw_kspace_slice = raw_kspace_slice.to(csmap.dtype)
+
+                        # create GRASP image from raw k-space if doesn't already exist
+                        grasp_save_path = os.path.join(os.path.dirname(os.path.dirname(config['data']['root_dir'])), f'raw_grasp/{patient_id}')
+                        os.makedirs(grasp_save_path, exist_ok=True)
+
+                        grasp_path = os.path.join(grasp_save_path, f'raw_grasp_spf{spokes}_frames{num_frames}_slice{slice_idx:03d}.npy')
+                        
+                        if not os.path.exists(grasp_path):
+                            print(f"No GRASP file found, performing reconstruction with {spokes} spokes/frame and {num_frames} frames.")
+
+                            grasp_img = GRASPRecon(csmap, raw_kspace_slice, spokes, num_frames, grasp_path)
+
+                            grasp_recon_torch = torch.from_numpy(grasp_img).permute(2, 0, 1) # T, H, W
+                            grasp_recon_torch = torch.stack([grasp_recon_torch.real, grasp_recon_torch.imag], dim=0)
+
+                            grasp_img = torch.flip(grasp_recon_torch, dims=[-3])
+                            grasp_img = torch.rot90(grasp_img, k=3, dims=[-3,-1]).unsqueeze(0)
+
+                        grasp_img = grasp_img.to(device)
 
                         if num_frames > eval_chunk_size:
-                            print("Performing sliding window eval...")
                             x_recon, _ = sliding_window_inference(H, W, num_frames, ktraj, dcomp, nufft_ob, adjnufft_ob, eval_chunk_size, eval_chunk_overlap, raw_kspace_slice, csmap, acceleration_encoding, start_timepoint_index, model, epoch=None, device=device)  
                         else:
                             x_recon, *_ = model(
@@ -1762,28 +1780,49 @@ def main():
                             )
 
                         # calculate data consistency of output with original k-space input
-                        # simulate k-space
-                        print("x_recon: ", x_recon.shape)
+                        # simulate k-space for DL and GRASP recons
+
+                        x_recon = to_torch_complex(x_recon)
                         sim_kspace = physics(False, x_recon, csmap)
 
-                        print("sim_kspace: ", x_recon.shape)
-                        print("raw_kspace_slice: ", x_recon.shape)
+                        print("grasp_img: ", grasp_img.shape)
+                        
+                        if grasp_img.shape[1] == 2:
+                            grasp_img = to_torch_complex(grasp_img)
+
+                        if grasp_img.shape[-2] == num_frames: 
+                            grasp_img = rearrange(grasp_img, 'b h t w -> b h w t')
+
+                        print("x_recon: ", x_recon.dtype)
+                        print("grasp_img: ", grasp_img.dtype)
+                        print("csmap: ", csmap.dtype)
+
+                        print("x_recon: ", x_recon.shape)
+                        print("grasp_img: ", grasp_img.shape)
+                        print("csmap: ", csmap.shape)
+
+                        sim_kspace_grasp = physics(False, grasp_img.to(x_recon.dtype), csmap)
 
                         raw_dc_mse, raw_dc_mae = calc_dc(sim_kspace, raw_kspace_slice, device)
+                        raw_grasp_dc_mse, raw_grasp_dc_mae = calc_dc(sim_kspace_grasp, raw_kspace_slice, device)
+
                         slice_dc_mses.append(raw_dc_mse)
                         slice_dc_maes.append(raw_dc_mae)
+
+                        grasp_slice_dc_mses.append(raw_grasp_dc_mse)
+                        grasp_slice_dc_maes.append(raw_grasp_dc_mae)
 
                     avg_dc_mse = np.mean(slice_dc_mses)
                     avg_dc_mae = np.mean(slice_dc_maes)
 
-                    print("average mse with raw k-space: ", avg_dc_mse)
-                    print("average mae with raw k-space: ", avg_dc_mae)
+                    avg_grasp_dc_mse = np.mean(grasp_slice_dc_mses)
+                    avg_grasp_dc_mae = np.mean(grasp_slice_dc_maes)
 
+                    print(f"Avg DL DC MSE: {avg_dc_mse}")
+                    print(f"Avg DL DC MAE: {avg_dc_mae}")
+                    print(f"Avg GRASP DC MSE: {avg_grasp_dc_mse}")
+                    print(f"Avg GRASP DC MAE: {avg_grasp_dc_mae}")
 
-                    # create GRASP image from raw k-space if doesn't already exist
-
-
-                    # calculate data consistency between each slice
 
                     # plot example slice comparison
                     

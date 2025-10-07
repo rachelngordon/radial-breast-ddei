@@ -291,7 +291,6 @@ def plot_reconstruction_sample(x_recon, title, filename, output_dir, grasp_img=N
     else:
         x_recon_mag = x_recon
 
-    print(x_recon_mag.shape)
 
     n_timeframes = x_recon_mag.shape[-1]
 

@@ -50,7 +50,7 @@ def main():
     # --- Executor Configuration ---
     job_name = "ei_diffeo_spatial_warp"
     config_path = 'configs/config_ei_spatial_warp.yaml'
-    num_gpus = 4
+    num_gpus = 2
 
     log_dir = f"submitit_logs/{job_name}"
     os.makedirs(log_dir, exist_ok=True)

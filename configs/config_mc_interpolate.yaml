@@ -1,6 +1,6 @@
 # Directories for input data
 data:
-  root_dir: "/ess/scratch/scratch1/rachelgordon/dce-8tf/binned_kspace"
+  root_dir: "/ess/scratch/scratch1/rachelgordon/interpolation/binned_kspace"
   dataset_key: "ktspace"
   split_file: "/gpfs/data/karczmar-lab/workspaces/rachelgordon/breastMRI-recon/ddei/data/data_split.json"
   val_split_ratio: 0.2
@@ -91,7 +91,7 @@ training:
   plot_interval: 20
   device: "cuda"  # or "cpu"
   multigpu: True
-  kspace_interpolation: True
+  kspace_interpolation: False
   curriculum_learning:
     enabled: False
     phases:

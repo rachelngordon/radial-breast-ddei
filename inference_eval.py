@@ -317,8 +317,13 @@ with torch.no_grad():
             # load raw k-space with the given patient id
             raw_kspace_path = os.path.join(config["data"]["root_dir"], f'{patient_id}_2.h5')
 
+            print("loading raw kspace from", raw_kspace_path)
+
             with h5py.File(raw_kspace_path, "r") as f:
                 raw_kspace = f[config["data"]["dataset_key"]][()] 
+
+
+            print("kspace shape: ", raw_kspace.shape)
             
 
             N_partitions = raw_kspace.shape[0]
@@ -354,15 +359,14 @@ with torch.no_grad():
 
                     grasp_img = GRASPRecon(csmap, raw_kspace_slice, spokes, num_frames, grasp_path)
 
-                    grasp_recon_torch = torch.from_numpy(grasp_img).permute(2, 0, 1) # T, H, W
-                    grasp_img = torch.stack([grasp_recon_torch.real, grasp_recon_torch.imag], dim=0)
-                else:
+                else: 
                     grasp_img = np.load(grasp_path)
-                    grasp_img = torch.tensor(grasp_img, device=device)
 
-                grasp_img = torch.flip(grasp_img, dims=[-3])
+                grasp_recon_torch = torch.from_numpy(grasp_img).permute(2, 0, 1) # T, H, W
+                grasp_recon_torch = torch.stack([grasp_recon_torch.real, grasp_recon_torch.imag], dim=0)
+
+                grasp_img = torch.flip(grasp_recon_torch, dims=[-3])
                 grasp_img = torch.rot90(grasp_img, k=3, dims=[-3,-1]).unsqueeze(0)
-                #grasp_img = grasp_img.unsqueeze(0)
 
                 grasp_img = grasp_img.to(device)
 
@@ -395,35 +399,32 @@ with torch.no_grad():
                 print("grasp_img: ", grasp_img.shape)
                 print("csmap: ", csmap.shape)
 
-                plot_path = f'/gpfs/data/karczmar-lab/workspaces/rachelgordon/breastMRI-recon/ddei/dl_grasp_orientation_comparison_slice{slice_idx}.png'
+                plot_path = f'/gpfs/data/karczmar-lab/workspaces/rachelgordon/breastMRI-recon/ddei/dl_grasp_orientation_comparison.png'
+                # if not os.path.exists(plot_path):
+                timeframe = 18 
 
-                if not os.path.exists(plot_path):
-                    timeframe = 18 
+                # Extract the specific timeframe for both images.
+                # Since the first dimension is 1, we can squeeze it out.
+                x_recon_timeframe = x_recon[0, :, :, timeframe]
+                grasp_img_timeframe = grasp_img[0, :, :, timeframe]
 
-                    # Extract the specific timeframe for both images.
-                    # Since the first dimension is 1, we can squeeze it out.
-                    x_recon_timeframe = x_recon[0, :, :, timeframe]
-                    grasp_img_timeframe = grasp_img[0, :, :, timeframe]
+                # Create a figure with two subplots, arranged horizontally.
+                fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(10, 5))
 
-                    # Create a figure with two subplots, arranged horizontally.
-                    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(10, 5))
+                # Display the first image slice.
+                ax1.imshow(np.abs(x_recon_timeframe.cpu().numpy()), cmap='gray')
+                ax1.set_title(f'DL Recon - Timeframe: {timeframe}, Slice: {slice_idx}')
+                ax1.axis('off')
 
-                    # Display the first image slice.
-                    ax1.imshow(np.abs(x_recon_timeframe.cpu().numpy()), cmap='gray')
-                    ax1.set_title(f'DL Recon - Timeframe: {timeframe}, Slice: {slice_idx}')
-                    ax1.axis('off')
+                # Display the second image slice.
+                ax2.imshow(np.abs(grasp_img_timeframe.cpu().numpy()), cmap='gray')
+                ax2.set_title(f'GRASP Recon - Timeframe: {timeframe}, Slice: {slice_idx}')
+                ax2.axis('off')
 
-                    # Display the second image slice.
-                    ax2.imshow(np.abs(grasp_img_timeframe.cpu().numpy()), cmap='gray')
-                    ax2.set_title(f'GRASP Recon - Timeframe: {timeframe}, Slice: {slice_idx}')
-                    ax2.axis('off')
-
-                    # Adjust layout and display the plot.
-                    plt.tight_layout()
-                    plt.savefig(plot_path)
-                    print(f"---- DL GRASP Orientation Comparsion Saved to: {plot_path} ----")
-
-
+                # Adjust layout and display the plot.
+                plt.tight_layout()
+                plt.savefig(plot_path)
+                print(f"---- DL GRASP Orientation Comparsion Saved to: {plot_path} ----")
 
                 sim_kspace_grasp = physics(False, grasp_img.to(x_recon.dtype), csmap)
 
@@ -734,3 +735,6 @@ axes[1, 2].set_ylabel("Pearson Correlation Coefficient")
 plt.tight_layout()
 plt.savefig(os.path.join(output_dir, "spf_eval_metrics.png"))
 plt.close()
+
+
+

@@ -1599,7 +1599,7 @@ def main():
 
             # NOTE: removed stress test until training on ultra-high accelerations with curriculum learning
             print("--- Running Stress Test Evaluation (Budget: 176 spokes) ---")
-            for eval_config in STRESS_TEST_PLAN:
+            for eval_config in MAIN_EVALUATION_PLAN:
 
                 stress_test_ssims = []
                 stress_test_psnrs = []
@@ -1634,88 +1634,88 @@ def main():
                     ktraj, dcomp, nufft_ob, adjnufft_ob = prep_nufft(N_samples, spokes, num_frames)
                     physics = MCNUFFT(nufft_ob.to(device), adjnufft_ob.to(device), ktraj.to(device), dcomp.to(device))
 
-                    sim_kspace = physics(False, ground_truth, csmap)
+                    # sim_kspace = physics(False, ground_truth, csmap)
 
-                    kspace = sim_kspace.squeeze(0).to(device) # Remove batch dim
+                    # kspace = sim_kspace.squeeze(0).to(device) # Remove batch dim
 
-                    # calculate acceleration factor
-                    acceleration = torch.tensor([N_full / int(spokes)], dtype=torch.float, device=device)
+                    # # calculate acceleration factor
+                    # acceleration = torch.tensor([N_full / int(spokes)], dtype=torch.float, device=device)
 
-                    if config['model']['encode_acceleration']:
-                        acceleration_encoding = acceleration
-                    else: 
-                        acceleration_encoding = None
+                    # if config['model']['encode_acceleration']:
+                    #     acceleration_encoding = acceleration
+                    # else: 
+                    #     acceleration_encoding = None
 
-                    if config['model']['encode_time_index'] == False:
-                        start_timepoint_index = None
-                    else:
-                        start_timepoint_index = torch.tensor([0], dtype=torch.float, device=device)
-
-
-                    # check if GRASP image exists or if we need to perform GRASP recon
-                    if type(grasp_img) is int or len(grasp_img.shape) == 1:
-                        print(f"No GRASP file found, performing reconstruction with {spokes} spokes/frame and {num_frames} frames.")
-
-                        grasp_img = GRASPRecon(csmap, sim_kspace, spokes, num_frames, grasp_path[0])
-
-                        grasp_recon_torch = torch.from_numpy(grasp_img).permute(2, 0, 1) # T, H, W
-                        grasp_recon_torch = torch.stack([grasp_recon_torch.real, grasp_recon_torch.imag], dim=0)
-
-                        grasp_img = torch.flip(grasp_recon_torch, dims=[-3])
-                        grasp_img = torch.rot90(grasp_img, k=3, dims=[-3,-1]).unsqueeze(0)
-
-                    grasp_img = grasp_img.to(device)
-
-                    if num_frames > eval_chunk_size:
-                        print("Performing sliding window eval...")
-                        x_recon, _ = sliding_window_inference(H, W, num_frames, ktraj, dcomp, nufft_ob, adjnufft_ob, eval_chunk_size, eval_chunk_overlap, kspace, csmap, acceleration_encoding, start_timepoint_index, model, epoch=None, device=device)  
-                    else:
-                        x_recon, *_ = model(
-                            kspace.to(device), physics, csmap, acceleration_encoding, start_timepoint_index, epoch=None, norm=config['model']['norm']
-                        )
-
-                    ground_truth = torch.stack([ground_truth.real, ground_truth.imag], dim=1)
-                    ground_truth = rearrange(ground_truth, 'b i h w t -> b i t h w')
+                    # if config['model']['encode_time_index'] == False:
+                    #     start_timepoint_index = None
+                    # else:
+                    #     start_timepoint_index = torch.tensor([0], dtype=torch.float, device=device)
 
 
-                    ## Evaluation
-                    ssim, psnr, mse, lpips, dc_mse, dc_mae, recon_corr, grasp_corr = eval_sample(kspace, csmap, ground_truth, x_recon, physics, mask, grasp_img, acceleration, int(spokes), eval_dir, f"{spokes}spf", device)
-                    stress_test_ssims.append(ssim)
-                    stress_test_psnrs.append(psnr)
-                    stress_test_mses.append(mse)
-                    stress_test_lpipses.append(lpips)
-                    stress_test_dc_mses.append(dc_mse)
-                    stress_test_dc_maes.append(dc_mae)
+                    # # check if GRASP image exists or if we need to perform GRASP recon
+                    # if type(grasp_img) is int or len(grasp_img.shape) == 1:
+                    #     print(f"No GRASP file found, performing reconstruction with {spokes} spokes/frame and {num_frames} frames.")
 
-                    if recon_corr is not None:
-                        stress_test_corrs.append(recon_corr)
-                        stress_test_grasp_corrs.append(grasp_corr)
+                    #     grasp_img = GRASPRecon(csmap, sim_kspace, spokes, num_frames, grasp_path[0])
+
+                    #     grasp_recon_torch = torch.from_numpy(grasp_img).permute(2, 0, 1) # T, H, W
+                    #     grasp_recon_torch = torch.stack([grasp_recon_torch.real, grasp_recon_torch.imag], dim=0)
+
+                    #     grasp_img = torch.flip(grasp_recon_torch, dims=[-3])
+                    #     grasp_img = torch.rot90(grasp_img, k=3, dims=[-3,-1]).unsqueeze(0)
+
+                    # grasp_img = grasp_img.to(device)
+
+                    # if num_frames > eval_chunk_size:
+                    #     print("Performing sliding window eval...")
+                    #     x_recon, _ = sliding_window_inference(H, W, num_frames, ktraj, dcomp, nufft_ob, adjnufft_ob, eval_chunk_size, eval_chunk_overlap, kspace, csmap, acceleration_encoding, start_timepoint_index, model, epoch=None, device=device)  
+                    # else:
+                    #     x_recon, *_ = model(
+                    #         kspace.to(device), physics, csmap, acceleration_encoding, start_timepoint_index, epoch=None, norm=config['model']['norm']
+                    #     )
+
+                    # ground_truth = torch.stack([ground_truth.real, ground_truth.imag], dim=1)
+                    # ground_truth = rearrange(ground_truth, 'b i h w t -> b i t h w')
 
 
-                    ssim_grasp, psnr_grasp, mse_grasp, lpips_grasp, dc_mse_grasp, dc_mae_grasp = eval_grasp(kspace, csmap, ground_truth, grasp_img, physics, device, eval_dir)
-                    stress_test_grasp_ssims.append(ssim_grasp)
-                    stress_test_grasp_psnrs.append(psnr_grasp)
-                    stress_test_grasp_mses.append(mse_grasp)
-                    stress_test_grasp_lpipses.append(lpips_grasp)
-                    stress_test_grasp_dc_mses.append(dc_mse_grasp)
-                    stress_test_grasp_dc_maes.append(dc_mae_grasp)
+                    # ## Evaluation
+                    # ssim, psnr, mse, lpips, dc_mse, dc_mae, recon_corr, grasp_corr = eval_sample(kspace, csmap, ground_truth, x_recon, physics, mask, grasp_img, acceleration, int(spokes), eval_dir, f"{spokes}spf", device)
+                    # stress_test_ssims.append(ssim)
+                    # stress_test_psnrs.append(psnr)
+                    # stress_test_mses.append(mse)
+                    # stress_test_lpipses.append(lpips)
+                    # stress_test_dc_mses.append(dc_mse)
+                    # stress_test_dc_maes.append(dc_mae)
+
+                    # if recon_corr is not None:
+                    #     stress_test_corrs.append(recon_corr)
+                    #     stress_test_grasp_corrs.append(grasp_corr)
 
 
-                    spf_recon_ssim[spokes] = np.mean(stress_test_ssims)
-                    spf_recon_psnr[spokes] = np.mean(stress_test_psnrs)
-                    spf_recon_mse[spokes] = np.mean(stress_test_mses)
-                    spf_recon_lpips[spokes] = np.mean(stress_test_lpipses)
-                    spf_recon_dc_mse[spokes] = np.mean(stress_test_dc_mses)
-                    spf_recon_dc_mae[spokes] = np.mean(stress_test_dc_maes)
-                    spf_recon_corr[spokes] = np.mean(stress_test_corrs)
+                    # ssim_grasp, psnr_grasp, mse_grasp, lpips_grasp, dc_mse_grasp, dc_mae_grasp = eval_grasp(kspace, csmap, ground_truth, grasp_img, physics, device, eval_dir)
+                    # stress_test_grasp_ssims.append(ssim_grasp)
+                    # stress_test_grasp_psnrs.append(psnr_grasp)
+                    # stress_test_grasp_mses.append(mse_grasp)
+                    # stress_test_grasp_lpipses.append(lpips_grasp)
+                    # stress_test_grasp_dc_mses.append(dc_mse_grasp)
+                    # stress_test_grasp_dc_maes.append(dc_mae_grasp)
 
-                    spf_grasp_ssim[spokes] = np.mean(stress_test_grasp_ssims)
-                    spf_grasp_psnr[spokes] = np.mean(stress_test_grasp_psnrs)
-                    spf_grasp_mse[spokes] = np.mean(stress_test_grasp_mses)
-                    spf_grasp_lpips[spokes] = np.mean(stress_test_grasp_lpipses)
-                    spf_grasp_dc_mse[spokes] = np.mean(stress_test_grasp_dc_mses)
-                    spf_grasp_dc_mae[spokes] = np.mean(stress_test_grasp_dc_maes)
-                    spf_grasp_corr[spokes] = np.mean(stress_test_grasp_corrs)
+
+                    # spf_recon_ssim[spokes] = np.mean(stress_test_ssims)
+                    # spf_recon_psnr[spokes] = np.mean(stress_test_psnrs)
+                    # spf_recon_mse[spokes] = np.mean(stress_test_mses)
+                    # spf_recon_lpips[spokes] = np.mean(stress_test_lpipses)
+                    # spf_recon_dc_mse[spokes] = np.mean(stress_test_dc_mses)
+                    # spf_recon_dc_mae[spokes] = np.mean(stress_test_dc_maes)
+                    # spf_recon_corr[spokes] = np.mean(stress_test_corrs)
+
+                    # spf_grasp_ssim[spokes] = np.mean(stress_test_grasp_ssims)
+                    # spf_grasp_psnr[spokes] = np.mean(stress_test_grasp_psnrs)
+                    # spf_grasp_mse[spokes] = np.mean(stress_test_grasp_mses)
+                    # spf_grasp_lpips[spokes] = np.mean(stress_test_grasp_lpipses)
+                    # spf_grasp_dc_mse[spokes] = np.mean(stress_test_grasp_dc_mses)
+                    # spf_grasp_dc_mae[spokes] = np.mean(stress_test_grasp_dc_maes)
+                    # spf_grasp_corr[spokes] = np.mean(stress_test_grasp_corrs)
 
 
 
@@ -1800,6 +1800,33 @@ def main():
                         print("x_recon: ", x_recon.shape)
                         print("grasp_img: ", grasp_img.shape)
                         print("csmap: ", csmap.shape)
+
+                        plot_path = f'/gpfs/data/karczmar-lab/workspaces/rachelgordon/breastMRI-recon/ddei/dl_grasp_orientation_comparison.png'
+                        if not os.path.exists(plot_path):
+                            timeframe = 18 
+
+                            # Extract the specific timeframe for both images.
+                            # Since the first dimension is 1, we can squeeze it out.
+                            x_recon_timeframe = x_recon[0, :, :, timeframe]
+                            grasp_img_timeframe = grasp_img[0, :, :, timeframe]
+
+                            # Create a figure with two subplots, arranged horizontally.
+                            fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(10, 5))
+
+                            # Display the first image slice.
+                            ax1.imshow(np.abs(x_recon_timeframe.cpu().numpy()), cmap='gray')
+                            ax1.set_title(f'DL Recon - Timeframe: {timeframe}, Slice: {slice_idx}')
+                            ax1.axis('off')
+
+                            # Display the second image slice.
+                            ax2.imshow(np.abs(grasp_img_timeframe.cpu().numpy()), cmap='gray')
+                            ax2.set_title(f'GRASP Recon - Timeframe: {timeframe}, Slice: {slice_idx}')
+                            ax2.axis('off')
+
+                            # Adjust layout and display the plot.
+                            plt.tight_layout()
+                            plt.savefig(plot_path)
+                            print(f"---- DL GRASP Orientation Comparsion Saved to: {plot_path} ----")
 
                         sim_kspace_grasp = physics(False, grasp_img.to(x_recon.dtype), csmap)
 

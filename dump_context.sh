@@ -2,6 +2,7 @@
 
 # dump file contents to stdout, skipping commented lines
 # usage: ./dump_context.sh file1 file2 ...
+# bash dump_context.sh train_distributed.py lsfpnet_encoding.py radial_lsfp.py mc.py ei.py transform.py utils.py eval.py lsp.py dataloader.py > context.txt
 
 if [ $# -eq 0 ]; then
     echo "Error: No files specified" >&2

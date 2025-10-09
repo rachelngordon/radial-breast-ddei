@@ -48,9 +48,9 @@ class Trainer(submitit.helpers.Checkpointable):
 
 def main():
     # --- Executor Configuration ---
-    job_name = "mc_interpolate_kspace_no_encoding"
+    job_name = "mc_interpolate_kspace_no_fft_no_encoding"
     config_path = 'configs/config_mc_interpolate.yaml'
-    num_gpus = 4
+    num_gpus = 2
 
     log_dir = f"submitit_logs/{job_name}"
     os.makedirs(log_dir, exist_ok=True)

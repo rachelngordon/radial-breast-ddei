@@ -48,9 +48,9 @@ class Trainer(submitit.helpers.Checkpointable):
 
 def main():
     # --- Executor Configuration ---
-    job_name = "ei_diffeo_no_interpolate_no_encoding"
-    config_path = 'configs/config_ei_diffeo_no_interpolate.yaml'
-    num_gpus = 4
+    job_name = "ei_spatial_zero_pad_kspace_no_encoding"
+    config_path = 'configs/config_ei_spatial_zero_padding.yaml'
+    num_gpus = 2
 
     log_dir = f"submitit_logs/{job_name}"
     os.makedirs(log_dir, exist_ok=True)

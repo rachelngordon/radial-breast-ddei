@@ -17,6 +17,7 @@ import argparse
 import json
 from lsfpnet_encoding import LSFPNet, ArtifactRemovalLSFPNet
 import math
+import sigpy as sp
 
 
 # Parse command-line arguments
@@ -315,27 +316,56 @@ with torch.no_grad():
         for patient_id in val_patient_ids:
 
             # load raw k-space with the given patient id
-            raw_kspace_path = os.path.join(config["data"]["root_dir"], f'{patient_id}_2.h5')
+            data_dir = '/ess/scratch/scratch1/rachelgordon/fastMRI_breast_data/full_kspace/' 
+            # data_dir = '/ess/scratch/scratch1/rachelgordon/dce-8tf/binned_kspace'
+            raw_kspace_path = os.path.join(data_dir, f'{patient_id}_2.h5')
 
             print("loading raw kspace from", raw_kspace_path)
 
             with h5py.File(raw_kspace_path, "r") as f:
-                raw_kspace = f[config["data"]["dataset_key"]][()] 
+                raw_kspace = f['kspace'][()] 
 
 
-            print("kspace shape: ", raw_kspace.shape)
-            
+            print("kspace shape: ", raw_kspace.shape) # expected: (83, 8, 16, 36, 640) current: (2, 288, 640, 16, 83)
 
-            N_partitions = raw_kspace.shape[0]
+            raw_kspace_complex = raw_kspace[0] + 1j * raw_kspace[1] # to_torch_complex(raw_kspace.unsqueeze(0)).squeeze()
+            raw_kspace_complex = rearrange(raw_kspace_complex, 'sp sam c p -> p c sp sam')
 
-            raw_kspace = rearrange(raw_kspace, 'p t c sp sam -> t sp c sam p')
-            raw_kspace_flat = torch.tensor(raw_kspace).contiguous().view(total_spokes, N_coils, N_samples, N_partitions)
+            raw_kspace_complex = sp.fft(raw_kspace_complex, axes=(0,))
+     
 
-            N_time = total_spokes // spokes
-            raw_kspace_binned = raw_kspace_flat.view(N_time, spokes, N_coils, N_samples, N_partitions)
+            # N_partitions = raw_kspace.shape[0]
+
+            # raw_kspace = rearrange(raw_kspace, 'p t c sp sam -> t sp c sam p')
+            # raw_kspace_flat = torch.tensor(raw_kspace).contiguous().view(total_spokes, N_coils, N_samples, N_partitions)
+
+            # N_time = total_spokes // spokes
+            # raw_kspace_binned = raw_kspace_flat.view(N_time, spokes, N_coils, N_samples, N_partitions)
+
+            N_slices, N_coils, N_spokes, N_samples = raw_kspace_complex.shape
+
+            base_res = N_samples // 2
+
+            N_time = N_spokes // spokes
+
+            N_spokes_prep = N_time * spokes
+
+            ksp_redu = raw_kspace_complex[:, :, :N_spokes_prep, :]
+            print('  ksp_redu shape: ', ksp_redu.shape)
+
+            # %% retrospecitvely split spokes
+            ksp_prep = np.swapaxes(ksp_redu, 0, 2)
+            ksp_prep_shape = ksp_prep.shape
+            ksp_prep = np.reshape(ksp_prep, [N_time, spokes] + list(ksp_prep_shape[1:]))
+            raw_kspace_binned = np.transpose(ksp_prep, (3, 0, 2, 1, 4))
+
+            print("raw_kspace_binned: ", raw_kspace_binned.shape)
 
             # reshape to (P, C, S, T)
-            raw_kspace_binned = rearrange(raw_kspace_binned, 't sp c sam p -> p c (sp sam) t')
+            # raw_kspace_binned = rearrange(raw_kspace_binned, 't sp c sam p -> p c (sp sam) t')
+            # raw_kspace_binned = rearrange(raw_kspace_binned, 'p t c sp sam -> p c (sp sam) t')
+
+            raw_kspace_binned = torch.tensor(raw_kspace_binned, device=device)
 
 
             slice_dc_mses = []
@@ -346,6 +376,13 @@ with torch.no_grad():
             # generate recon for each slice of raw k-space
             for slice_idx, raw_kspace_slice in enumerate(raw_kspace_binned):
 
+                # raw_kspace_slice = raw_kspace_slice.to(csmap.dtype)
+
+                # print("raw_kspace_slice before permute: ", raw_kspace_slice.shape)
+
+                # raw_kspace_slice = raw_kspace_slice.permute(1, 0, 2, 3) # Shape: (C, T, Sp, Sa)
+
+                # print("raw_kspace_slice: ", raw_kspace_slice.shape)
                 raw_kspace_slice = raw_kspace_slice.to(csmap.dtype)
 
                 # create GRASP image from raw k-space if doesn't already exist
@@ -354,13 +391,13 @@ with torch.no_grad():
 
                 grasp_path = os.path.join(grasp_save_path, f'raw_grasp_spf{spokes}_frames{num_frames}_slice{slice_idx:03d}.npy')
                 
-                if not os.path.exists(grasp_path):
-                    print(f"No GRASP file found, performing reconstruction with {spokes} spokes/frame and {num_frames} frames.")
+                # if not os.path.exists(grasp_path):
+                print(f"No GRASP file found, performing reconstruction with {spokes} spokes/frame and {num_frames} frames.")
 
-                    grasp_img = GRASPRecon(csmap, raw_kspace_slice, spokes, num_frames, grasp_path)
+                grasp_img = GRASPRecon(csmap, raw_kspace_slice, spokes, num_frames, grasp_path)
 
-                else: 
-                    grasp_img = np.load(grasp_path)
+                # else: 
+                #     grasp_img = np.load(grasp_path)
 
                 grasp_recon_torch = torch.from_numpy(grasp_img).permute(2, 0, 1) # T, H, W
                 grasp_recon_torch = torch.stack([grasp_recon_torch.real, grasp_recon_torch.imag], dim=0)
@@ -369,6 +406,8 @@ with torch.no_grad():
                 grasp_img = torch.rot90(grasp_img, k=3, dims=[-3,-1]).unsqueeze(0)
 
                 grasp_img = grasp_img.to(device)
+
+                raw_kspace_slice = rearrange(raw_kspace_slice, 't c sp sam -> c (sp sam) t')
 
                 if num_frames > eval_chunk_size:
                     x_recon, _ = sliding_window_inference(H, W, num_frames, ktraj, dcomp, nufft_ob, adjnufft_ob, eval_chunk_size, eval_chunk_overlap, raw_kspace_slice, csmap, acceleration_encoding, start_timepoint_index, model, epoch=None, device=device)  

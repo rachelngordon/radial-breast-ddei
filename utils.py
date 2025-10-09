@@ -487,7 +487,11 @@ def GRASPRecon(csmaps, kspace, spokes_per_frame, num_frames, grasp_path):
     traj = get_traj(N_spokes=spokes_per_frame, N_time=num_frames)
     device = sp.Device(0 if torch.cuda.is_available() else -1)
 
-    kspace = rearrange(kspace, 'c (sp sam) t -> t c sp sam', sam=640).unsqueeze(1).unsqueeze(3).cpu().numpy()
+    if kspace.dim() == 3:
+        kspace = rearrange(kspace, 'c (sp sam) t -> t c sp sam', sam=640).unsqueeze(1).unsqueeze(3).cpu().numpy()
+    elif kspace.dim() == 4:
+        kspace = kspace.unsqueeze(1).unsqueeze(3).cpu().numpy()
+        
     csmaps = rearrange(csmaps, 'b c h w -> c b h w').cpu().numpy()
 
     # reconstruct image

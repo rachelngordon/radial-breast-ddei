@@ -391,13 +391,15 @@ with torch.no_grad():
 
                 grasp_path = os.path.join(grasp_save_path, f'raw_grasp_spf{spokes}_frames{num_frames}_slice{slice_idx:03d}.npy')
                 
-                # if not os.path.exists(grasp_path):
-                print(f"No GRASP file found, performing reconstruction with {spokes} spokes/frame and {num_frames} frames.")
+                print("csmap: ", csmap.shape)
+                
+                if not os.path.exists(grasp_path):
+                    print(f"No GRASP file found, performing reconstruction with {spokes} spokes/frame and {num_frames} frames.")
 
-                grasp_img = GRASPRecon(csmap, raw_kspace_slice, spokes, num_frames, grasp_path)
+                    grasp_img = GRASPRecon(csmap, raw_kspace_slice, spokes, num_frames, grasp_path)
 
-                # else: 
-                #     grasp_img = np.load(grasp_path)
+                else: 
+                    grasp_img = np.load(grasp_path)
 
                 grasp_recon_torch = torch.from_numpy(grasp_img).permute(2, 0, 1) # T, H, W
                 grasp_recon_torch = torch.stack([grasp_recon_torch.real, grasp_recon_torch.imag], dim=0)

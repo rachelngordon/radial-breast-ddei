@@ -4,7 +4,7 @@ import os
 import matplotlib.pyplot as plt
 import torch
 import yaml
-from dataloader import SliceDataset, SimulatedDataset, SimulatedSPFDataset
+from dataloader import ZFSliceDataset, SimulatedDataset, SimulatedSPFDataset
 from einops import rearrange
 from torch.utils.data import DataLoader
 from tqdm import tqdm
@@ -15,7 +15,7 @@ from mc import MCLoss
 from lsfpnet_encoding import LSFPNet, ArtifactRemovalLSFPNet
 from radial_lsfp import MCNUFFT
 from utils import prep_nufft, log_gradient_stats, plot_enhancement_curve, get_cosine_ei_weight, plot_reconstruction_sample, get_git_commit, save_checkpoint, load_checkpoint, to_torch_complex, GRASPRecon, sliding_window_inference, set_seed
-from eval import eval_grasp, eval_sample, calc_dc
+from eval import eval_grasp, eval_sample
 import csv
 import math
 import random
@@ -27,7 +27,8 @@ from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.utils.data.distributed import DistributedSampler
 import h5py
 from torch.utils.tensorboard import SummaryWriter
-import sigpy as sp
+from raw_kspace_eval import eval_raw_kspace
+
 
 def setup():
     """Initializes the distributed process group."""
@@ -143,6 +144,8 @@ def main():
     # load params
     split_file = config["data"]["split_file"]
 
+    data_dir = config["data"]["root_dir"]
+
     batch_size = config["dataloader"]["batch_size"]
     max_subjects = config["dataloader"]["max_subjects"]
 
@@ -161,8 +164,6 @@ def main():
     warmup = config["model"]["losses"]["ei_loss"]["warmup"]
     duration = config["model"]["losses"]["ei_loss"]["duration"]
 
-    kspace_interpolation = config['training']['kspace_interpolation']
-
     save_interval = config["training"]["save_interval"]
     plot_interval = config["training"]["plot_interval"]
 
@@ -180,6 +181,9 @@ def main():
 
     N_spokes = int(total_spokes / N_time)
     N_full = config['data']['height'] * math.pi / 2
+
+    N_slices = config['data']['slices']
+    num_slices_to_eval = config['data']['slices_to_eval']
 
     eval_chunk_size = config["evaluation"]["chunk_size"]
     eval_chunk_overlap = config["evaluation"]["chunk_overlap"]
@@ -230,8 +234,8 @@ def main():
 
 
     if config['dataloader']['slice_range_start'] == "None" or config['dataloader']['slice_range_end'] == "None":
-        train_dataset = SliceDataset(
-            root_dir=config["data"]["root_dir"],
+        train_dataset = ZFSliceDataset(
+            root_dir=data_dir,
             patient_ids=train_patient_ids,
             dataset_key=config["data"]["dataset_key"],
             file_pattern="*.h5",
@@ -243,12 +247,11 @@ def main():
             spokes_per_frame=train_spokes_per_frame,
             weight_accelerations=config['data']['weight_accelerations'],
             initial_spokes_range=initial_train_spokes_range,
-            interpolate_kspace=kspace_interpolation,
             cluster=cluster
         )
     else:
-        train_dataset = SliceDataset(
-            root_dir=config["data"]["root_dir"],
+        train_dataset = ZFSliceDataset(
+            root_dir=data_dir,
             patient_ids=train_patient_ids,
             dataset_key=config["data"]["dataset_key"],
             file_pattern="*.h5",
@@ -260,7 +263,6 @@ def main():
             spokes_per_frame=train_spokes_per_frame,
             weight_accelerations=config['data']['weight_accelerations'],
             initial_spokes_range=initial_train_spokes_range,
-            interpolate_kspace=kspace_interpolation,
             cluster=cluster
         )
 
@@ -467,6 +469,8 @@ def main():
         eval_mses = []
         eval_dc_mses = []
         eval_dc_maes = []
+        eval_raw_dc_mses = []
+        eval_raw_dc_maes = []
         eval_curve_corrs = []
 
 
@@ -554,8 +558,6 @@ def main():
                 if config['model']['encode_time_index'] == False:
                     start_timepoint_index = None
 
-                # print("Time encoding: ", start_timepoint_index.item())
-
                 x_recon, adj_loss, lambda_L, lambda_S, lambda_spatial_L, lambda_spatial_S, gamma, lambda_step = model(
                     measured_kspace.to(device), physics, csmap, acceleration_encoding, start_timepoint_index, epoch="train0", norm=config['model']['norm']
                 )
@@ -574,8 +576,6 @@ def main():
                     initial_train_ei_loss += ei_loss.item()
 
                     
-                
-
             # record losses
             step0_train_mc_loss = initial_train_mc_loss / len(train_loader)
             train_mc_losses.append(step0_train_mc_loss)
@@ -707,6 +707,11 @@ def main():
             val_adj_losses.append(step0_val_adj_loss)
 
 
+            # evaluate on raw k-space
+            print(f"Evaluating on raw k-space with {num_slices_to_eval} slices...")
+            raw_dc_mse, raw_dc_mae, raw_grasp_dc_mse, raw_grasp_dc_mae = eval_raw_kspace(num_slices_to_eval, val_patient_ids, data_dir, model, N_spokes_eval, N_slices, N_time_eval, eval_chunk_size, eval_chunk_overlap, H, W, eval_ktraj, eval_dcomp, eval_nufft_ob, eval_adjnufft_ob, eval_physics, acceleration_encoding, start_timepoint_index, device, output_dir)
+
+
             if global_rank == 0 or not config['training']['multigpu']:
                 writer.add_scalar('Loss/Val_MC', step0_val_mc_loss, 0)
                 writer.add_scalar('Loss/Val_EI', step0_val_ei_loss, 0)
@@ -728,6 +733,8 @@ def main():
             eval_lpipses.append(initial_eval_lpips)
             eval_dc_mses.append(initial_eval_dc_mse) 
             eval_dc_maes.append(initial_eval_dc_mae) 
+            eval_raw_dc_mses.append(raw_dc_mse) 
+            eval_raw_dc_maes.append(raw_dc_mae) 
             eval_curve_corrs.append(initial_eval_curve_corr)
 
             if global_rank == 0 or not config['training']['multigpu']:
@@ -737,6 +744,8 @@ def main():
                 writer.add_scalar('Metric/LPIPS', initial_eval_lpips, 0)
                 writer.add_scalar('Metric/DC_MSE', initial_eval_dc_mse, 0)
                 writer.add_scalar('Metric/DC_MAE', initial_eval_dc_mae, 0)
+                writer.add_scalar('Metric/RAW_DC_MSE', raw_dc_mse, 0)
+                writer.add_scalar('Metric/RAW_DC_MAE', raw_dc_mae, 0)
                 writer.add_scalar('Metric/EC_Corr', initial_eval_curve_corr, 0)
 
         print(f"Step 0 Train Losses: MC: {step0_train_mc_loss}, EI: {step0_train_ei_loss}, Adj: {step0_train_adj_loss}")
@@ -1153,6 +1162,10 @@ def main():
                         else:
                             raise  # re-raise other errors
 
+            # evaluate on raw k-space
+            print(f"Evaluating on raw k-space with {num_slices_to_eval} slices...")
+            raw_dc_mse, raw_dc_mae, raw_grasp_dc_mse, raw_grasp_dc_mae = eval_raw_kspace(num_slices_to_eval, val_patient_ids, data_dir, model, N_spokes_eval, N_slices, N_time_eval, eval_chunk_size, eval_chunk_overlap, H, W, eval_ktraj, eval_dcomp, eval_nufft_ob, eval_adjnufft_ob, eval_physics, acceleration_encoding, start_timepoint_index, device, output_dir)
+
 
 
             # Calculate and store average validation evaluation metrics
@@ -1170,7 +1183,9 @@ def main():
                 eval_mses.append(epoch_eval_mse)
                 eval_lpipses.append(epoch_eval_lpips)
                 eval_dc_mses.append(epoch_eval_dc_mse) 
-                eval_dc_maes.append(epoch_eval_dc_mae)    
+                eval_dc_maes.append(epoch_eval_dc_mae) 
+                eval_raw_dc_mses.append(raw_dc_mse) 
+                eval_raw_dc_maes.append(raw_dc_mae)    
                 eval_curve_corrs.append(epoch_eval_curve_corr)  
 
  
@@ -1180,6 +1195,8 @@ def main():
                 writer.add_scalar('Metric/LPIPS', epoch_eval_lpips, epoch)
                 writer.add_scalar('Metric/DC_MSE', epoch_eval_dc_mse, epoch)
                 writer.add_scalar('Metric/DC_MAE', epoch_eval_dc_mae, epoch)
+                writer.add_scalar('Metric/RAW_DC_MSE', raw_dc_mse, epoch)
+                writer.add_scalar('Metric/RAW_DC_MAE', raw_dc_mae, epoch)
                 writer.add_scalar('Metric/EC_Corr', epoch_eval_curve_corr, epoch)
 
 
@@ -1597,6 +1614,10 @@ def main():
             spf_grasp_dc_mse = {}
             spf_grasp_dc_mae = {}
             spf_grasp_corr = {}
+            spf_raw_dc_mse = {}
+            spf_raw_dc_mae = {}
+            spf_raw_grasp_dc_mse = {}
+            spf_raw_grasp_dc_mae = {}
 
             # NOTE: removed stress test until training on ultra-high accelerations with curriculum learning
             print("--- Running Stress Test Evaluation (Budget: 176 spokes) ---")
@@ -1720,145 +1741,36 @@ def main():
 
 
 
-                # # Compute Raw k-space Evaluation
-                # sp_device = sp.Device(0 if torch.cuda.is_available() else -1)
-                # dtype = torch.complex64
-                # N_slices = 192
-                # data_dir = '/ess/scratch/scratch1/rachelgordon/fastMRI_breast_data/full_kspace/' 
+                # evaluate on raw k-space
+                print(f"Evaluating on raw k-space with {num_slices_to_eval} slices...")
+                raw_dc_mse, raw_dc_mae, raw_grasp_dc_mse, raw_grasp_dc_mae = eval_raw_kspace(num_slices_to_eval, val_patient_ids, data_dir, model, spokes, N_slices, num_frames, eval_chunk_size, eval_chunk_overlap, H, W, ktraj, dcomp, nufft_ob, adjnufft_ob, eval_physics, acceleration_encoding, start_timepoint_index, device, output_dir)
 
-                # # evaluate each acceleration with raw k-space
-                # avg_raw_slice_mses = []
-                # avg_raw_slice_maes = []
-                # avg_raw_grasp_mses = []
-                # avg_raw_grasp_maes = []
-
-                # with torch.no_grad():
-                #     for patient_id in val_patient_ids:
-
-                #         raw_kspace_path = os.path.join(data_dir, f'{patient_id}_2.h5')
-
-                #         zf_kspace, binned_kspace, traj = process_kspace(raw_kspace_path, device=sp_device, spokes_per_frame=spokes_per_frame, images_per_slab=N_slices, center_partition=31)
-
-                #         grasp_img_slices, csmap = raw_grasp_recon(zf_kspace, binned_kspace, traj, N_slices=N_slices, spokes_per_frame=spokes_per_frame, device=sp_device)
-
-                #         csmap = torch.tensor(csmap)
-                #         print("binned_kspace: ", binned_kspace.shape)
-                #         print("grasp_img_slices: ", grasp_img_slices.shape)
-                #         print("csmap: ", csmap.shape)
+                spf_raw_dc_mse[spokes] = raw_dc_mse
+                spf_raw_dc_mae[spokes] = raw_dc_mae
+                spf_raw_grasp_dc_mse[spokes] = raw_grasp_dc_mse
+                spf_raw_grasp_dc_mae[spokes] = raw_grasp_dc_mae
 
 
-                #         raw_slice_mses = []
-                #         raw_slice_maes = []
-                #         raw_grasp_slice_mses = []
-                #         raw_grasp_slice_maes = []
+
+                # Calculate and store average validation evaluation metrics
+                if global_rank == 0 or not config['training']['multigpu']:
+                    epoch_eval_ssim = np.mean(epoch_eval_ssims)
+                    epoch_eval_psnr = np.mean(epoch_eval_psnrs)
+                    epoch_eval_mse = np.mean(epoch_eval_mses)
+                    epoch_eval_lpips = np.mean(epoch_eval_lpipses)
+                    epoch_eval_dc_mse = np.mean(epoch_eval_dc_mses)
+                    epoch_eval_dc_mae = np.mean(epoch_eval_dc_maes)
+                    epoch_eval_curve_corr = np.mean(epoch_eval_curve_corrs)
+
+                    eval_ssims.append(epoch_eval_ssim)
+                    eval_psnrs.append(epoch_eval_psnr)
+                    eval_mses.append(epoch_eval_mse)
+                    eval_lpipses.append(epoch_eval_lpips)
+                    eval_dc_mses.append(epoch_eval_dc_mse) 
+                    eval_dc_maes.append(epoch_eval_dc_mae) 
+                    eval_raw_dc_mses.append(raw_dc_mse) 
+                    eval_raw_dc_maes.append(raw_dc_mae)   
                         
-                #         for slice_idx in range(N_slices):
-
-                #             kspace_slice = torch.tensor(binned_kspace[slice_idx].squeeze())
-                #             grasp_img_slice = torch.tensor(grasp_img_slices[slice_idx])
-
-                #             print(type(kspace_slice))
-                #             print("kspace_slice: ", kspace_slice.shape)
-
-                #             kspace_slice_flat = rearrange(kspace_slice, 't c sp sam -> c (sp sam) t').to(dtype)
-
-                #             csmap = rearrange(csmap, 'c b h w -> b c h w').to(dtype)
-
-                #             print("kspace_slice_flat: ", kspace_slice_flat.shape)
-                #             print("csmap: ", csmap.shape)
-
-                #             print("kspace_slice_flat: ", kspace_slice_flat.dtype)
-                #             print("csmap: ", csmap.dtype)
-
-
-                #             # model inference 
-                #             if num_frames > eval_chunk_size:
-                #                 x_recon, _ = sliding_window_inference(H, W, num_frames, ktraj, dcomp, nufft_ob, adjnufft_ob, eval_chunk_size, eval_chunk_overlap, kspace_slice_flat, csmap, acceleration_encoding, start_timepoint_index, model, epoch=None, device=device)  
-                #             else:
-                #                 x_recon, *_ = model(
-                #                     kspace_slice_flat.to(device), physics, csmap, acceleration_encoding, start_timepoint_index, epoch=None, norm="both"
-                #                 )
-
-                #             print("x_recon: ", x_recon.shape)
-
-
-                #             # calculate data consistency of output with original k-space input
-                #             # simulate k-space for DL and GRASP recons
-
-                #             x_recon = to_torch_complex(x_recon)
-                #             sim_kspace = physics(False, x_recon.to(device), csmap.to(device))
-
-                #             print("grasp_img: ", grasp_img_slice.shape)
-                            
-                #             if grasp_img_slice.shape[1] == 2:
-                #                 grasp_img_slice = to_torch_complex(grasp_img_slice)
-
-                #             if grasp_img_slice.shape[-2] == num_frames: 
-                #                 grasp_img_slice = rearrange(grasp_img_slice, 'b h t w -> b h w t')
-
-                #             print("x_recon: ", x_recon.dtype)
-                #             print("grasp_img: ", grasp_img_slice.dtype)
-                #             print("csmap: ", csmap.dtype)
-
-                #             print("x_recon: ", x_recon.shape)
-                #             print("grasp_img: ", grasp_img_slice.shape)
-                #             print("csmap: ", csmap.shape)
-
-                #             grasp_img_slice = rearrange(grasp_img_slice, 't h w -> h w t').unsqueeze(0)
-
-                #             sim_kspace_grasp = physics(False, grasp_img_slice.to(x_recon.dtype).to(device), csmap.to(device))
-
-                #             raw_dc_mse, raw_dc_mae = calc_dc(sim_kspace, kspace_slice_flat, device)
-                #             raw_grasp_dc_mse, raw_grasp_dc_mae = calc_dc(sim_kspace_grasp, kspace_slice_flat, device)
-
-                #             print("raw_dc_mse: ", raw_dc_mse)
-                #             print("raw_dc_mae: ", raw_dc_mae)
-                #             print("raw_grasp_dc_mse: ", raw_grasp_dc_mse)
-                #             print("raw_grasp_dc_mae: ", raw_grasp_dc_mae)
-
-                #             raw_slice_mses.append(raw_dc_mse)
-                #             raw_slice_maes.append(raw_dc_mae)
-                #             raw_grasp_slice_mses.append(raw_grasp_dc_mse)
-                #             raw_grasp_slice_maes.append(raw_grasp_dc_mae)
-
-                #         avg_raw_slice_mses.append(np.mean(raw_slice_mses))
-                #         avg_raw_slice_maes.append(np.mean(raw_slice_maes))
-                #         avg_raw_grasp_mses.append(np.mean(raw_grasp_slice_mses))
-                #         avg_raw_grasp_maes.append(np.mean(raw_grasp_slice_maes))
-
-
-                #         plot_path = f'/gpfs/data/karczmar-lab/workspaces/rachelgordon/breastMRI-recon/ddei/raw_kspace_recon_comparison.png'
-                #         if not os.path.exists(plot_path):
-                #             timeframe = 18 
-
-                #             # Extract the specific timeframe for both images.
-                #             # Since the first dimension is 1, we can squeeze it out.
-                #             x_recon_timeframe = x_recon[0, :, :, timeframe]
-                #             grasp_img_timeframe = grasp_img_slice[timeframe]
-
-                #             # Create a figure with two subplots, arranged horizontally.
-                #             fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(10, 5))
-
-                #             # Display the first image slice.
-                #             ax1.imshow(np.abs(x_recon_timeframe.cpu().numpy()), cmap='gray')
-                #             ax1.set_title(f'DL Recon - Timeframe: {timeframe}, Slice: {slice_idx}')
-                #             ax1.axis('off')
-
-                #             # Display the second image slice.
-                #             ax2.imshow(np.abs(grasp_img_timeframe.cpu().numpy()), cmap='gray')
-                #             ax2.set_title(f'GRASP Recon - Timeframe: {timeframe}, Slice: {slice_idx}')
-                #             ax2.axis('off')
-
-                #             # Adjust layout and display the plot.
-                #             plt.tight_layout()
-                #             plt.savefig(plot_path)
-                #             print(f"---- DL GRASP Orientation Comparsion Saved to: {plot_path} ----")
-
-                # print("Average DL DC MSE: ", np.mean(avg_raw_slice_mses))
-                # print("Average DL DC MAE: ", np.mean(avg_raw_slice_maes))
-                # print("Average GRASP DC MSE: ", np.mean(avg_raw_grasp_mses))
-                # print("Average GRASP DC MAE: ", np.mean(avg_raw_grasp_maes))
-                    
 
                 # Save Results
                 spf_metrics_path = os.path.join(eval_dir, "eval_metrics.csv")
@@ -1873,6 +1785,8 @@ def main():
                     f'{np.mean(stress_test_lpipses):.4f} ± {np.std(stress_test_lpipses):.4f}', 
                     f'{np.mean(stress_test_dc_mses):.4f} ± {np.std(stress_test_dc_mses):.4f}',
                     f'{np.mean(stress_test_dc_maes):.4f} ± {np.std(stress_test_dc_maes):.4f}',
+                    # f'{np.mean(raw_dc_mses):.4f} ± {np.std(stress_test_dc_mses):.4f}',
+                    # f'{np.mean(raw_dc_maes):.4f} ± {np.std(stress_test_dc_maes):.4f}',
                     f'{np.mean(stress_test_corrs):.4f} ± {np.std(stress_test_corrs):.4f}'
                     ])
 
@@ -2153,5 +2067,3 @@ def main():
 
 if __name__ == '__main__':
     main()
-
-

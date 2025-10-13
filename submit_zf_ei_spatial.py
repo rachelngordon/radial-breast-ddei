@@ -48,8 +48,8 @@ class Trainer(submitit.helpers.Checkpointable):
 
 def main():
     # --- Executor Configuration ---
-    job_name = "mc_zero_pad_kspace_no_encoding"
-    config_path = 'configs/config_mc_zero_padding.yaml'
+    job_name = "zero_pad_ei_spatial"
+    config_path = 'configs/config_ei_spatial_zf.yaml'
     num_gpus = 2
 
     log_dir = f"submitit_logs/{job_name}"

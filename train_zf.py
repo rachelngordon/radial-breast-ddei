@@ -1660,7 +1660,6 @@ def main():
             spf_raw_grasp_dc_mse = {}
             spf_raw_grasp_dc_mae = {}
 
-            # NOTE: removed stress test until training on ultra-high accelerations with curriculum learning
             print("--- Running Stress Test Evaluation (Budget: 176 spokes) ---")
             for eval_config in STRESS_TEST_PLAN:
 

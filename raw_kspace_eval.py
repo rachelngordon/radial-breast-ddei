@@ -186,10 +186,10 @@ def raw_grasp_recon(ksp_zf, ksp_prep, traj, N_slices, spokes_per_frame, device):
         acq_slices.append(R1)
 
         # NOTE: remove after testing
-        slices_to_recon += 1
+        # slices_to_recon += 1
 
-        if slices_to_recon > 2:
-            break
+        # if slices_to_recon > 2:
+        #     break
 
 
 
@@ -262,11 +262,11 @@ def eval_raw_kspace(num_slices_to_eval, val_patient_ids, data_dir, model, spokes
 
     # select random slices to evaluate on
     # NOTE: fix after testing
-    # random_slice_indices = random.sample(range(N_slices), num_slices_to_eval)
-    random_slice_indices = [1]
+    random_slice_indices = random.sample(range(N_slices), num_slices_to_eval)
+    # random_slice_indices = [1]
 
     # NOTE: temporarily set val_patient_ids for testing
-    val_patient_ids = ['fastMRI_breast_001']
+    # val_patient_ids = ['fastMRI_breast_001']
     
     avg_dc_mses = []
     avg_dc_maes = []

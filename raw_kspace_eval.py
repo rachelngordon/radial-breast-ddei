@@ -255,7 +255,7 @@ def load_all_csmaps(dir, patient_id):
     return final_csmaps
 
 
-def eval_raw_kspace(num_slices_to_eval, val_patient_ids, data_dir, model, spokes_per_frame, N_slices, num_frames, eval_chunk_size, eval_chunk_overlap, H, W, ktraj, dcomp, nufft_ob, adjnufft_ob, physics, acceleration_encoding, start_timepoint_index, device, out_dir):
+def eval_raw_kspace(num_slices_to_eval, val_patient_ids, data_dir, model, spokes_per_frame, N_slices, num_frames, eval_chunk_size, eval_chunk_overlap, H, W, ktraj, dcomp, nufft_ob, adjnufft_ob, physics, acceleration_encoding, start_timepoint_index, device, out_dir, label):
     
     sp_device = sp.Device(0 if torch.cuda.is_available() else -1)
     dtype = torch.complex64
@@ -353,9 +353,14 @@ def eval_raw_kspace(num_slices_to_eval, val_patient_ids, data_dir, model, spokes
     avg_grasp_mse = np.mean(avg_grasp_dc_mses)
     avg_grasp_mae = np.mean(avg_grasp_dc_maes)
 
+    std_mse = np.std(avg_dc_mses)
+    std_mae = np.std(avg_dc_maes)
+    std_grasp_mse = np.std(avg_grasp_dc_mses)
+    std_grasp_mae = np.std(avg_grasp_dc_maes)
+
 
     # plot example image comparison
-    plot_path = os.path.join(out_dir, 'raw_kspace_recon_comparison.png')
+    plot_path = os.path.join(out_dir, f'raw_kspace_recon_comparison_{label}.png')
     timeframe = num_frames // 2 
 
     # Extract the specific timeframe for both images.
@@ -382,7 +387,7 @@ def eval_raw_kspace(num_slices_to_eval, val_patient_ids, data_dir, model, spokes
     print(f"---- DL GRASP Orientation Comparsion Saved to: {plot_path} ----")
 
 
-    return avg_mse, avg_mae, avg_grasp_mse, avg_grasp_mae
+    return avg_mse, avg_mae, avg_grasp_mse, avg_grasp_mae, std_mse, std_mae, std_grasp_mse, std_grasp_mae
 
 
 

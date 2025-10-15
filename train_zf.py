@@ -1413,17 +1413,17 @@ def main():
                         fig.suptitle(f'Evaluation Metrics Over Epochs ({N_spokes_eval} spokes/frame)', fontsize=20)
 
                         sns.lineplot(x=range(len(eval_ssims)), y=eval_ssims, ax=axes[0, 0])
-                        axes[0, 0].set_title("Evaluation SSIM")
+                        axes[0, 0].set_title("DRO Evaluation SSIM")
                         axes[0, 0].set_xlabel("Epoch")
                         axes[0, 0].set_ylabel("SSIM")
 
                         sns.lineplot(x=range(len(eval_psnrs)), y=eval_psnrs, ax=axes[0, 1])
-                        axes[0, 1].set_title("Evaluation PSNR")
+                        axes[0, 1].set_title("DRO Evaluation PSNR")
                         axes[0, 1].set_xlabel("Epoch")
                         axes[0, 1].set_ylabel("PSNR")
 
                         sns.lineplot(x=range(len(eval_mses)), y=eval_mses, ax=axes[0, 2])
-                        axes[0, 2].set_title("Evaluation Image MSE")
+                        axes[0, 2].set_title("DRO Evaluation Image MSE")
                         axes[0, 2].set_xlabel("Epoch")
                         axes[0, 2].set_ylabel("MSE")
 
@@ -1433,17 +1433,17 @@ def main():
                         # axes[1, 0].set_ylabel("LPIPS")
 
                         sns.lineplot(x=range(len(eval_dc_maes)), y=eval_dc_maes, ax=axes[1, 0])
-                        axes[1, 1].set_title("Evaluation Simulated k-space MAE")
+                        axes[1, 1].set_title("DRO Evaluation Simulated k-space MAE")
                         axes[1, 1].set_xlabel("Epoch")
                         axes[1, 1].set_ylabel("MAE")
 
                         sns.lineplot(x=range(len(eval_raw_dc_maes)), y=eval_raw_dc_maes, ax=axes[1, 1])
-                        axes[1, 1].set_title("Evaluation Raw k-space MAE")
+                        axes[1, 1].set_title("Non-DRO Evaluation Raw k-space MAE")
                         axes[1, 1].set_xlabel("Epoch")
                         axes[1, 1].set_ylabel("MAE")
 
                         sns.lineplot(x=range(len(eval_curve_corrs)), y=eval_curve_corrs, ax=axes[1, 2])
-                        axes[1, 2].set_title("Tumor Enhancement Curve Correlation")
+                        axes[1, 2].set_title("DRO Tumor Enhancement Curve Correlation")
                         axes[1, 2].set_xlabel("Epoch")
                         axes[1, 2].set_ylabel("Pearson Correlation Coefficient")
 
@@ -1455,7 +1455,7 @@ def main():
                         plt.figure()
                         plt.plot(eval_dc_mses)
                         plt.xlabel("Epoch")
-                        plt.ylabel("Simulated k-space MSE")
+                        plt.ylabel("DRO Simulated k-space MSE")
                         plt.title("Evaluation Data Consistency (MSE)")
                         plt.grid(True)
                         plt.savefig(os.path.join(eval_dir, "eval_dc_mses.png"))
@@ -1464,7 +1464,7 @@ def main():
                         plt.figure()
                         plt.plot(eval_raw_dc_mses)
                         plt.xlabel("Epoch")
-                        plt.ylabel("Raw k-space MSE")
+                        plt.ylabel("Non-DRO Raw k-space MSE")
                         plt.title("Evaluation Data Consistency (MSE)")
                         plt.grid(True)
                         plt.savefig(os.path.join(eval_dir, "eval_raw_dc_mses.png"))
@@ -1474,7 +1474,7 @@ def main():
                         plt.plot(eval_lpipses)
                         plt.xlabel("Epoch")
                         plt.ylabel("LPIPS")
-                        plt.title("Image Evaluation LPIPS")
+                        plt.title("DRO Image Evaluation LPIPS")
                         plt.grid(True)
                         plt.savefig(os.path.join(eval_dir, "eval_lpipses.png"))
                         plt.close()
@@ -2029,7 +2029,7 @@ def main():
                     marker='o',
                     ax=axes[0, 0])
 
-        axes[0, 0].set_title("Evaluation SSIM vs Spokes/Frame")
+        axes[0, 0].set_title("DRO Evaluation SSIM vs Spokes/Frame")
         axes[0, 0].set_xlabel("Spokes per Frame")
         axes[0, 0].set_ylabel("SSIM")
 
@@ -2045,7 +2045,7 @@ def main():
                     label="Standard Recon", 
                     marker='o',
                     ax=axes[0, 1])
-        axes[0, 1].set_title("Evaluation PSNR vs Spokes/Frame")
+        axes[0, 1].set_title("DRO Evaluation PSNR vs Spokes/Frame")
         axes[0, 1].set_xlabel("Spokes per Frame")
         axes[0, 1].set_ylabel("PSNR")
 
@@ -2061,7 +2061,7 @@ def main():
                     label="Standard Recon", 
                     marker='o',
                     ax=axes[0, 2])
-        axes[0, 2].set_title("Evaluation Image MSE vs Spokes/Frame")
+        axes[0, 2].set_title("DRO Evaluation Image MSE vs Spokes/Frame")
         axes[0, 2].set_xlabel("Spokes per Frame")
         axes[0, 2].set_ylabel("MSE")
 
@@ -2092,7 +2092,7 @@ def main():
                     label="Standard Recon", 
                     marker='o',
                     ax=axes[1, 0])
-        axes[1, 0].set_title("Evaluation Raw k-space MAE vs Spokes/Frame")
+        axes[1, 0].set_title("Non-DRO Evaluation Raw k-space MAE vs Spokes/Frame")
         axes[1, 0].set_xlabel("Spokes per Frame")
         axes[1, 0].set_ylabel("MAE")
 
@@ -2107,7 +2107,7 @@ def main():
                     label="Standard Recon", 
                     marker='o',
                     ax=axes[1, 1])
-        axes[1, 1].set_title("Evaluation Simulated k-space MAE vs Spokes/Frame")
+        axes[1, 1].set_title("DRO Evaluation Simulated k-space MAE vs Spokes/Frame")
         axes[1, 1].set_xlabel("Spokes per Frame")
         axes[1, 1].set_ylabel("MAE")
 
@@ -2122,7 +2122,7 @@ def main():
                     label="Standard Recon", 
                     marker='o',
                     ax=axes[1, 2])
-        axes[1, 2].set_title("Tumor Enhancement Curve Correlation vs Spokes/Frame")
+        axes[1, 2].set_title("DRO Tumor Enhancement Curve Correlation vs Spokes/Frame")
         axes[1, 2].set_xlabel("Spokes per Frame")
         axes[1, 2].set_ylabel("Pearson Correlation Coefficient")
 

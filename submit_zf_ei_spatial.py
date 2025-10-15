@@ -50,7 +50,7 @@ def main():
     # --- Executor Configuration ---
     job_name = "zero_pad_ei_spatial"
     config_path = 'configs/config_ei_spatial_zf.yaml'
-    num_gpus = 2
+    num_gpus = 4
 
     log_dir = f"submitit_logs/{job_name}"
     os.makedirs(log_dir, exist_ok=True)

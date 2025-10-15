@@ -2,11 +2,11 @@
 
 # Parameters
 #SBATCH --cpus-per-task=4
-#SBATCH --error=logs/raw_inference.err
-#SBATCH --output=logs/raw_inference.out
+#SBATCH --error=logs/grasp_recon_for_eval.err
+#SBATCH --output=logs/grasp_recon_for_eval.out
 #SBATCH --exclude=''
 #SBATCH --gpus-per-node=1
-#SBATCH --job-name=raw_inference
+#SBATCH --job-name=grasp_recon_for_eval
 #SBATCH --mem-per-gpu=50000
 #SBATCH --nodes=1
 #SBATCH --ntasks-per-node=1
@@ -21,4 +21,4 @@ source /gpfs/data/karczmar-lab/workspaces/rachelgordon/micromamba/etc/profile.d/
 micromamba activate recon_mri
 
 # Run the training script with srun
-python3 inference_eval_raw.py --exp_name ei_rotate20_diffeo_no_encoding
+python3 grasp_recon_for_val.py

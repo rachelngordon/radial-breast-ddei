@@ -27,7 +27,7 @@ class Trainer(submitit.helpers.Checkpointable):
             f"micromamba activate {env_name} && "
             f"torchrun --rdzv-backend=c10d --rdzv-endpoint=localhost:0 "
             f"--nproc_per_node={self.num_gpus} "
-            f"train_distributed.py "
+            f"train_zf.py "
             f"--config {self.config_path} "
             f"--exp_name {self.exp_name} "
         )

@@ -150,9 +150,36 @@ def raw_grasp_recon(ksp_zf, ksp_prep, traj, N_slices, spokes_per_frame, device):
     # %% slice-by-slice recon
     slice_loop = range(N_slices)
 
-    acq_slices = []
+    # --- FIX 1: Pre-allocate a NumPy array on the CPU (RAM) to store the results ---
+    # We need to determine the shape of a single reconstructed slice first.
+    # Let's run one reconstruction to find out.
+    
+    print('>>> Determining output shape for pre-allocation...')
+    s_test = 0
+    C_test = get_coil(ksp_zf[s_test], spokes_per_frame, device=device)
+    C_test = C_test[:, None, :, :]
+    k1_test = ksp_prep[s_test]
+    R1_test = app.HighDimensionalRecon(k1_test, C_test,
+                    combine_echo=False, lamda=0.001, coord=traj,
+                    regu='TV', regu_axes=[0], max_iter=10,
+                    solver='ADMM', rho=0.1, device=device,
+                    show_pbar=False, verbose=False).run()
+    
+    # Get the shape of a single slice reconstruction
+    single_slice_shape = R1_test.shape
+    print(f"  Detected single slice shape: {single_slice_shape}")
+    
+    # Create the placeholder array on the CPU
+    final_recon_shape = (N_slices,) + single_slice_shape
+    all_reconstructed_slices = np.zeros(final_recon_shape, dtype=R1_test.dtype)
+    print(f"  Pre-allocating CPU array with shape: {all_reconstructed_slices.shape}")
+    
+    # Clean up memory from the test run
+    del C_test, k1_test, R1_test
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
 
-    slices_to_recon = 0
+    # --- END FIX 1 ---
 
     for s in slice_loop:
         print('>>> slice ', str(s).zfill(3))
@@ -161,17 +188,11 @@ def raw_grasp_recon(ksp_zf, ksp_prep, traj, N_slices, spokes_per_frame, device):
         print('> compute coil sensitivity maps')
         C = get_coil(ksp_zf[s], spokes_per_frame, device=device)
         C = C[:, None, :, :]
-        print('  coil shape: ', C.shape)
-
+        # print('  coil shape: ', C.shape) # Optional: uncomment for debugging
 
         # recon
         k1 = ksp_prep[s]
-        print("k1 shape: ", k1.shape)
-        print("k1 dtype: ", k1.dtype)
         
-        print("---- k-space input shape: ", k1.shape) # ---- k-space input shape:  (8, 1, 16, 1, 36, 640)
-        print("---- csmaps input shape: ", C.shape) # ---- csmaps input shape:  (16, 1, 320, 320)
-        print("---- traj input shape: ", traj.shape) # ---- traj input shape:  (8, 36, 640, 2)
         R1 = app.HighDimensionalRecon(k1, C,
                         combine_echo=False,
                         lamda=0.001,
@@ -182,33 +203,93 @@ def raw_grasp_recon(ksp_zf, ksp_prep, traj, N_slices, spokes_per_frame, device):
                         device=device,
                         show_pbar=False,
                         verbose=False).run()
-        print("R1 dtype: ", R1.dtype)
-        acq_slices.append(R1)
+        
+        # --- FIX 2: Move the result to CPU and place it in the pre-allocated array ---
+        # Instead of: acq_slices.append(R1)
+        
+        # sp.to_device moves the SigPy array from GPU to CPU
+        reconstructed_slice_cpu = sp.to_device(R1, sp.cpu_device)
+        
+        # Place the CPU-based result into our final numpy array
+        all_reconstructed_slices[s] = reconstructed_slice_cpu
 
-        # NOTE: remove after testing
-        # slices_to_recon += 1
+        # --- END FIX 2 ---
 
-        # if slices_to_recon > 2:
-        #     break
-
-
-
-    acq_slices = sp.to_device(acq_slices)
-
-    acq_slices = cp.array(acq_slices)
-    acq_slices = cp.asnumpy(acq_slices)
-    print("acq_slices dtype: ", acq_slices.dtype)
-    # acq_slices = np.squeeze(abs(acq_slices))
-
-    acq_slices = acq_slices.squeeze(axis=(2, 3, 4))
-    # acq_slices = acq_slices.squeeze()
+    # The loop is now finished, and `all_reconstructed_slices` is a complete NumPy array on the CPU.
+    # The old, problematic post-processing is no longer needed.
+    print("Final reconstructed shape: ", all_reconstructed_slices.shape)
     
-    # acq_slices = acq_slices.squeeze(axis=(2, 3, 4))
-    print("acq_slices dtype: ", acq_slices.dtype)
+    # Squeeze out unnecessary dimensions if they exist
+    # Based on your original code, it seems you expect dimensions 2, 3, 4 to be size 1
+    squeezed_slices = all_reconstructed_slices.squeeze(axis=(2, 3, 4))
+    print("Final shape after squeeze: ", squeezed_slices.shape)
 
-    print("acq_slices shape: ", acq_slices.shape)
+    return squeezed_slices
 
-    return acq_slices
+
+# def raw_grasp_recon(ksp_zf, ksp_prep, traj, N_slices, spokes_per_frame, device):
+#     # %% slice-by-slice recon
+#     slice_loop = range(N_slices)
+
+#     acq_slices = []
+
+#     slices_to_recon = 0
+
+#     for s in slice_loop:
+#         print('>>> slice ', str(s).zfill(3))
+
+#         # coil sensitivity maps
+#         print('> compute coil sensitivity maps')
+#         C = get_coil(ksp_zf[s], spokes_per_frame, device=device)
+#         C = C[:, None, :, :]
+#         print('  coil shape: ', C.shape)
+
+
+#         # recon
+#         k1 = ksp_prep[s]
+#         print("k1 shape: ", k1.shape)
+#         print("k1 dtype: ", k1.dtype)
+        
+#         print("---- k-space input shape: ", k1.shape) # ---- k-space input shape:  (8, 1, 16, 1, 36, 640)
+#         print("---- csmaps input shape: ", C.shape) # ---- csmaps input shape:  (16, 1, 320, 320)
+#         print("---- traj input shape: ", traj.shape) # ---- traj input shape:  (8, 36, 640, 2)
+#         R1 = app.HighDimensionalRecon(k1, C,
+#                         combine_echo=False,
+#                         lamda=0.001,
+#                         coord=traj,
+#                         regu='TV', regu_axes=[0],
+#                         max_iter=10,
+#                         solver='ADMM', rho=0.1,
+#                         device=device,
+#                         show_pbar=False,
+#                         verbose=False).run()
+#         print("R1 dtype: ", R1.dtype)
+#         acq_slices.append(R1)
+
+#         # NOTE: remove after testing
+#         # slices_to_recon += 1
+
+#         # if slices_to_recon > 2:
+#         #     break
+
+
+
+#     acq_slices = sp.to_device(acq_slices)
+
+#     acq_slices = cp.array(acq_slices)
+#     acq_slices = cp.asnumpy(acq_slices)
+#     print("acq_slices dtype: ", acq_slices.dtype)
+#     # acq_slices = np.squeeze(abs(acq_slices))
+
+#     acq_slices = acq_slices.squeeze(axis=(2, 3, 4))
+#     # acq_slices = acq_slices.squeeze()
+    
+#     # acq_slices = acq_slices.squeeze(axis=(2, 3, 4))
+#     print("acq_slices dtype: ", acq_slices.dtype)
+
+#     print("acq_slices shape: ", acq_slices.shape)
+
+#     return acq_slices
 
     
 def load_all_csmaps(dir, patient_id):

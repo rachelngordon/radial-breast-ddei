@@ -34,3 +34,6 @@ for patient_id in val_patient_ids:
     if not os.path.exists(grasp_img_path):
         grasp_img_slices = raw_grasp_recon(zf_kspace, binned_kspace, traj, N_slices=N_slices, spokes_per_frame=spokes_per_frame, device=sp_device)
         np.save(grasp_img_path, grasp_img_slices)
+        print("GRASP img saved to: ", grasp_img_path)
+    else:
+        print(f"GRASP img path {grasp_img_path} already exists, moving to next patient ID")

@@ -453,8 +453,8 @@ def main():
         eval_lpipses = eval_curves["eval_lpipses"]
         eval_dc_mses = eval_curves["eval_dc_mses"]
         eval_dc_maes = eval_curves["eval_dc_maes"]
-        eval_raw_dc_mses = eval_curves["eval_raw_dc_mses"]
-        eval_raw_dc_maes = eval_curves["eval_raw_dc_maes"]
+        eval_raw_dc_mses = eval_curves.get("eval_raw_dc_mses", [])
+        eval_raw_dc_maes = eval_curves.get("eval_raw_dc_maes", [])
         eval_curve_corrs = eval_curves["eval_curve_corrs"]
     else:
         train_mc_losses = []

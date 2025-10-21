@@ -4,14 +4,29 @@ from raw_kspace_eval import raw_grasp_recon, process_kspace
 import torch
 import sigpy as sp
 import json
+import argparse
 
-N_slices = 192
+# Parse command-line arguments
+parser = argparse.ArgumentParser(description="Train ReconResNet model.")
+parser.add_argument(
+    "--slices",
+    type=int,
+    required=True,
+)
+parser.add_argument(
+    "--data_dir",
+    type=str,
+    required=True,
+)
+args = parser.parse_args()
+
+N_slices = args.slices
 spokes_per_frame = 8
 
 sp_device = sp.Device(0 if torch.cuda.is_available() else -1)
 
 split_file = "/gpfs/data/karczmar-lab/workspaces/rachelgordon/breastMRI-recon/ddei/data/data_split.json"
-data_dir = "/ess/scratch/scratch1/rachelgordon/zf_data_192_slices/zf_kspace"
+data_dir = args.data_dir #"/ess/scratch/scratch1/rachelgordon/zf_data_192_slices/zf_kspace"
 
 
 # load data
@@ -31,9 +46,9 @@ for patient_id in val_patient_ids:
 
     grasp_img_path = os.path.join(dir, f'{patient_id}_2', f'grasp_recon_{spokes_per_frame}spf.npy')
 
-    if not os.path.exists(grasp_img_path):
-        grasp_img_slices = raw_grasp_recon(zf_kspace, binned_kspace, traj, N_slices=N_slices, spokes_per_frame=spokes_per_frame, device=sp_device)
-        np.save(grasp_img_path, grasp_img_slices)
-        print("GRASP img saved to: ", grasp_img_path)
-    else:
-        print(f"GRASP img path {grasp_img_path} already exists, moving to next patient ID")
+    # if not os.path.exists(grasp_img_path):
+    grasp_img_slices = raw_grasp_recon(zf_kspace, binned_kspace, traj, N_slices=N_slices, spokes_per_frame=spokes_per_frame, device=sp_device)
+    np.save(grasp_img_path, grasp_img_slices)
+    print("GRASP img saved to: ", grasp_img_path)
+    # else:
+    #     print(f"GRASP img path {grasp_img_path} already exists, moving to next patient ID")

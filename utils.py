@@ -443,6 +443,8 @@ def load_checkpoint(model, optimizer, filename):
         "eval_lpipses": ckpt.get("eval_lpipses", []),
         "eval_dc_mses": ckpt.get("eval_dc_mses", []),
         "eval_dc_maes": ckpt.get("eval_dc_maes", []),
+        "eval_raw_dc_mses": ckpt.get("eval_raw_dc_mses", []),
+        "eval_raw_dc_maes": ckpt.get("eval_raw_dc_maes", []),
         "eval_curve_corrs": ckpt.get("eval_curve_corrs", []),
     }
 

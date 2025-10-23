@@ -48,9 +48,9 @@ class Trainer(submitit.helpers.Checkpointable):
 
 def main():
     # --- Executor Configuration ---
-    job_name = "zero_pad_ei_no_noise"
-    config_path = 'configs/config_ei_no_noise_zf.yaml'
-    num_gpus = 2
+    job_name = "ei_spatial_encode_time_zf"
+    config_path = 'configs/config_ei_spatial_encode_time_zf.yaml'
+    num_gpus = 4
 
     log_dir = f"submitit_logs/{job_name}"
     os.makedirs(log_dir, exist_ok=True)

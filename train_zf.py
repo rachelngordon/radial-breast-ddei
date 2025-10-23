@@ -1326,19 +1326,19 @@ def main():
                         axes[0, 2].set_ylabel("EI Loss")
 
                         # Plot Validation Adjoint Loss
-                        sns.lineplot(x=range(len(val_adj_losses)), y=val_adj_losses, ax=axes[1, 0], color='orange')
+                        sns.lineplot(x=range(0, len(val_adj_losses)*eval_frequency, eval_frequency), y=val_adj_losses, ax=axes[1, 0], color='orange')
                         axes[1, 0].set_title(f"Validation Adjoint Loss ({N_spokes_eval} spokes/frame)")
                         axes[1, 0].set_xlabel("Epoch")
                         axes[1, 0].set_ylabel("Adjoint Loss")
 
                         # Plot Validation MC Loss
-                        sns.lineplot(x=range(len(val_mc_losses)), y=val_mc_losses, ax=axes[1, 1], color='orange')
+                        sns.lineplot(x=range(0, len(val_mc_losses)*eval_frequency, eval_frequency), y=val_mc_losses, ax=axes[1, 1], color='orange')
                         axes[1, 1].set_title(f"Validation MC Loss ({N_spokes_eval} spokes/frame)")
                         axes[1, 1].set_xlabel("Epoch")
                         axes[1, 1].set_ylabel("MC Loss")
 
                         # Plot Validation EI Loss
-                        sns.lineplot(x=range(len(val_ei_losses)), y=val_ei_losses, ax=axes[1, 2], color='orange')
+                        sns.lineplot(x=range(0, len(val_ei_losses)*eval_frequency, eval_frequency), y=val_ei_losses, ax=axes[1, 2], color='orange')
                         axes[1, 2].set_title(f"Validation EI Loss ({N_spokes_eval} spokes/frame)")
                         axes[1, 2].set_xlabel("Epoch")
                         axes[1, 2].set_ylabel("EI Loss")
@@ -1412,17 +1412,17 @@ def main():
                         fig, axes = plt.subplots(2, 3, figsize=(18, 10))
                         fig.suptitle(f'Evaluation Metrics Over Epochs ({N_spokes_eval} spokes/frame)', fontsize=20)
 
-                        sns.lineplot(x=range(len(eval_ssims)), y=eval_ssims, ax=axes[0, 0])
+                        sns.lineplot(x=range(0, len(eval_ssims)*eval_frequency, eval_frequency), y=eval_ssims, ax=axes[0, 0])
                         axes[0, 0].set_title("DRO Evaluation SSIM")
                         axes[0, 0].set_xlabel("Epoch")
                         axes[0, 0].set_ylabel("SSIM")
 
-                        sns.lineplot(x=range(len(eval_psnrs)), y=eval_psnrs, ax=axes[0, 1])
+                        sns.lineplot(x=range(0, len(eval_psnrs)*eval_frequency, eval_frequency), y=eval_psnrs, ax=axes[0, 1])
                         axes[0, 1].set_title("DRO Evaluation PSNR")
                         axes[0, 1].set_xlabel("Epoch")
                         axes[0, 1].set_ylabel("PSNR")
 
-                        sns.lineplot(x=range(len(eval_mses)), y=eval_mses, ax=axes[0, 2])
+                        sns.lineplot(x=range(0, len(eval_mses)*eval_frequency, eval_frequency), y=eval_mses, ax=axes[0, 2])
                         axes[0, 2].set_title("DRO Evaluation Image MSE")
                         axes[0, 2].set_xlabel("Epoch")
                         axes[0, 2].set_ylabel("MSE")
@@ -1432,17 +1432,17 @@ def main():
                         # axes[1, 0].set_xlabel("Epoch")
                         # axes[1, 0].set_ylabel("LPIPS")
 
-                        sns.lineplot(x=range(len(eval_dc_maes)), y=eval_dc_maes, ax=axes[1, 0])
-                        axes[1, 1].set_title("DRO Evaluation Simulated k-space MAE")
-                        axes[1, 1].set_xlabel("Epoch")
-                        axes[1, 1].set_ylabel("MAE")
+                        sns.lineplot(x=range(0, len(eval_dc_maes)*eval_frequency, eval_frequency), y=eval_dc_maes, ax=axes[1, 0])
+                        axes[1, 0].set_title("DRO Evaluation Simulated k-space MAE")
+                        axes[1, 0].set_xlabel("Epoch")
+                        axes[1, 0].set_ylabel("MAE")
 
-                        sns.lineplot(x=range(len(eval_raw_dc_maes)), y=eval_raw_dc_maes, ax=axes[1, 1])
+                        sns.lineplot(x=range(0, len(eval_raw_dc_maes)*eval_frequency, eval_frequency), y=eval_raw_dc_maes, ax=axes[1, 1])
                         axes[1, 1].set_title("Non-DRO Evaluation Raw k-space MAE")
                         axes[1, 1].set_xlabel("Epoch")
                         axes[1, 1].set_ylabel("MAE")
 
-                        sns.lineplot(x=range(len(eval_curve_corrs)), y=eval_curve_corrs, ax=axes[1, 2])
+                        sns.lineplot(x=range(0, len(eval_curve_corrs)*eval_frequency, eval_frequency), y=eval_curve_corrs, ax=axes[1, 2])
                         axes[1, 2].set_title("DRO Tumor Enhancement Curve Correlation")
                         axes[1, 2].set_xlabel("Epoch")
                         axes[1, 2].set_ylabel("Pearson Correlation Coefficient")
@@ -1451,9 +1451,11 @@ def main():
                         plt.savefig(os.path.join(output_dir, "eval_metrics.png"))
                         plt.close()
 
+                        epoch_labels = range(0, len(eval_dc_mses)*eval_frequency, eval_frequency)
+
 
                         plt.figure()
-                        plt.plot(eval_dc_mses)
+                        plt.plot(epoch_labels, eval_dc_mses)
                         plt.xlabel("Epoch")
                         plt.ylabel("DRO Simulated k-space MSE")
                         plt.title("Evaluation Data Consistency (MSE)")
@@ -1462,7 +1464,7 @@ def main():
                         plt.close()
 
                         plt.figure()
-                        plt.plot(eval_raw_dc_mses)
+                        plt.plot(epoch_labels, eval_raw_dc_mses)
                         plt.xlabel("Epoch")
                         plt.ylabel("Non-DRO Raw k-space MSE")
                         plt.title("Evaluation Data Consistency (MSE)")
@@ -1471,7 +1473,7 @@ def main():
                         plt.close()
 
                         plt.figure()
-                        plt.plot(eval_lpipses)
+                        plt.plot(epoch_labels, eval_lpipses)
                         plt.xlabel("Epoch")
                         plt.ylabel("LPIPS")
                         plt.title("DRO Image Evaluation LPIPS")

@@ -1,11 +1,11 @@
-=== train_distributed.py ===
+=== train_zf.py ===
 import argparse
 import json
 import os
 import matplotlib.pyplot as plt
 import torch
 import yaml
-from dataloader import SliceDataset, SimulatedDataset, SimulatedSPFDataset
+from dataloader import ZFSliceDataset, SimulatedDataset, SimulatedSPFDataset
 from einops import rearrange
 from torch.utils.data import DataLoader
 from tqdm import tqdm
@@ -16,7 +16,7 @@ from mc import MCLoss
 from lsfpnet_encoding import LSFPNet, ArtifactRemovalLSFPNet
 from radial_lsfp import MCNUFFT
 from utils import prep_nufft, log_gradient_stats, plot_enhancement_curve, get_cosine_ei_weight, plot_reconstruction_sample, get_git_commit, save_checkpoint, load_checkpoint, to_torch_complex, GRASPRecon, sliding_window_inference, set_seed
-from eval import eval_grasp, eval_sample, calc_dc
+from eval import eval_grasp, eval_sample
 import csv
 import math
 import random
@@ -28,6 +28,7 @@ from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.utils.data.distributed import DistributedSampler
 import h5py
 from torch.utils.tensorboard import SummaryWriter
+from raw_kspace_eval import eval_raw_kspace
 def setup():
     """Initializes the distributed process group."""
     dist.init_process_group("nccl")
@@ -97,6 +98,7 @@ def main():
             with open(os.path.join(output_dir, 'config.yaml'), 'w') as file:
                 yaml.dump(config, file)
     split_file = config["data"]["split_file"]
+    data_dir = config["data"]["root_dir"]
     batch_size = config["dataloader"]["batch_size"]
     max_subjects = config["dataloader"]["max_subjects"]
     initial_lambdas = {'lambda_L': config['model']['lambda_L'], 
@@ -111,7 +113,6 @@ def main():
     target_weight = config["model"]["losses"]["ei_loss"]["weight"]
     warmup = config["model"]["losses"]["ei_loss"]["warmup"]
     duration = config["model"]["losses"]["ei_loss"]["duration"]
-    kspace_interpolation = config['training']['kspace_interpolation']
     save_interval = config["training"]["save_interval"]
     plot_interval = config["training"]["plot_interval"]
     model_type = config["model"]["name"]
@@ -125,6 +126,9 @@ def main():
     total_spokes = config["data"]["total_spokes"]
     N_spokes = int(total_spokes / N_time)
     N_full = config['data']['height'] * math.pi / 2
+    N_slices = config['data']['slices']
+    num_slices_to_eval = config['data']['slices_to_eval']
+    eval_frequency = config['data']['eval_frequency']
     eval_chunk_size = config["evaluation"]["chunk_size"]
     eval_chunk_overlap = config["evaluation"]["chunk_overlap"]
     cluster = config["experiment"].get("cluster", "Randi")
@@ -153,8 +157,8 @@ def main():
         if val_id in train_patient_ids:
             raise ValueError(f"Data Leakage encountered! Duplicate sample in train and val patient IDs: {val_id}")
     if config['dataloader']['slice_range_start'] == "None" or config['dataloader']['slice_range_end'] == "None":
-        train_dataset = SliceDataset(
-            root_dir=config["data"]["root_dir"],
+        train_dataset = ZFSliceDataset(
+            root_dir=data_dir,
             patient_ids=train_patient_ids,
             dataset_key=config["data"]["dataset_key"],
             file_pattern="*.h5",
@@ -166,12 +170,11 @@ def main():
             spokes_per_frame=train_spokes_per_frame,
             weight_accelerations=config['data']['weight_accelerations'],
             initial_spokes_range=initial_train_spokes_range,
-            interpolate_kspace=kspace_interpolation,
             cluster=cluster
         )
     else:
-        train_dataset = SliceDataset(
-            root_dir=config["data"]["root_dir"],
+        train_dataset = ZFSliceDataset(
+            root_dir=data_dir,
             patient_ids=train_patient_ids,
             dataset_key=config["data"]["dataset_key"],
             file_pattern="*.h5",
@@ -183,7 +186,6 @@ def main():
             spokes_per_frame=train_spokes_per_frame,
             weight_accelerations=config['data']['weight_accelerations'],
             initial_spokes_range=initial_train_spokes_range,
-            interpolate_kspace=kspace_interpolation,
             cluster=cluster
         )
     def seed_worker(worker_id):
@@ -331,6 +333,8 @@ def main():
         eval_lpipses = eval_curves["eval_lpipses"]
         eval_dc_mses = eval_curves["eval_dc_mses"]
         eval_dc_maes = eval_curves["eval_dc_maes"]
+        eval_raw_dc_mses = eval_curves.get("eval_raw_dc_mses", [])
+        eval_raw_dc_maes = eval_curves.get("eval_raw_dc_maes", [])
         eval_curve_corrs = eval_curves["eval_curve_corrs"]
     else:
         train_mc_losses = []
@@ -348,6 +352,8 @@ def main():
         eval_mses = []
         eval_dc_mses = []
         eval_dc_maes = []
+        eval_raw_dc_mses = []
+        eval_raw_dc_maes = []
         eval_curve_corrs = []
     grasp_ssims = []
     grasp_psnrs = []
@@ -503,6 +509,8 @@ def main():
             val_ei_losses.append(step0_val_ei_loss)
             step0_val_adj_loss = initial_val_adj_loss / len(val_dro_loader)
             val_adj_losses.append(step0_val_adj_loss)
+            print(f"Evaluating on raw k-space with {num_slices_to_eval} slices...")
+            raw_dc_mse, raw_dc_mae, raw_grasp_dc_mse, raw_grasp_dc_mae, raw_dc_std_mse, raw_dc_std_mae, raw_dc_std_grasp_mse, raw_dc_std_grasp_mae = eval_raw_kspace(num_slices_to_eval, val_patient_ids, data_dir, model, N_spokes_eval, N_slices, N_time_eval, eval_chunk_size, eval_chunk_overlap, H, W, eval_ktraj, eval_dcomp, eval_nufft_ob, eval_adjnufft_ob, eval_physics, acceleration_encoding, start_timepoint_index, device, output_dir, label="step0")
             if global_rank == 0 or not config['training']['multigpu']:
                 writer.add_scalar('Loss/Val_MC', step0_val_mc_loss, 0)
                 writer.add_scalar('Loss/Val_EI', step0_val_ei_loss, 0)
@@ -520,6 +528,8 @@ def main():
             eval_lpipses.append(initial_eval_lpips)
             eval_dc_mses.append(initial_eval_dc_mse) 
             eval_dc_maes.append(initial_eval_dc_mae) 
+            eval_raw_dc_mses.append(raw_dc_mse) 
+            eval_raw_dc_maes.append(raw_dc_mae) 
             eval_curve_corrs.append(initial_eval_curve_corr)
             if global_rank == 0 or not config['training']['multigpu']:
                 writer.add_scalar('Metric/SSIM', initial_eval_ssim, 0)
@@ -528,6 +538,8 @@ def main():
                 writer.add_scalar('Metric/LPIPS', initial_eval_lpips, 0)
                 writer.add_scalar('Metric/DC_MSE', initial_eval_dc_mse, 0)
                 writer.add_scalar('Metric/DC_MAE', initial_eval_dc_mae, 0)
+                writer.add_scalar('Metric/RAW_DC_MSE', raw_dc_mse, 0)
+                writer.add_scalar('Metric/RAW_DC_MAE', raw_dc_mae, 0)
                 writer.add_scalar('Metric/EC_Corr', initial_eval_curve_corr, 0)
         print(f"Step 0 Train Losses: MC: {step0_train_mc_loss}, EI: {step0_train_ei_loss}, Adj: {step0_train_adj_loss}")
         print(f"Step 0 Val Losses: MC: {step0_val_mc_loss}, EI: {step0_val_ei_loss}, Adj: {step0_val_adj_loss}")
@@ -729,306 +741,336 @@ def main():
             lambda_spatial_Ss.append(lambda_spatial_S.item())
             gammas.append(gamma.item())
             lambda_steps.append(lambda_step.item())
-            model.eval()
-            val_running_mc_loss = 0.0
-            val_running_ei_loss = 0.0
-            val_running_adj_loss = 0.0
-            val_loader_tqdm = tqdm(
-                val_dro_loader,
-                desc=f"Epoch {epoch}/{epochs}  Validation",
-                unit="batch",
-                leave=False,
-            )
-            with torch.no_grad():
-                for val_kspace_batch, val_csmap, val_ground_truth, val_grasp_img, val_mask, grasp_path in tqdm(val_dro_loader):
-                    val_csmap = val_csmap.squeeze(0).to(device)   # Remove batch dim
-                    val_ground_truth = val_ground_truth.to(device) # Shape: (1, 2, T, H, W)
-                    if type(val_kspace_batch) is list:
-                        ground_truth_for_physics = rearrange(to_torch_complex(val_ground_truth), 'b t h w -> b h w t')
-                        kspace_path = val_kspace_batch[0]
-                        val_kspace_batch = eval_physics(False, ground_truth_for_physics, val_csmap)
-                    val_kspace_batch = val_kspace_batch.squeeze(0).to(device) # Remove batch dim
-                    if type(val_grasp_img) is int or len(val_grasp_img.shape) == 1:
-                        print(f"No GRASP file found, performing reconstruction with {val_dro_dataset.spokes_per_frame} spokes/frame and {val_dro_dataset.num_frames} frames.")
-                        val_grasp_img = GRASPRecon(val_csmap, val_kspace_batch, val_dro_dataset.spokes_per_frame, val_dro_dataset.num_frames, grasp_path[0])
-                        val_grasp_img = torch.from_numpy(val_grasp_img).permute(2, 0, 1) # T, H, W
-                        val_grasp_img = torch.stack([val_grasp_img.real, val_grasp_img.imag], dim=0)
-                        val_grasp_img = torch.flip(val_grasp_img, dims=[-3])
-                        val_grasp_img = torch.rot90(val_grasp_img, k=3, dims=[-3,-1]).unsqueeze(0)
-                    val_grasp_img_tensor = val_grasp_img.to(device)
-                    N_spokes = eval_ktraj.shape[1] / config['data']['samples']
-                    acceleration = torch.tensor([N_full / int(N_spokes)], dtype=torch.float, device=device)
-                    if config['model']['encode_acceleration']:
-                        acceleration_encoding = acceleration
-                    else: 
-                        acceleration_encoding = None
-                    if config['model']['encode_time_index'] == False:
-                        start_timepoint_index = None
-                    else:
-                        start_timepoint_index = torch.tensor([0], dtype=torch.float, device=device)
-                    try:
-                        if N_time_eval > eval_chunk_size:
-                            print("Performing sliding window eval...")
-                            val_x_recon, val_adj_loss = sliding_window_inference(H, W, N_time_eval, eval_ktraj, eval_dcomp, eval_nufft_ob, eval_adjnufft_ob, eval_chunk_size, eval_chunk_overlap, val_kspace_batch, val_csmap, acceleration_encoding, start_timepoint_index, model, epoch=f"val{epoch}", device=device)  
-                        else:
-                            val_x_recon, val_adj_loss, *_ = model(
-                            val_kspace_batch.to(device), eval_physics, val_csmap, acceleration_encoding, start_timepoint_index, epoch=f"val{epoch}", norm=config['model']['norm']
-                            )
-                        val_running_adj_loss += val_adj_loss.item()
-                        val_mc_loss = mc_loss_fn(val_kspace_batch.to(device), val_x_recon, eval_physics, val_csmap)
-                        val_running_mc_loss += val_mc_loss.item()
-                        if use_ei_loss:
-                            val_ei_loss, val_t_img = ei_loss_fn(
-                                val_x_recon, eval_physics, model, val_csmap, acceleration_encoding, start_timepoint_index
-                            )
-                            val_running_ei_loss += val_ei_loss.item()
-                            val_loader_tqdm.set_postfix(
-                                val_mc_loss=val_mc_loss.item(), val_ei_loss=val_ei_loss.item()
-                            )
-                        else:
-                            val_loader_tqdm.set_postfix(val_mc_loss=val_mc_loss.item())
-                        if global_rank == 0 or not config['training']['multigpu']:
-                            ssim, psnr, mse, lpips, dc_mse, dc_mae, recon_corr, _ = eval_sample(val_kspace_batch, val_csmap, val_ground_truth, val_x_recon, eval_physics, val_mask, val_grasp_img_tensor, acceleration, int(N_spokes), eval_dir, f'epoch{epoch}', device)
-                            epoch_eval_ssims.append(ssim)
-                            epoch_eval_psnrs.append(psnr)
-                            epoch_eval_mses.append(mse)
-                            epoch_eval_lpipses.append(lpips)
-                            epoch_eval_dc_mses.append(dc_mse)
-                            epoch_eval_dc_maes.append(dc_mae)
-                            if recon_corr is not None:
-                                epoch_eval_curve_corrs.append(recon_corr)
-                    except RuntimeError as e:
-                        if "svd" in str(e).lower():
-                            svd_fail_count += 1
-                            optimizer.zero_grad()
-                            print(f"[Warning] Skipping batch validation sample in epoch {epoch} due to SVD failure. "
-                                f"Total failures so far: {svd_fail_count}")
-                            continue  # skip this batch, go to next one
-                        else:
-                            raise  # re-raise other errors
-            if global_rank == 0 or not config['training']['multigpu']:
-                epoch_eval_ssim = np.mean(epoch_eval_ssims)
-                epoch_eval_psnr = np.mean(epoch_eval_psnrs)
-                epoch_eval_mse = np.mean(epoch_eval_mses)
-                epoch_eval_lpips = np.mean(epoch_eval_lpipses)
-                epoch_eval_dc_mse = np.mean(epoch_eval_dc_mses)
-                epoch_eval_dc_mae = np.mean(epoch_eval_dc_maes)
-                epoch_eval_curve_corr = np.mean(epoch_eval_curve_corrs)
-                eval_ssims.append(epoch_eval_ssim)
-                eval_psnrs.append(epoch_eval_psnr)
-                eval_mses.append(epoch_eval_mse)
-                eval_lpipses.append(epoch_eval_lpips)
-                eval_dc_mses.append(epoch_eval_dc_mse) 
-                eval_dc_maes.append(epoch_eval_dc_mae)    
-                eval_curve_corrs.append(epoch_eval_curve_corr)  
-                writer.add_scalar('Metric/SSIM', epoch_eval_ssim, epoch)
-                writer.add_scalar('Metric/PSNR', epoch_eval_psnr, epoch)
-                writer.add_scalar('Metric/MSE', epoch_eval_mse, epoch)
-                writer.add_scalar('Metric/LPIPS', epoch_eval_lpips, epoch)
-                writer.add_scalar('Metric/DC_MSE', epoch_eval_dc_mse, epoch)
-                writer.add_scalar('Metric/DC_MAE', epoch_eval_dc_mae, epoch)
-                writer.add_scalar('Metric/EC_Corr', epoch_eval_curve_corr, epoch)
-                if epoch % save_interval == 0:
-                    plot_reconstruction_sample(
-                        val_x_recon,
-                        f"Validation Sample - Epoch {epoch} (AF = {round(acceleration.item(), 1)}, SPF = {int(N_spokes)})",
-                        f"val_sample_epoch_{epoch}",
-                        output_dir,
-                        val_grasp_img
-                    )
-                    val_x_recon_reshaped = rearrange(val_x_recon, 'b c h w t -> b c t h w')
-                    plot_enhancement_curve(
-                        val_x_recon_reshaped,
-                        output_filename = os.path.join(output_dir, 'enhancement_curves', f'val_sample_enhancement_curve_epoch_{epoch}.png'))
-                    plot_enhancement_curve(
-                        val_grasp_img,
-                        output_filename = os.path.join(output_dir, 'enhancement_curves', f'val_grasp_sample_enhancement_curve_epoch_{epoch}.png'))
-                    if use_ei_loss:
-                        plot_reconstruction_sample(
-                            val_t_img,
-                            f"Transformed Validation Sample - Epoch {epoch} (AF = {round(acceleration.item(), 1)}, SPF = {int(N_spokes)})",
-                            f"transforms/transform_val_sample_epoch_{epoch}",
-                            output_dir,
-                            val_x_recon,
-                            transform=True
-                        )
-            epoch_val_mc_loss = val_running_mc_loss / len(val_dro_loader)
-            val_mc_losses.append(epoch_val_mc_loss)
-            if use_ei_loss:
-                epoch_val_ei_loss = val_running_ei_loss / len(val_dro_loader)
-            else:
-                epoch_val_ei_loss = 0.0
-            val_ei_losses.append(epoch_val_ei_loss)
-            if model_type == "LSFPNet":
-                epoch_val_adj_loss = val_running_adj_loss / len(val_dro_loader)
-            else:
-                epoch_val_adj_loss = 0.0
-            val_adj_losses.append(epoch_val_adj_loss)
-            if global_rank == 0 or not config['training']['multigpu']:
-                writer.add_scalar('Loss/Val_MC', epoch_val_mc_loss, epoch)
-                writer.add_scalar('Loss/Val_EI', epoch_val_ei_loss, epoch)
-                writer.add_scalar('Loss/Val_Adj', epoch_val_adj_loss, epoch)
-            if epoch % save_interval == 0:
-                if global_rank == 0 or not config['training']['multigpu']:
-                    train_curves = dict(
-                        train_mc_losses=train_mc_losses,
-                        train_ei_losses=train_ei_losses,
-                        train_adj_losses=train_adj_losses,
-                        weighted_train_mc_losses=weighted_train_mc_losses,
-                        weighted_train_ei_losses=weighted_train_ei_losses,
-                        weighted_train_adj_losses=weighted_train_adj_losses,
-                    )
-                    val_curves = dict(
-                        val_mc_losses=val_mc_losses,
-                        val_ei_losses=val_ei_losses,
-                        val_adj_losses=val_adj_losses,
-                    )
-                    eval_curves = dict(
-                        eval_ssims=eval_ssims,
-                        eval_psnrs=eval_psnrs,
-                        eval_mses=eval_mses,
-                        eval_lpipses=eval_lpipses,
-                        eval_dc_mses=eval_dc_mses,
-                        eval_dc_maes=eval_dc_maes,
-                        eval_curve_corrs=eval_curve_corrs
-                    )
-                    model_save_path = os.path.join(output_dir, f'{exp_name}_model.pth')
-                    save_checkpoint(model, optimizer, epoch + 1, train_curves, val_curves, eval_curves, target_w_ei, step0_train_ei_loss, epoch_train_mc_loss, model_save_path)
-                    print(f'Model saved to {model_save_path}')
-                    sns.set_style("whitegrid")
-                    fig, axes = plt.subplots(2, 3, figsize=(18, 10))
-                    sns.lineplot(x=range(len(train_adj_losses)), y=train_adj_losses, ax=axes[0, 0])
-                    axes[0, 0].set_title("Training Adjoint Loss")
-                    axes[0, 0].set_xlabel("Epoch")
-                    axes[0, 0].set_ylabel("Adjoint Loss")
-                    sns.lineplot(x=range(len(train_mc_losses)), y=train_mc_losses, ax=axes[0, 1])
-                    axes[0, 1].set_title("Training MC Loss")
-                    axes[0, 1].set_xlabel("Epoch")
-                    axes[0, 1].set_ylabel("MC Loss")
-                    sns.lineplot(x=range(len(train_ei_losses)), y=train_ei_losses, ax=axes[0, 2])
-                    axes[0, 2].set_title("Training EI Loss")
-                    axes[0, 2].set_xlabel("Epoch")
-                    axes[0, 2].set_ylabel("EI Loss")
-                    sns.lineplot(x=range(len(val_adj_losses)), y=val_adj_losses, ax=axes[1, 0], color='orange')
-                    axes[1, 0].set_title(f"Validation Adjoint Loss ({N_spokes_eval} spokes/frame)")
-                    axes[1, 0].set_xlabel("Epoch")
-                    axes[1, 0].set_ylabel("Adjoint Loss")
-                    sns.lineplot(x=range(len(val_mc_losses)), y=val_mc_losses, ax=axes[1, 1], color='orange')
-                    axes[1, 1].set_title(f"Validation MC Loss ({N_spokes_eval} spokes/frame)")
-                    axes[1, 1].set_xlabel("Epoch")
-                    axes[1, 1].set_ylabel("MC Loss")
-                    sns.lineplot(x=range(len(val_ei_losses)), y=val_ei_losses, ax=axes[1, 2], color='orange')
-                    axes[1, 2].set_title(f"Validation EI Loss ({N_spokes_eval} spokes/frame)")
-                    axes[1, 2].set_xlabel("Epoch")
-                    axes[1, 2].set_ylabel("EI Loss")
-                    plt.tight_layout()
-                    plt.savefig(os.path.join(output_dir, "losses.png"))
-                    plt.close()
-                    sns.set_style("whitegrid")
-                    fig, axes = plt.subplots(2, 3, figsize=(18, 10))
-                    sns.lineplot(x=range(len(lambda_Ls)), y=lambda_Ls, ax=axes[0, 0])
-                    axes[0, 0].set_title("Lambda_L Parameter Value")
-                    axes[0, 0].set_xlabel("Epoch")
-                    axes[0, 0].set_ylabel("Lambda_L")
-                    sns.lineplot(x=range(len(lambda_Ss)), y=lambda_Ss, ax=axes[0, 1])
-                    axes[0, 1].set_title("Lambda_S Parameter Value")
-                    axes[0, 1].set_xlabel("Epoch")
-                    axes[0, 1].set_ylabel("Lambda_S")
-                    sns.lineplot(x=range(len(lambda_spatial_Ls)), y=lambda_spatial_Ls, ax=axes[0, 2])
-                    axes[0, 2].set_title("Spatial Lambda_L Parameter Value")
-                    axes[0, 2].set_xlabel("Epoch")
-                    axes[0, 2].set_ylabel("Spatial Lambda_L")
-                    sns.lineplot(x=range(len(lambda_spatial_Ss)), y=lambda_spatial_Ss, ax=axes[1, 0])
-                    axes[1, 0].set_title("Spatial Lambda_S Parameter Value")
-                    axes[1, 0].set_xlabel("Epoch")
-                    axes[1, 0].set_ylabel("Spatial Lambda_S")
-                    sns.lineplot(x=range(len(gammas)), y=gammas, ax=axes[1, 1])
-                    axes[1, 1].set_title("Gamma Parameter Value")
-                    axes[1, 1].set_xlabel("Epoch")
-                    axes[1, 1].set_ylabel("Gamma")
-                    sns.lineplot(x=range(len(lambda_steps)), y=lambda_steps, ax=axes[1, 2])
-                    axes[1, 2].set_title("Lambda Step Parameter Value")
-                    axes[1, 2].set_xlabel("Epoch")
-                    axes[1, 2].set_ylabel("Lambda Step")
-                    plt.tight_layout()
-                    plt.savefig(os.path.join(output_dir, "parameters.png"))
-                    plt.close()
-                    plt.figure()
-                    plt.plot(weighted_train_mc_losses, label="MC Loss")
-                    plt.plot(weighted_train_ei_losses, label="EI Loss")
-                    plt.plot(weighted_train_adj_losses, label="Adjoint Loss")
-                    plt.xlabel("Epoch")
-                    plt.ylabel("Loss")
-                    plt.title("Weighted Training Losses")
-                    plt.legend()
-                    plt.grid(True)
-                    plt.savefig(os.path.join(output_dir, "weighted_losses.png"))
-                    plt.close()
-                    sns.set_style("whitegrid")
-                    fig, axes = plt.subplots(2, 3, figsize=(18, 10))
-                    fig.suptitle(f'Evaluation Metrics Over Epochs ({N_spokes_eval} spokes/frame)', fontsize=20)
-                    sns.lineplot(x=range(len(eval_ssims)), y=eval_ssims, ax=axes[0, 0])
-                    axes[0, 0].set_title("Evaluation SSIM")
-                    axes[0, 0].set_xlabel("Epoch")
-                    axes[0, 0].set_ylabel("SSIM")
-                    sns.lineplot(x=range(len(eval_psnrs)), y=eval_psnrs, ax=axes[0, 1])
-                    axes[0, 1].set_title("Evaluation PSNR")
-                    axes[0, 1].set_xlabel("Epoch")
-                    axes[0, 1].set_ylabel("PSNR")
-                    sns.lineplot(x=range(len(eval_mses)), y=eval_mses, ax=axes[0, 2])
-                    axes[0, 2].set_title("Evaluation Image MSE")
-                    axes[0, 2].set_xlabel("Epoch")
-                    axes[0, 2].set_ylabel("MSE")
-                    sns.lineplot(x=range(len(eval_lpipses)), y=eval_lpipses, ax=axes[1, 0])
-                    axes[1, 0].set_title("Evaluation LPIPS")
-                    axes[1, 0].set_xlabel("Epoch")
-                    axes[1, 0].set_ylabel("LPIPS")
-                    sns.lineplot(x=range(len(eval_dc_maes)), y=eval_dc_maes, ax=axes[1, 1])
-                    axes[1, 1].set_title("Evaluation k-space MAE")
-                    axes[1, 1].set_xlabel("Epoch")
-                    axes[1, 1].set_ylabel("MAE")
-                    sns.lineplot(x=range(len(eval_curve_corrs)), y=eval_curve_corrs, ax=axes[1, 2])
-                    axes[1, 2].set_title("Tumor Enhancement Curve Correlation")
-                    axes[1, 2].set_xlabel("Epoch")
-                    axes[1, 2].set_ylabel("Pearson Correlation Coefficient")
-                    plt.tight_layout(rect=[0, 0.03, 1, 0.95])
-                    plt.savefig(os.path.join(output_dir, "eval_metrics.png"))
-                    plt.close()
-                    plt.figure()
-                    plt.plot(eval_dc_mses)
-                    plt.xlabel("Epoch")
-                    plt.ylabel("k-space MSE")
-                    plt.title("Evaluation Data Consistency (MSE)")
-                    plt.grid(True)
-                    plt.savefig(os.path.join(eval_dir, "eval_dc_mses.png"))
-                    plt.close()
-            if global_rank == 0 or not config['training']['multigpu']:
-                print(
-                    f"Epoch {epoch}: Training MC Loss: {epoch_train_mc_loss:.6f}, Validation MC Loss: {epoch_val_mc_loss:.6f}"
+            if epoch % eval_frequency == 0:
+                model.eval()
+                val_running_mc_loss = 0.0
+                val_running_ei_loss = 0.0
+                val_running_adj_loss = 0.0
+                val_loader_tqdm = tqdm(
+                    val_dro_loader,
+                    desc=f"Epoch {epoch}/{epochs}  Validation",
+                    unit="batch",
+                    leave=False,
                 )
+                with torch.no_grad():
+                    for val_kspace_batch, val_csmap, val_ground_truth, val_grasp_img, val_mask, grasp_path in tqdm(val_dro_loader):
+                        val_csmap = val_csmap.squeeze(0).to(device)   # Remove batch dim
+                        val_ground_truth = val_ground_truth.to(device) # Shape: (1, 2, T, H, W)
+                        if type(val_kspace_batch) is list:
+                            ground_truth_for_physics = rearrange(to_torch_complex(val_ground_truth), 'b t h w -> b h w t')
+                            kspace_path = val_kspace_batch[0]
+                            val_kspace_batch = eval_physics(False, ground_truth_for_physics, val_csmap)
+                        val_kspace_batch = val_kspace_batch.squeeze(0).to(device) # Remove batch dim
+                        if type(val_grasp_img) is int or len(val_grasp_img.shape) == 1:
+                            print(f"No GRASP file found, performing reconstruction with {val_dro_dataset.spokes_per_frame} spokes/frame and {val_dro_dataset.num_frames} frames.")
+                            val_grasp_img = GRASPRecon(val_csmap, val_kspace_batch, val_dro_dataset.spokes_per_frame, val_dro_dataset.num_frames, grasp_path[0])
+                            val_grasp_img = torch.from_numpy(val_grasp_img).permute(2, 0, 1) # T, H, W
+                            val_grasp_img = torch.stack([val_grasp_img.real, val_grasp_img.imag], dim=0)
+                            val_grasp_img = torch.flip(val_grasp_img, dims=[-3])
+                            val_grasp_img = torch.rot90(val_grasp_img, k=3, dims=[-3,-1]).unsqueeze(0)
+                        val_grasp_img_tensor = val_grasp_img.to(device)
+                        N_spokes = eval_ktraj.shape[1] / config['data']['samples']
+                        acceleration = torch.tensor([N_full / int(N_spokes)], dtype=torch.float, device=device)
+                        if config['model']['encode_acceleration']:
+                            acceleration_encoding = acceleration
+                        else: 
+                            acceleration_encoding = None
+                        if config['model']['encode_time_index'] == False:
+                            start_timepoint_index = None
+                        else:
+                            start_timepoint_index = torch.tensor([0], dtype=torch.float, device=device)
+                        try:
+                            if N_time_eval > eval_chunk_size:
+                                print("Performing sliding window eval...")
+                                val_x_recon, val_adj_loss = sliding_window_inference(H, W, N_time_eval, eval_ktraj, eval_dcomp, eval_nufft_ob, eval_adjnufft_ob, eval_chunk_size, eval_chunk_overlap, val_kspace_batch, val_csmap, acceleration_encoding, start_timepoint_index, model, epoch=f"val{epoch}", device=device)  
+                            else:
+                                val_x_recon, val_adj_loss, *_ = model(
+                                val_kspace_batch.to(device), eval_physics, val_csmap, acceleration_encoding, start_timepoint_index, epoch=f"val{epoch}", norm=config['model']['norm']
+                                )
+                            val_running_adj_loss += val_adj_loss.item()
+                            val_mc_loss = mc_loss_fn(val_kspace_batch.to(device), val_x_recon, eval_physics, val_csmap)
+                            val_running_mc_loss += val_mc_loss.item()
+                            if use_ei_loss:
+                                val_ei_loss, val_t_img = ei_loss_fn(
+                                    val_x_recon, eval_physics, model, val_csmap, acceleration_encoding, start_timepoint_index
+                                )
+                                val_running_ei_loss += val_ei_loss.item()
+                                val_loader_tqdm.set_postfix(
+                                    val_mc_loss=val_mc_loss.item(), val_ei_loss=val_ei_loss.item()
+                                )
+                            else:
+                                val_loader_tqdm.set_postfix(val_mc_loss=val_mc_loss.item())
+                            if global_rank == 0 or not config['training']['multigpu']:
+                                ssim, psnr, mse, lpips, dc_mse, dc_mae, recon_corr, _ = eval_sample(val_kspace_batch, val_csmap, val_ground_truth, val_x_recon, eval_physics, val_mask, val_grasp_img_tensor, acceleration, int(N_spokes), eval_dir, f'epoch{epoch}', device)
+                                epoch_eval_ssims.append(ssim)
+                                epoch_eval_psnrs.append(psnr)
+                                epoch_eval_mses.append(mse)
+                                epoch_eval_lpipses.append(lpips)
+                                epoch_eval_dc_mses.append(dc_mse)
+                                epoch_eval_dc_maes.append(dc_mae)
+                                if recon_corr is not None:
+                                    epoch_eval_curve_corrs.append(recon_corr)
+                        except RuntimeError as e:
+                            if "svd" in str(e).lower():
+                                svd_fail_count += 1
+                                optimizer.zero_grad()
+                                print(f"[Warning] Skipping batch validation sample in epoch {epoch} due to SVD failure. "
+                                    f"Total failures so far: {svd_fail_count}")
+                                continue  # skip this batch, go to next one
+                            else:
+                                raise  # re-raise other errors
+                print(f"Evaluating on raw k-space with {num_slices_to_eval} slices...")
+                raw_dc_mse, raw_dc_mae, raw_grasp_dc_mse, raw_grasp_dc_mae, raw_dc_std_mse, raw_dc_std_mae, raw_dc_std_grasp_mse, raw_dc_std_grasp_mae = eval_raw_kspace(num_slices_to_eval, val_patient_ids, data_dir, model, N_spokes_eval, N_slices, N_time_eval, eval_chunk_size, eval_chunk_overlap, H, W, eval_ktraj, eval_dcomp, eval_nufft_ob, eval_adjnufft_ob, eval_physics, acceleration_encoding, start_timepoint_index, device, output_dir, label=f"epoch{epoch}")
+                if global_rank == 0 or not config['training']['multigpu']:
+                    epoch_eval_ssim = np.mean(epoch_eval_ssims)
+                    epoch_eval_psnr = np.mean(epoch_eval_psnrs)
+                    epoch_eval_mse = np.mean(epoch_eval_mses)
+                    epoch_eval_lpips = np.mean(epoch_eval_lpipses)
+                    epoch_eval_dc_mse = np.mean(epoch_eval_dc_mses)
+                    epoch_eval_dc_mae = np.mean(epoch_eval_dc_maes)
+                    epoch_eval_curve_corr = np.mean(epoch_eval_curve_corrs)
+                    eval_ssims.append(epoch_eval_ssim)
+                    eval_psnrs.append(epoch_eval_psnr)
+                    eval_mses.append(epoch_eval_mse)
+                    eval_lpipses.append(epoch_eval_lpips)
+                    eval_dc_mses.append(epoch_eval_dc_mse) 
+                    eval_dc_maes.append(epoch_eval_dc_mae) 
+                    eval_raw_dc_mses.append(raw_dc_mse) 
+                    eval_raw_dc_maes.append(raw_dc_mae)    
+                    eval_curve_corrs.append(epoch_eval_curve_corr)  
+                    writer.add_scalar('Metric/SSIM', epoch_eval_ssim, epoch)
+                    writer.add_scalar('Metric/PSNR', epoch_eval_psnr, epoch)
+                    writer.add_scalar('Metric/MSE', epoch_eval_mse, epoch)
+                    writer.add_scalar('Metric/LPIPS', epoch_eval_lpips, epoch)
+                    writer.add_scalar('Metric/DC_MSE', epoch_eval_dc_mse, epoch)
+                    writer.add_scalar('Metric/DC_MAE', epoch_eval_dc_mae, epoch)
+                    writer.add_scalar('Metric/RAW_DC_MSE', raw_dc_mse, epoch)
+                    writer.add_scalar('Metric/RAW_DC_MAE', raw_dc_mae, epoch)
+                    writer.add_scalar('Metric/EC_Corr', epoch_eval_curve_corr, epoch)
+                    if epoch % save_interval == 0:
+                        plot_reconstruction_sample(
+                            val_x_recon,
+                            f"Validation Sample - Epoch {epoch} (AF = {round(acceleration.item(), 1)}, SPF = {int(N_spokes)})",
+                            f"val_sample_epoch_{epoch}",
+                            output_dir,
+                            val_grasp_img
+                        )
+                        val_x_recon_reshaped = rearrange(val_x_recon, 'b c h w t -> b c t h w')
+                        plot_enhancement_curve(
+                            val_x_recon_reshaped,
+                            output_filename = os.path.join(output_dir, 'enhancement_curves', f'val_sample_enhancement_curve_epoch_{epoch}.png'))
+                        plot_enhancement_curve(
+                            val_grasp_img,
+                            output_filename = os.path.join(output_dir, 'enhancement_curves', f'val_grasp_sample_enhancement_curve_epoch_{epoch}.png'))
+                        if use_ei_loss:
+                            plot_reconstruction_sample(
+                                val_t_img,
+                                f"Transformed Validation Sample - Epoch {epoch} (AF = {round(acceleration.item(), 1)}, SPF = {int(N_spokes)})",
+                                f"transforms/transform_val_sample_epoch_{epoch}",
+                                output_dir,
+                                val_x_recon,
+                                transform=True
+                            )
+                epoch_val_mc_loss = val_running_mc_loss / len(val_dro_loader)
+                val_mc_losses.append(epoch_val_mc_loss)
                 if use_ei_loss:
-                    print(
-                        f"Epoch {epoch}: Training EI Loss: {epoch_train_ei_loss:.6f}, Validation EI Loss: {epoch_val_ei_loss:.6f}"
-                    )
+                    epoch_val_ei_loss = val_running_ei_loss / len(val_dro_loader)
+                else:
+                    epoch_val_ei_loss = 0.0
+                val_ei_losses.append(epoch_val_ei_loss)
                 if model_type == "LSFPNet":
+                    epoch_val_adj_loss = val_running_adj_loss / len(val_dro_loader)
+                else:
+                    epoch_val_adj_loss = 0.0
+                val_adj_losses.append(epoch_val_adj_loss)
+                if global_rank == 0 or not config['training']['multigpu']:
+                    writer.add_scalar('Loss/Val_MC', epoch_val_mc_loss, epoch)
+                    writer.add_scalar('Loss/Val_EI', epoch_val_ei_loss, epoch)
+                    writer.add_scalar('Loss/Val_Adj', epoch_val_adj_loss, epoch)
+                if epoch % save_interval == 0:
+                    if global_rank == 0 or not config['training']['multigpu']:
+                        train_curves = dict(
+                            train_mc_losses=train_mc_losses,
+                            train_ei_losses=train_ei_losses,
+                            train_adj_losses=train_adj_losses,
+                            weighted_train_mc_losses=weighted_train_mc_losses,
+                            weighted_train_ei_losses=weighted_train_ei_losses,
+                            weighted_train_adj_losses=weighted_train_adj_losses,
+                        )
+                        val_curves = dict(
+                            val_mc_losses=val_mc_losses,
+                            val_ei_losses=val_ei_losses,
+                            val_adj_losses=val_adj_losses,
+                        )
+                        eval_curves = dict(
+                            eval_ssims=eval_ssims,
+                            eval_psnrs=eval_psnrs,
+                            eval_mses=eval_mses,
+                            eval_lpipses=eval_lpipses,
+                            eval_dc_mses=eval_dc_mses,
+                            eval_dc_maes=eval_dc_maes,
+                            eval_raw_dc_mses=eval_raw_dc_mses,
+                            eval_raw_dc_maes=eval_raw_dc_maes,
+                            eval_curve_corrs=eval_curve_corrs
+                        )
+                        model_save_path = os.path.join(output_dir, f'{exp_name}_model.pth')
+                        save_checkpoint(model, optimizer, epoch + 1, train_curves, val_curves, eval_curves, target_w_ei, step0_train_ei_loss, epoch_train_mc_loss, model_save_path)
+                        print(f'Model saved to {model_save_path}')
+                        sns.set_style("whitegrid")
+                        fig, axes = plt.subplots(2, 3, figsize=(18, 10))
+                        sns.lineplot(x=range(len(train_adj_losses)), y=train_adj_losses, ax=axes[0, 0])
+                        axes[0, 0].set_title("Training Adjoint Loss")
+                        axes[0, 0].set_xlabel("Epoch")
+                        axes[0, 0].set_ylabel("Adjoint Loss")
+                        sns.lineplot(x=range(len(train_mc_losses)), y=train_mc_losses, ax=axes[0, 1])
+                        axes[0, 1].set_title("Training MC Loss")
+                        axes[0, 1].set_xlabel("Epoch")
+                        axes[0, 1].set_ylabel("MC Loss")
+                        sns.lineplot(x=range(len(train_ei_losses)), y=train_ei_losses, ax=axes[0, 2])
+                        axes[0, 2].set_title("Training EI Loss")
+                        axes[0, 2].set_xlabel("Epoch")
+                        axes[0, 2].set_ylabel("EI Loss")
+                        sns.lineplot(x=range(0, len(val_adj_losses)*eval_frequency, eval_frequency), y=val_adj_losses, ax=axes[1, 0], color='orange')
+                        axes[1, 0].set_title(f"Validation Adjoint Loss ({N_spokes_eval} spokes/frame)")
+                        axes[1, 0].set_xlabel("Epoch")
+                        axes[1, 0].set_ylabel("Adjoint Loss")
+                        sns.lineplot(x=range(0, len(val_mc_losses)*eval_frequency, eval_frequency), y=val_mc_losses, ax=axes[1, 1], color='orange')
+                        axes[1, 1].set_title(f"Validation MC Loss ({N_spokes_eval} spokes/frame)")
+                        axes[1, 1].set_xlabel("Epoch")
+                        axes[1, 1].set_ylabel("MC Loss")
+                        sns.lineplot(x=range(0, len(val_ei_losses)*eval_frequency, eval_frequency), y=val_ei_losses, ax=axes[1, 2], color='orange')
+                        axes[1, 2].set_title(f"Validation EI Loss ({N_spokes_eval} spokes/frame)")
+                        axes[1, 2].set_xlabel("Epoch")
+                        axes[1, 2].set_ylabel("EI Loss")
+                        plt.tight_layout()
+                        plt.savefig(os.path.join(output_dir, "losses.png"))
+                        plt.close()
+                        sns.set_style("whitegrid")
+                        fig, axes = plt.subplots(2, 3, figsize=(18, 10))
+                        sns.lineplot(x=range(len(lambda_Ls)), y=lambda_Ls, ax=axes[0, 0])
+                        axes[0, 0].set_title("Lambda_L Parameter Value")
+                        axes[0, 0].set_xlabel("Epoch")
+                        axes[0, 0].set_ylabel("Lambda_L")
+                        sns.lineplot(x=range(len(lambda_Ss)), y=lambda_Ss, ax=axes[0, 1])
+                        axes[0, 1].set_title("Lambda_S Parameter Value")
+                        axes[0, 1].set_xlabel("Epoch")
+                        axes[0, 1].set_ylabel("Lambda_S")
+                        sns.lineplot(x=range(len(lambda_spatial_Ls)), y=lambda_spatial_Ls, ax=axes[0, 2])
+                        axes[0, 2].set_title("Spatial Lambda_L Parameter Value")
+                        axes[0, 2].set_xlabel("Epoch")
+                        axes[0, 2].set_ylabel("Spatial Lambda_L")
+                        sns.lineplot(x=range(len(lambda_spatial_Ss)), y=lambda_spatial_Ss, ax=axes[1, 0])
+                        axes[1, 0].set_title("Spatial Lambda_S Parameter Value")
+                        axes[1, 0].set_xlabel("Epoch")
+                        axes[1, 0].set_ylabel("Spatial Lambda_S")
+                        sns.lineplot(x=range(len(gammas)), y=gammas, ax=axes[1, 1])
+                        axes[1, 1].set_title("Gamma Parameter Value")
+                        axes[1, 1].set_xlabel("Epoch")
+                        axes[1, 1].set_ylabel("Gamma")
+                        sns.lineplot(x=range(len(lambda_steps)), y=lambda_steps, ax=axes[1, 2])
+                        axes[1, 2].set_title("Lambda Step Parameter Value")
+                        axes[1, 2].set_xlabel("Epoch")
+                        axes[1, 2].set_ylabel("Lambda Step")
+                        plt.tight_layout()
+                        plt.savefig(os.path.join(output_dir, "parameters.png"))
+                        plt.close()
+                        plt.figure()
+                        plt.plot(weighted_train_mc_losses, label="MC Loss")
+                        plt.plot(weighted_train_ei_losses, label="EI Loss")
+                        plt.plot(weighted_train_adj_losses, label="Adjoint Loss")
+                        plt.xlabel("Epoch")
+                        plt.ylabel("Loss")
+                        plt.title("Weighted Training Losses")
+                        plt.legend()
+                        plt.grid(True)
+                        plt.savefig(os.path.join(output_dir, "weighted_losses.png"))
+                        plt.close()
+                        sns.set_style("whitegrid")
+                        fig, axes = plt.subplots(2, 3, figsize=(18, 10))
+                        fig.suptitle(f'Evaluation Metrics Over Epochs ({N_spokes_eval} spokes/frame)', fontsize=20)
+                        sns.lineplot(x=range(0, len(eval_ssims)*eval_frequency, eval_frequency), y=eval_ssims, ax=axes[0, 0])
+                        axes[0, 0].set_title("DRO Evaluation SSIM")
+                        axes[0, 0].set_xlabel("Epoch")
+                        axes[0, 0].set_ylabel("SSIM")
+                        sns.lineplot(x=range(0, len(eval_psnrs)*eval_frequency, eval_frequency), y=eval_psnrs, ax=axes[0, 1])
+                        axes[0, 1].set_title("DRO Evaluation PSNR")
+                        axes[0, 1].set_xlabel("Epoch")
+                        axes[0, 1].set_ylabel("PSNR")
+                        sns.lineplot(x=range(0, len(eval_mses)*eval_frequency, eval_frequency), y=eval_mses, ax=axes[0, 2])
+                        axes[0, 2].set_title("DRO Evaluation Image MSE")
+                        axes[0, 2].set_xlabel("Epoch")
+                        axes[0, 2].set_ylabel("MSE")
+                        sns.lineplot(x=range(0, len(eval_dc_maes)*eval_frequency, eval_frequency), y=eval_dc_maes, ax=axes[1, 0])
+                        axes[1, 0].set_title("DRO Evaluation Simulated k-space MAE")
+                        axes[1, 0].set_xlabel("Epoch")
+                        axes[1, 0].set_ylabel("MAE")
+                        sns.lineplot(x=range(0, len(eval_raw_dc_maes)*eval_frequency, eval_frequency), y=eval_raw_dc_maes, ax=axes[1, 1])
+                        axes[1, 1].set_title("Non-DRO Evaluation Raw k-space MAE")
+                        axes[1, 1].set_xlabel("Epoch")
+                        axes[1, 1].set_ylabel("MAE")
+                        sns.lineplot(x=range(0, len(eval_curve_corrs)*eval_frequency, eval_frequency), y=eval_curve_corrs, ax=axes[1, 2])
+                        axes[1, 2].set_title("DRO Tumor Enhancement Curve Correlation")
+                        axes[1, 2].set_xlabel("Epoch")
+                        axes[1, 2].set_ylabel("Pearson Correlation Coefficient")
+                        plt.tight_layout(rect=[0, 0.03, 1, 0.95])
+                        plt.savefig(os.path.join(output_dir, "eval_metrics.png"))
+                        plt.close()
+                        epochs = range(len(eval_dc_mses)*eval_frequency, eval_frequency)
+                        plt.figure()
+                        plt.plot(epochs, eval_dc_mses)
+                        plt.xlabel("Epoch")
+                        plt.ylabel("DRO Simulated k-space MSE")
+                        plt.title("Evaluation Data Consistency (MSE)")
+                        plt.grid(True)
+                        plt.savefig(os.path.join(eval_dir, "eval_dc_mses.png"))
+                        plt.close()
+                        plt.figure()
+                        plt.plot(epochs, eval_raw_dc_mses)
+                        plt.xlabel("Epoch")
+                        plt.ylabel("Non-DRO Raw k-space MSE")
+                        plt.title("Evaluation Data Consistency (MSE)")
+                        plt.grid(True)
+                        plt.savefig(os.path.join(eval_dir, "eval_raw_dc_mses.png"))
+                        plt.close()
+                        plt.figure()
+                        plt.plot(epochs, eval_lpipses)
+                        plt.xlabel("Epoch")
+                        plt.ylabel("LPIPS")
+                        plt.title("DRO Image Evaluation LPIPS")
+                        plt.grid(True)
+                        plt.savefig(os.path.join(eval_dir, "eval_lpipses.png"))
+                        plt.close()
+                if global_rank == 0 or not config['training']['multigpu']:
                     print(
-                        f"Epoch {epoch}: Training Adj Loss: {epoch_train_adj_loss:.6f}, Validation Adj Loss: {epoch_val_adj_loss:.6f}"
+                        f"Epoch {epoch}: Training MC Loss: {epoch_train_mc_loss:.6f}, Validation MC Loss: {epoch_val_mc_loss:.6f}"
                     )
-                print(f"--- Evaluation Metrics: Epoch {epoch} ---")
-                print(f"Recon SSIM: {epoch_eval_ssim:.4f} ± {np.std(epoch_eval_ssims):.4f}")
-                print(f"Recon PSNR: {epoch_eval_psnr:.4f} ± {np.std(epoch_eval_psnrs):.4f}")
-                print(f"Recon MSE: {epoch_eval_mse:.4f} ± {np.std(epoch_eval_mses):.4f}")
-                print(f"Recon LPIPS: {epoch_eval_lpips:.4f} ± {np.std(epoch_eval_lpipses):.4f}")
-                print(f"Recon DC MSE: {epoch_eval_dc_mse:.4f} ± {np.std(epoch_eval_dc_mses):.4f}")
-                print(f"Recon DC MAE: {epoch_eval_dc_mae:.4f} ± {np.std(epoch_eval_dc_maes):.4f}")
-                print(f"Recon Enhancement Curve Correlation: {epoch_eval_curve_corr:.4f} ± {np.std(epoch_eval_curve_corrs):.4f}")
-                print(f"GRASP SSIM: {np.mean(grasp_ssims):.4f} ± {np.std(grasp_ssims):.4f}")
-                print(f"GRASP PSNR: {np.mean(grasp_psnrs):.4f} ± {np.std(grasp_psnrs):.4f}")
-                print(f"GRASP MSE: {np.mean(grasp_mses):.4f} ± {np.std(grasp_mses):.4f}")
-                print(f"GRASP LPIPS: {np.mean(grasp_lpipses):.4f} ± {np.std(grasp_lpipses):.4f}")
-                print(f"GRASP DC MSE: {np.mean(grasp_dc_mses):.6f} ± {np.std(grasp_dc_mses):.4f}")
-                print(f"GRASP DC MAE: {np.mean(grasp_dc_maes):.6f} ± {np.std(grasp_dc_maes):.4f}")
-                print(f"GRASP Enhancement Curve Correlation: {np.mean(grasp_curve_corrs):.6f} ± {np.std(grasp_curve_corrs):.4f}")
+                    if use_ei_loss:
+                        print(
+                            f"Epoch {epoch}: Training EI Loss: {epoch_train_ei_loss:.6f}, Validation EI Loss: {epoch_val_ei_loss:.6f}"
+                        )
+                    if model_type == "LSFPNet":
+                        print(
+                            f"Epoch {epoch}: Training Adj Loss: {epoch_train_adj_loss:.6f}, Validation Adj Loss: {epoch_val_adj_loss:.6f}"
+                        )
+                    print(f"--- Evaluation Metrics: Epoch {epoch} ---")
+                    print(f"Recon SSIM: {epoch_eval_ssim:.4f} ± {np.std(epoch_eval_ssims):.4f}")
+                    print(f"Recon PSNR: {epoch_eval_psnr:.4f} ± {np.std(epoch_eval_psnrs):.4f}")
+                    print(f"Recon MSE: {epoch_eval_mse:.4f} ± {np.std(epoch_eval_mses):.4f}")
+                    print(f"Recon LPIPS: {epoch_eval_lpips:.4f} ± {np.std(epoch_eval_lpipses):.4f}")
+                    print(f"Recon DC MSE: {epoch_eval_dc_mse:.4f} ± {np.std(epoch_eval_dc_mses):.4f}")
+                    print(f"Recon DC MAE: {epoch_eval_dc_mae:.4f} ± {np.std(epoch_eval_dc_maes):.4f}")
+                    print(f"Recon Raw DC MSE: {raw_dc_mse:.4f} ± {raw_dc_std_mse:.4f}")
+                    print(f"Recon Raw DC MAE: {raw_dc_mae:.4f} ± {raw_dc_std_mae:.4f}")
+                    print(f"Recon Enhancement Curve Correlation: {epoch_eval_curve_corr:.4f} ± {np.std(epoch_eval_curve_corrs):.4f}")
+                    print(f"GRASP SSIM: {np.mean(grasp_ssims):.4f} ± {np.std(grasp_ssims):.4f}")
+                    print(f"GRASP PSNR: {np.mean(grasp_psnrs):.4f} ± {np.std(grasp_psnrs):.4f}")
+                    print(f"GRASP MSE: {np.mean(grasp_mses):.4f} ± {np.std(grasp_mses):.4f}")
+                    print(f"GRASP LPIPS: {np.mean(grasp_lpipses):.4f} ± {np.std(grasp_lpipses):.4f}")
+                    print(f"GRASP DC MSE: {np.mean(grasp_dc_mses):.6f} ± {np.std(grasp_dc_mses):.4f}")
+                    print(f"GRASP DC MAE: {np.mean(grasp_dc_maes):.6f} ± {np.std(grasp_dc_maes):.4f}")
+                    print(f"GRASP DC MSE: {raw_grasp_dc_mse:.6f} ± {raw_dc_std_grasp_mse:.4f}")
+                    print(f"GRASP DC MAE: {raw_grasp_dc_mae:.6f} ± {raw_dc_std_grasp_mae:.4f}")
+                    print(f"GRASP Enhancement Curve Correlation: {np.mean(grasp_curve_corrs):.6f} ± {np.std(grasp_curve_corrs):.4f}")
     if global_rank == 0 or not config['training']['multigpu']:
         train_curves = dict(
             train_mc_losses=train_mc_losses,
@@ -1050,31 +1092,38 @@ def main():
             eval_lpipses=eval_lpipses,
             eval_dc_mses=eval_dc_mses,
             eval_dc_maes=eval_dc_maes,
+            eval_raw_dc_mses=eval_raw_dc_mses,
+            eval_raw_dc_maes=eval_raw_dc_maes,
             eval_curve_corrs=eval_curve_corrs,
         )
         model_save_path = os.path.join(output_dir, f'{exp_name}_model.pth')
         save_checkpoint(model, optimizer, epochs + 1, train_curves, val_curves, eval_curves, target_w_ei, step0_train_ei_loss, epoch_train_mc_loss, model_save_path)
         print(f'Model saved to {model_save_path}')
-        metrics_path = os.path.join(eval_dir, "eval_metrics.csv")
-        with open(metrics_path, 'w', newline='') as csvfile:
-            writer = csv.writer(csvfile)
-            writer.writerow(['Recon', 'SSIM', 'PSNR', 'MSE', 'LPIPS', 'DC MSE', 'DC MAE', 'EC Correlation'])
-            writer.writerow(['DL', 
-                            f'{epoch_eval_ssim:.4f} ± {np.std(epoch_eval_ssims):.4f}', 
-                            f'{epoch_eval_psnr:.4f} ± {np.std(epoch_eval_psnrs):.4f}', 
-                            f'{epoch_eval_mse:.4f} ± {np.std(epoch_eval_mses):.4f}',
-                            f'{epoch_eval_lpips:.4f} ± {np.std(epoch_eval_lpipses):.4f}',  
-                            f'{epoch_eval_dc_mse:.4f} ± {np.std(epoch_eval_dc_mses):.4f}', 
-                            f'{epoch_eval_dc_mae:.4f} ± {np.std(epoch_eval_dc_maes):.4f}', 
-                            f'{epoch_eval_curve_corr:.4f} ± {np.std(epoch_eval_curve_corrs):.4f}'])
-            writer.writerow(['GRASP', 
-                            f'{np.mean(grasp_ssims):.4f} ± {np.std(grasp_ssims):.4f}', 
-                            f'{np.mean(grasp_psnrs):.4f} ± {np.std(grasp_psnrs):.4f}', 
-                            f'{np.mean(grasp_mses):.4f} ± {np.std(grasp_mses):.4f}', 
-                            f'{np.mean(grasp_lpipses):.4f} ± {np.std(grasp_lpipses):.4f}', 
-                            f'{np.mean(grasp_dc_mses):.4f} ± {np.std(grasp_dc_mses):.4f}', 
-                            f'{np.mean(grasp_dc_maes):.4f} ± {np.std(grasp_dc_maes):.4f}', 
-                            f'{np.mean(grasp_curve_corrs):.4f} ± {np.std(grasp_curve_corrs):.4f}'])
+        if epoch > eval_frequency:
+            metrics_path = os.path.join(eval_dir, "eval_metrics.csv")
+            with open(metrics_path, 'w', newline='') as csvfile:
+                writer = csv.writer(csvfile)
+                writer.writerow(['Recon', 'SSIM', 'PSNR', 'MSE', 'LPIPS', 'DC MSE', 'DC MAE', 'EC Correlation'])
+                writer.writerow(['DL', 
+                                f'{epoch_eval_ssim:.4f} ± {np.std(epoch_eval_ssims):.4f}', 
+                                f'{epoch_eval_psnr:.4f} ± {np.std(epoch_eval_psnrs):.4f}', 
+                                f'{epoch_eval_mse:.4f} ± {np.std(epoch_eval_mses):.4f}',
+                                f'{epoch_eval_lpips:.4f} ± {np.std(epoch_eval_lpipses):.4f}',  
+                                f'{epoch_eval_dc_mse:.4f} ± {np.std(epoch_eval_dc_mses):.4f}', 
+                                f'{epoch_eval_dc_mae:.4f} ± {np.std(epoch_eval_dc_maes):.4f}', 
+                                f"{raw_dc_mse:.4f} ± {raw_dc_std_mse:.4f}", 
+                                f"{raw_dc_mae:.4f} ± {raw_dc_std_mae:.4f}", 
+                                f'{epoch_eval_curve_corr:.4f} ± {np.std(epoch_eval_curve_corrs):.4f}'])
+                writer.writerow(['GRASP', 
+                                f'{np.mean(grasp_ssims):.4f} ± {np.std(grasp_ssims):.4f}', 
+                                f'{np.mean(grasp_psnrs):.4f} ± {np.std(grasp_psnrs):.4f}', 
+                                f'{np.mean(grasp_mses):.4f} ± {np.std(grasp_mses):.4f}', 
+                                f'{np.mean(grasp_lpipses):.4f} ± {np.std(grasp_lpipses):.4f}', 
+                                f'{np.mean(grasp_dc_mses):.4f} ± {np.std(grasp_dc_mses):.4f}', 
+                                f'{np.mean(grasp_dc_maes):.4f} ± {np.std(grasp_dc_maes):.4f}', 
+                                f"{raw_grasp_dc_mse:.6f} ± {raw_dc_std_grasp_mse:.4f}",
+                                f"{raw_grasp_dc_mae:.6f} ± {raw_dc_std_grasp_mae:.4f}", 
+                                f'{np.mean(grasp_curve_corrs):.4f} ± {np.std(grasp_curve_corrs):.4f}'])
         MAIN_EVALUATION_PLAN = [
             {
                 "spokes_per_frame": 8,
@@ -1135,6 +1184,10 @@ def main():
             spf_grasp_dc_mse = {}
             spf_grasp_dc_mae = {}
             spf_grasp_corr = {}
+            spf_raw_dc_mse = {}
+            spf_raw_dc_mae = {}
+            spf_raw_grasp_dc_mse = {}
+            spf_raw_grasp_dc_mae = {}
             print("--- Running Stress Test Evaluation (Budget: 176 spokes) ---")
             for eval_config in STRESS_TEST_PLAN:
                 stress_test_ssims = []
@@ -1220,102 +1273,53 @@ def main():
                     spf_grasp_dc_mse[spokes] = np.mean(stress_test_grasp_dc_mses)
                     spf_grasp_dc_mae[spokes] = np.mean(stress_test_grasp_dc_maes)
                     spf_grasp_corr[spokes] = np.mean(stress_test_grasp_corrs)
-                for patient_id in val_patient_ids:
-                    raw_kspace_path = os.path.join(config["data"]["root_dir"], f'{patient_id}_2.h5')
-                    with h5py.File(raw_kspace_path, "r") as f:
-                        raw_kspace = f[config["data"]["dataset_key"]][()] 
-                    N_partitions = raw_kspace.shape[0]
-                    raw_kspace = rearrange(raw_kspace, 'p t c sp sam -> t sp c sam p')
-                    raw_kspace_flat = torch.tensor(raw_kspace).contiguous().view(total_spokes, N_coils, N_samples, N_partitions)
-                    N_time = total_spokes // spokes
-                    raw_kspace_binned = raw_kspace_flat.view(N_time, spokes, N_coils, N_samples, N_partitions)
-                    raw_kspace_binned = rearrange(raw_kspace_binned, 't sp c sam p -> p c (sp sam) t')
-                    slice_dc_mses = []
-                    slice_dc_maes = []
-                    grasp_slice_dc_mses = []
-                    grasp_slice_dc_maes = []
-                    for slice_idx, raw_kspace_slice in enumerate(raw_kspace_binned):
-                        raw_kspace_slice = raw_kspace_slice.to(csmap.dtype)
-                        grasp_save_path = os.path.join(os.path.dirname(os.path.dirname(config['data']['root_dir'])), f'raw_grasp/{patient_id}')
-                        os.makedirs(grasp_save_path, exist_ok=True)
-                        grasp_path = os.path.join(grasp_save_path, f'raw_grasp_spf{spokes}_frames{num_frames}_slice{slice_idx:03d}.npy')
-                        if not os.path.exists(grasp_path):
-                            print(f"No GRASP file found, performing reconstruction with {spokes} spokes/frame and {num_frames} frames.")
-                            grasp_img = GRASPRecon(csmap, raw_kspace_slice, spokes, num_frames, grasp_path)
-                            grasp_recon_torch = torch.from_numpy(grasp_img).permute(2, 0, 1) # T, H, W
-                            grasp_recon_torch = torch.stack([grasp_recon_torch.real, grasp_recon_torch.imag], dim=0)
-                            grasp_img = torch.flip(grasp_recon_torch, dims=[-3])
-                            grasp_img = torch.rot90(grasp_img, k=3, dims=[-3,-1]).unsqueeze(0)
-                        grasp_img = grasp_img.to(device)
-                        if num_frames > eval_chunk_size:
-                            x_recon, _ = sliding_window_inference(H, W, num_frames, ktraj, dcomp, nufft_ob, adjnufft_ob, eval_chunk_size, eval_chunk_overlap, raw_kspace_slice, csmap, acceleration_encoding, start_timepoint_index, model, epoch=None, device=device)  
-                        else:
-                            x_recon, *_ = model(
-                                raw_kspace_slice.to(device), physics, csmap, acceleration_encoding, start_timepoint_index, epoch=None, norm=config['model']['norm']
-                            )
-                        x_recon = to_torch_complex(x_recon)
-                        sim_kspace = physics(False, x_recon, csmap)
-                        print("grasp_img: ", grasp_img.shape)
-                        if grasp_img.shape[1] == 2:
-                            grasp_img = to_torch_complex(grasp_img)
-                        if grasp_img.shape[-2] == num_frames: 
-                            grasp_img = rearrange(grasp_img, 'b h t w -> b h w t')
-                        print("x_recon: ", x_recon.dtype)
-                        print("grasp_img: ", grasp_img.dtype)
-                        print("csmap: ", csmap.dtype)
-                        print("x_recon: ", x_recon.shape)
-                        print("grasp_img: ", grasp_img.shape)
-                        print("csmap: ", csmap.shape)
-                        plot_path = f'/gpfs/data/karczmar-lab/workspaces/rachelgordon/breastMRI-recon/ddei/dl_grasp_orientation_comparison.png'
-                        if not os.path.exists(plot_path):
-                            timeframe = 18 
-                            x_recon_timeframe = x_recon[0, :, :, timeframe]
-                            grasp_img_timeframe = grasp_img[0, :, :, timeframe]
-                            fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(10, 5))
-                            ax1.imshow(np.abs(x_recon_timeframe.cpu().numpy()), cmap='gray')
-                            ax1.set_title(f'DL Recon - Timeframe: {timeframe}, Slice: {slice_idx}')
-                            ax1.axis('off')
-                            ax2.imshow(np.abs(grasp_img_timeframe.cpu().numpy()), cmap='gray')
-                            ax2.set_title(f'GRASP Recon - Timeframe: {timeframe}, Slice: {slice_idx}')
-                            ax2.axis('off')
-                            plt.tight_layout()
-                            plt.savefig(plot_path)
-                            print(f"---- DL GRASP Orientation Comparsion Saved to: {plot_path} ----")
-                        sim_kspace_grasp = physics(False, grasp_img.to(x_recon.dtype), csmap)
-                        raw_dc_mse, raw_dc_mae = calc_dc(sim_kspace, raw_kspace_slice, device)
-                        raw_grasp_dc_mse, raw_grasp_dc_mae = calc_dc(sim_kspace_grasp, raw_kspace_slice, device)
-                        slice_dc_mses.append(raw_dc_mse)
-                        slice_dc_maes.append(raw_dc_mae)
-                        grasp_slice_dc_mses.append(raw_grasp_dc_mse)
-                        grasp_slice_dc_maes.append(raw_grasp_dc_mae)
-                    avg_dc_mse = np.mean(slice_dc_mses)
-                    avg_dc_mae = np.mean(slice_dc_maes)
-                    avg_grasp_dc_mse = np.mean(grasp_slice_dc_mses)
-                    avg_grasp_dc_mae = np.mean(grasp_slice_dc_maes)
-                    print(f"Avg DL DC MSE: {avg_dc_mse}")
-                    print(f"Avg DL DC MAE: {avg_dc_mae}")
-                    print(f"Avg GRASP DC MSE: {avg_grasp_dc_mse}")
-                    print(f"Avg GRASP DC MAE: {avg_grasp_dc_mae}")
+                print(f"Evaluating on raw k-space with {num_slices_to_eval} slices...")
+                raw_dc_mse, raw_dc_mae, raw_grasp_dc_mse, raw_grasp_dc_mae, raw_dc_std_mse, raw_dc_std_mae, raw_dc_std_grasp_mse, raw_dc_std_grasp_mae = eval_raw_kspace(num_slices_to_eval, val_patient_ids, data_dir, model, spokes, N_slices, num_frames, eval_chunk_size, eval_chunk_overlap, H, W, ktraj, dcomp, nufft_ob, adjnufft_ob, physics, acceleration_encoding, start_timepoint_index, device, output_dir, label=f"{spokes}spf")
+                spf_raw_dc_mse[spokes] = raw_dc_mse
+                spf_raw_dc_mae[spokes] = raw_dc_mae
+                spf_raw_grasp_dc_mse[spokes] = raw_grasp_dc_mse
+                spf_raw_grasp_dc_mae[spokes] = raw_grasp_dc_mae
+                if global_rank == 0 or not config['training']['multigpu']:
+                    epoch_eval_ssim = np.mean(epoch_eval_ssims)
+                    epoch_eval_psnr = np.mean(epoch_eval_psnrs)
+                    epoch_eval_mse = np.mean(epoch_eval_mses)
+                    epoch_eval_lpips = np.mean(epoch_eval_lpipses)
+                    epoch_eval_dc_mse = np.mean(epoch_eval_dc_mses)
+                    epoch_eval_dc_mae = np.mean(epoch_eval_dc_maes)
+                    epoch_eval_curve_corr = np.mean(epoch_eval_curve_corrs)
+                    eval_ssims.append(epoch_eval_ssim)
+                    eval_psnrs.append(epoch_eval_psnr)
+                    eval_mses.append(epoch_eval_mse)
+                    eval_lpipses.append(epoch_eval_lpips)
+                    eval_dc_mses.append(epoch_eval_dc_mse) 
+                    eval_dc_maes.append(epoch_eval_dc_mae) 
+                    eval_raw_dc_mses.append(raw_dc_mse) 
+                    eval_raw_dc_maes.append(raw_dc_mae)   
+                    eval_curve_corrs.append(epoch_eval_curve_corr)   
                 spf_metrics_path = os.path.join(eval_dir, "eval_metrics.csv")
                 with open(spf_metrics_path, 'a', newline='') as csvfile:
-                    writer = csv.writer(csvfile)
-                    writer.writerow(['Recon', 'Spokes Per Frame', 'SSIM', 'PSNR', 'MSE', "LPIPS", 'DC MSE', 'DC MAE', 'EC Correlation'])
-                    writer.writerow(['DL', spokes, 
+                    csvwriter = csv.writer(csvfile)
+                    csvwriter.writerow(['Recon', 'Spokes Per Frame', 'SSIM', 'PSNR', 'MSE', "LPIPS", 'DC MSE', 'DC MAE', 'EC Correlation'])
+                    csvwriter.writerow(['DL', spokes, 
                     f'{np.mean(stress_test_ssims):.4f} ± {np.std(stress_test_ssims):.4f}', 
                     f'{np.mean(stress_test_psnrs):.4f} ± {np.std(stress_test_psnrs):.4f}', 
                     f'{np.mean(stress_test_mses):.4f} ± {np.std(stress_test_mses):.4f}', 
                     f'{np.mean(stress_test_lpipses):.4f} ± {np.std(stress_test_lpipses):.4f}', 
                     f'{np.mean(stress_test_dc_mses):.4f} ± {np.std(stress_test_dc_mses):.4f}',
                     f'{np.mean(stress_test_dc_maes):.4f} ± {np.std(stress_test_dc_maes):.4f}',
+                    f'{raw_dc_mse:.4f} ± {raw_dc_std_mse:.4f}',
+                    f'{raw_dc_mae:.4f} ± {raw_dc_std_mae:.4f}',
                     f'{np.mean(stress_test_corrs):.4f} ± {np.std(stress_test_corrs):.4f}'
                     ])
-                    writer.writerow(['GRASP', spokes, 
+                    csvwriter.writerow(['GRASP', spokes, 
                     f'{np.mean(stress_test_grasp_ssims):.4f} ± {np.std(stress_test_grasp_ssims):.4f}', 
                     f'{np.mean(stress_test_grasp_psnrs):.4f} ± {np.std(stress_test_grasp_psnrs):.4f}', 
                     f'{np.mean(stress_test_grasp_mses):.4f} ± {np.std(stress_test_grasp_mses):.4f}', 
                     f'{np.mean(stress_test_grasp_lpipses):.4f} ± {np.std(stress_test_grasp_lpipses):.4f}', 
                     f'{np.mean(stress_test_grasp_dc_mses):.4f} ± {np.std(stress_test_grasp_dc_mses):.4f}',
                     f'{np.mean(stress_test_grasp_dc_maes):.4f} ± {np.std(stress_test_grasp_dc_maes):.4f}',
+                    f'{raw_grasp_dc_mse:.4f} ± {raw_dc_std_grasp_mse:.4f}',
+                    f'{raw_grasp_dc_mae:.4f} ± {raw_dc_std_grasp_mae:.4f}',
                     f'{np.mean(stress_test_grasp_corrs):.4f} ± {np.std(stress_test_grasp_corrs):.4f}',
                     ])
             print("--- Running Main Evaluation (Budget: 320 spokes) ---")
@@ -1389,6 +1393,12 @@ def main():
                     spf_grasp_lpipses.append(lpips_grasp)
                     spf_grasp_dc_mses.append(dc_mse_grasp)
                     spf_grasp_dc_maes.append(dc_mae_grasp)
+                print(f"Evaluating on raw k-space with {num_slices_to_eval} slices...")
+                raw_dc_mse, raw_dc_mae, raw_grasp_dc_mse, raw_grasp_dc_mae, raw_dc_std_mse, raw_dc_std_mae, raw_dc_std_grasp_mse, raw_dc_std_grasp_mae = eval_raw_kspace(num_slices_to_eval, val_patient_ids, data_dir, model, spokes, N_slices, num_frames, eval_chunk_size, eval_chunk_overlap, H, W, ktraj, dcomp, nufft_ob, adjnufft_ob, physics, acceleration_encoding, start_timepoint_index, device, output_dir, label=f"{spokes}spf")
+                spf_raw_dc_mse[spokes] = raw_dc_mse
+                spf_raw_dc_mae[spokes] = raw_dc_mae
+                spf_raw_grasp_dc_mse[spokes] = raw_grasp_dc_mse
+                spf_raw_grasp_dc_mae[spokes] = raw_grasp_dc_mae
                 spf_recon_ssim[spokes] = np.mean(spf_eval_ssims)
                 spf_recon_psnr[spokes] = np.mean(spf_eval_psnrs)
                 spf_recon_mse[spokes] = np.mean(spf_eval_mses)
@@ -1405,24 +1415,28 @@ def main():
                 spf_grasp_corr[spokes] = np.mean(spf_grasp_curve_corrs)
                 spf_metrics_path = os.path.join(eval_dir, "eval_metrics.csv")
                 with open(spf_metrics_path, 'a', newline='') as csvfile:
-                    writer = csv.writer(csvfile)
-                    writer.writerow(['Recon', 'Spokes Per Frame', 'SSIM', 'PSNR', 'MSE', 'LPIPS', 'DC MSE', 'DC MAE', 'EC Correlation'])
-                    writer.writerow(['DL', spokes, 
+                    csvwriter = csv.writer(csvfile)
+                    csvwriter.writerow(['Recon', 'Spokes Per Frame', 'SSIM', 'PSNR', 'MSE', 'LPIPS', 'DC MSE', 'DC MAE', 'EC Correlation'])
+                    csvwriter.writerow(['DL', spokes, 
                     f'{np.mean(spf_eval_ssims):.4f} ± {np.std(spf_eval_ssims):.4f}', 
                     f'{np.mean(spf_eval_psnrs):.4f} ± {np.std(spf_eval_psnrs):.4f}', 
                     f'{np.mean(spf_eval_mses):.4f} ± {np.std(spf_eval_mses):.4f}', 
                     f'{np.mean(spf_eval_lpipses):.4f} ± {np.std(spf_eval_lpipses):.4f}', 
                     f'{np.mean(spf_eval_dc_mses):.4f} ± {np.std(spf_eval_dc_mses):.4f}',
                     f'{np.mean(spf_eval_dc_maes):.4f} ± {np.std(spf_eval_dc_maes):.4f}',
+                    f'{raw_dc_mse:.4f} ± {raw_dc_std_mse:.4f}',
+                    f'{raw_dc_mae:.4f} ± {raw_dc_std_mae:.4f}',
                     f'{np.mean(spf_eval_curve_corrs):.4f} ± {np.std(spf_eval_curve_corrs):.4f}'
                     ])
-                    writer.writerow(['GRASP', spokes, 
+                    csvwriter.writerow(['GRASP', spokes, 
                     f'{np.mean(spf_grasp_ssims):.4f} ± {np.std(spf_grasp_ssims):.4f}', 
                     f'{np.mean(spf_grasp_psnrs):.4f} ± {np.std(spf_grasp_psnrs):.4f}', 
                     f'{np.mean(spf_grasp_mses):.4f} ± {np.std(spf_grasp_mses):.4f}', 
                     f'{np.mean(spf_grasp_lpipses):.4f} ± {np.std(spf_grasp_lpipses):.4f}', 
                     f'{np.mean(spf_grasp_dc_mses):.4f} ± {np.std(spf_grasp_dc_mses):.4f}',
                     f'{np.mean(spf_grasp_dc_maes):.4f} ± {np.std(spf_grasp_dc_maes):.4f}',
+                    f'{raw_grasp_dc_mse:.4f} ± {raw_dc_std_grasp_mse:.4f}',
+                    f'{raw_grasp_dc_mae:.4f} ± {raw_dc_std_grasp_mae:.4f}',
                     f'{np.mean(spf_grasp_curve_corrs):.4f} ± {np.std(spf_grasp_curve_corrs):.4f}'
                     ])
         sns.set_style("whitegrid")
@@ -1437,7 +1451,7 @@ def main():
                     label="Standard Recon", 
                     marker='o',
                     ax=axes[0, 0])
-        axes[0, 0].set_title("Evaluation SSIM vs Spokes/Frame")
+        axes[0, 0].set_title("DRO Evaluation SSIM vs Spokes/Frame")
         axes[0, 0].set_xlabel("Spokes per Frame")
         axes[0, 0].set_ylabel("SSIM")
         sns.lineplot(x=list(spf_recon_psnr.keys()), 
@@ -1450,7 +1464,7 @@ def main():
                     label="Standard Recon", 
                     marker='o',
                     ax=axes[0, 1])
-        axes[0, 1].set_title("Evaluation PSNR vs Spokes/Frame")
+        axes[0, 1].set_title("DRO Evaluation PSNR vs Spokes/Frame")
         axes[0, 1].set_xlabel("Spokes per Frame")
         axes[0, 1].set_ylabel("PSNR")
         sns.lineplot(x=list(spf_recon_mse.keys()), 
@@ -1463,22 +1477,22 @@ def main():
                     label="Standard Recon", 
                     marker='o',
                     ax=axes[0, 2])
-        axes[0, 2].set_title("Evaluation Image MSE vs Spokes/Frame")
+        axes[0, 2].set_title("DRO Evaluation Image MSE vs Spokes/Frame")
         axes[0, 2].set_xlabel("Spokes per Frame")
         axes[0, 2].set_ylabel("MSE")
-        sns.lineplot(x=list(spf_recon_lpips.keys()), 
-                    y=list(spf_recon_lpips.values()), 
-                    label="DL Recon", 
-                    marker='o',
-                    ax=axes[1, 0])
+        sns.lineplot(x=list(spf_raw_dc_mse.keys()), 
+            y=list(spf_raw_dc_mse.values()), 
+            label="DL Recon", 
+            marker='o',
+            ax=axes[1, 0])
         sns.lineplot(x=list(spf_grasp_lpips.keys()), 
                     y=list(spf_grasp_lpips.values()), 
                     label="Standard Recon", 
                     marker='o',
                     ax=axes[1, 0])
-        axes[1, 0].set_title("Evaluation LPIPS vs Spokes/Frame")
+        axes[1, 0].set_title("Non-DRO Evaluation Raw k-space MAE vs Spokes/Frame")
         axes[1, 0].set_xlabel("Spokes per Frame")
-        axes[1, 0].set_ylabel("LPIPS")
+        axes[1, 0].set_ylabel("MAE")
         sns.lineplot(x=list(spf_recon_dc_mae.keys()), 
                     y=list(spf_recon_dc_mae.values()), 
                     label="DL Recon", 
@@ -1489,7 +1503,7 @@ def main():
                     label="Standard Recon", 
                     marker='o',
                     ax=axes[1, 1])
-        axes[1, 1].set_title("Evaluation k-space MAE vs Spokes/Frame")
+        axes[1, 1].set_title("DRO Evaluation Simulated k-space MAE vs Spokes/Frame")
         axes[1, 1].set_xlabel("Spokes per Frame")
         axes[1, 1].set_ylabel("MAE")
         sns.lineplot(x=list(spf_recon_corr.keys()), 
@@ -1502,7 +1516,7 @@ def main():
                     label="Standard Recon", 
                     marker='o',
                     ax=axes[1, 2])
-        axes[1, 2].set_title("Tumor Enhancement Curve Correlation vs Spokes/Frame")
+        axes[1, 2].set_title("DRO Tumor Enhancement Curve Correlation vs Spokes/Frame")
         axes[1, 2].set_xlabel("Spokes per Frame")
         axes[1, 2].set_ylabel("Pearson Correlation Coefficient")
         plt.tight_layout()
@@ -2711,6 +2725,8 @@ def load_checkpoint(model, optimizer, filename):
         "eval_lpipses": ckpt.get("eval_lpipses", []),
         "eval_dc_mses": ckpt.get("eval_dc_mses", []),
         "eval_dc_maes": ckpt.get("eval_dc_maes", []),
+        "eval_raw_dc_mses": ckpt.get("eval_raw_dc_mses", []),
+        "eval_raw_dc_maes": ckpt.get("eval_raw_dc_maes", []),
         "eval_curve_corrs": ckpt.get("eval_curve_corrs", []),
     }
     return model, optimizer, ckpt.get("epoch", 1), ckpt.get("ei_weight"), ckpt.get("step0_train_ei_loss"), ckpt.get("epoch_train_mc_loss"), train_curves, val_curves, eval_curves
@@ -2736,7 +2752,10 @@ def get_traj(N_spokes=13, N_time=1, base_res=320, gind=1):
 def GRASPRecon(csmaps, kspace, spokes_per_frame, num_frames, grasp_path):
     traj = get_traj(N_spokes=spokes_per_frame, N_time=num_frames)
     device = sp.Device(0 if torch.cuda.is_available() else -1)
-    kspace = rearrange(kspace, 'c (sp sam) t -> t c sp sam', sam=640).unsqueeze(1).unsqueeze(3).cpu().numpy()
+    if kspace.dim() == 3:
+        kspace = rearrange(kspace, 'c (sp sam) t -> t c sp sam', sam=640).unsqueeze(1).unsqueeze(3).cpu().numpy()
+    elif kspace.dim() == 4:
+        kspace = kspace.unsqueeze(1).unsqueeze(3).cpu().numpy()
     csmaps = rearrange(csmaps, 'b c h w -> c b h w').cpu().numpy()
     R1 = app.HighDimensionalRecon(kspace, csmaps,
                             combine_echo=False,
@@ -3484,100 +3503,182 @@ import time
 from typing import Union, List, Optional
 import re
 import csv
-def target_positions_centered(Z_in: int, S_out: int, device=None, dtype=torch.float32) -> torch.Tensor:
+class ZFSliceDataset(Dataset):
     """
-    Evenly spaced target slice positions covering the same 'z-FOV' as the input partitions.
-    Shapes:
-        return: (S_out,) float tensor of target slice indices in *input-partition units*
-                centered so that 0 corresponds to the mid-partition
-    Example:
-        Z_in=83, S_out=192  -> returns 192 positions spanning [-(Z_in-1)/2, +(Z_in-1)/2]
+    A Dataset that:
+      - Looks for all .h5/.hdf5 files under `root_dir`.
+      - Each file is assumed to contain a dataset at `dataset_key`, with shape (... Z),
+        where Z is the number of slices/partitions.
+      - Can either use a fixed set of slices or randomly sample N slices per volume
+        at the start of each epoch.
+      - Returns each slice as a torch.Tensor.
     """
-    if Z_in <= 0 or S_out <= 0:
-        raise ValueError("Z_in and S_out must be positive.")
-    half = (Z_in - 1) / 2.0
-    return torch.linspace(-half, +half, S_out, device=device, dtype=dtype)
-def _kz_grid_centered(Z_in: int, device=None, dtype=torch.float32) -> torch.Tensor:
-    """
-    Centered, unitless frequency grid along partitions (kz), length Z_in.
-    Shapes:
-        return: (Z_in,) with values ((p - (Z_in-1)/2) / Z_in), i.e., cycles per input-partition
-    This pairs naturally with target_positions_centered so that W = exp(i 2π kz * z_target).
-    """
-    p = torch.arange(Z_in, device=device, dtype=dtype)
-    return (p - (Z_in - 1) / 2.0) / Z_in
-def build_reslice_weights(Z_in: int, S_out: int, device=None) -> torch.Tensor:
-    """
-    Build the complex phase matrix W that maps partitions -> slices in one matmul.
-    Shapes:
-        return: W with shape (S_out, Z_in), complex64
-                W[s, z] = exp(i * 2π * kz[z] * z_targets[s])
-    Where:
-        kz        = centered frequency grid length Z_in
-        z_targets = centered target slice indices length S_out
-    """
-    z_targets = target_positions_centered(Z_in, S_out, device=device)        # (S_out,)
-    kz = _kz_grid_centered(Z_in, device=device)                               # (Z_in,)
-    phase = 2.0 * torch.pi * (z_targets[:, None] * kz[None, :])               # (S_out, Z_in)
-    W = torch.polar(torch.ones_like(phase), phase)                             # (S_out, Z_in) complex
-    return W.to(torch.complex64)
-def collapse_partitions_to_slices(K3d: torch.Tensor, S_out: int) -> torch.Tensor:
-    """
-    Collapse the partition axis into S_out slices by a single complex matrix multiply.
-    Shapes:
-        K3d:            (Z_in, T, C, Sp, Sa) complex64/complex128
-        return Keff:    (S_out, T, C, Sp, Sa) complex64
-    Notes:
-        - O( S_out * Z_in * T*C*Sp*Sa ) but executed as one GEMM
-        - no Python loops; everything is batched and vectorized
-    """
-    if K3d.dim() != 5:
-        raise ValueError(f"expected (Z_in, T, C, Sp, Sa), got {tuple(K3d.shape)}")
-    Z_in, T, C, Sp, Sa = K3d.shape
-    device = K3d.device
-    W = build_reslice_weights(Z_in, S_out, device=device)                      # (S_out, Z_in)
-    K3d_flat = rearrange(K3d.to(torch.complex64), 'z t c sp sa -> z (t c sp sa)')  # (Z_in, M)
-    Y_flat = W @ K3d_flat                                                       # (S_out, M)
-    Keff = rearrange(Y_flat, 's (t c sp sa) -> s t c sp sa', t=T, c=C, sp=Sp, sa=Sa)
-    return Keff
-def resample_csmaps_along_partitions(S3d: torch.Tensor, S_out: int) -> torch.Tensor:
-    """
-    Linearly resample 3D coil maps along the partition axis to the same target positions.
-    Shapes:
-        S3d:                (1, C, H, W, Z_in) complex64/complex128
-        return Seff_stack:  (S_out, 1, C, H, W) complex64
-    Notes:
-        - uses straight linear interpolation in partition index space
-        - if you only have 2D maps, replace this with nearest-slice selection for the chosen target
-    """
-    if S3d.dim() != 5:
-        raise ValueError(f"expected (1, C, H, W, Z_in), got {tuple(S3d.shape)}")
-    _, C, H, W, Z_in = S3d.shape
-    device = S3d.device
-    z_targets = target_positions_centered(Z_in, S_out, device=device)          # (S_out,)
-    z_cont = z_targets + (Z_in - 1) / 2.0                                      # (S_out,)
-    z0 = torch.floor(z_cont).to(torch.long)                                     # (S_out,)
-    z1 = torch.clamp(z0 + 1, max=Z_in - 1)                                      # (S_out,)
-    alpha = (z_cont - z0.to(z_cont.dtype)).view(1, 1, 1, 1, -1)                 # (1,1,1,1,S_out)
-    idx0 = z0.view(1, 1, 1, 1, -1).expand(1, C, H, W, -1)                       # (1,C,H,W,S_out)
-    idx1 = z1.view(1, 1, 1, 1, -1).expand(1, C, H, W, -1)
-    S_lo = torch.take_along_dim(S3d.to(torch.complex64), idx0, dim=-1)          # (1,C,H,W,S_out)
-    S_hi = torch.take_along_dim(S3d.to(torch.complex64), idx1, dim=-1)          # (1,C,H,W,S_out)
-    Seff = (1.0 - alpha) * S_lo + alpha * S_hi                                  # (1,C,H,W,S_out)
-    Seff_stack = rearrange(Seff, 'b c h w s -> s b c h w')                       # (S_out,1,C,H,W)
-    return Seff_stack
-def pack_complex_to_2ch(x: torch.Tensor) -> torch.Tensor:
-    """
-    Pack complex tensor to 2-channel real representation.
-    Shapes:
-        x:       (...,) complex
-        return:  (...,)-> adds a real/imag channel at the front
-                 if x is (T,C,Sp,Sa) -> returns (2,T,C,Sp,Sa)
-                 if x is (H,W,T)     -> returns (2,H,W,T)
-    """
-    xr = x.real
-    xi = x.imag
-    return torch.stack([xr, xi], dim=0)
+    def __init__(
+        self,
+        root_dir,
+        patient_ids,
+        dataset_key="kspace",
+        file_pattern="*.h5",
+        slice_idx: Optional[Union[int, range]] = 41,
+        num_random_slices: Optional[int] = None,  # New parameter for random sampling
+        N_time=8,
+        N_coils=16,
+        spf_aug=False,
+        spokes_per_frame=None,
+        weight_accelerations=False, 
+        initial_spokes_range=[8, 16, 24, 36],
+        cluster="Randi"
+    ):
+        """
+        Args:
+            root_dir (str): Path to the folder containing all HDF5 k-space files.
+            patient_ids (list): List of patient IDs to filter the files.
+            dataset_key (str): The key/path inside each .h5 file to the k-space dataset.
+            file_pattern (str): Glob pattern to match your HDF5 files.
+            slice_idx (int, range, optional): A fixed slice index or range of indices to use.
+                                              This is ignored if num_random_slices is set.
+            num_random_slices (int, optional): If provided, the dataset will randomly sample
+                                               this many slices from each volume at the beginning
+                                               of each epoch.
+        """
+        super().__init__()
+        self.root_dir = root_dir
+        self.dataset_key = dataset_key
+        self.slice_idx = slice_idx
+        self.num_random_slices = num_random_slices
+        self.N_time = N_time
+        self.N_coils = N_coils
+        self.spf_aug = spf_aug
+        self.weight_acc = weight_accelerations
+        self.cluster=cluster
+        all_files = sorted(glob.glob(os.path.join(root_dir, file_pattern)))
+        print("Number of files in root directory: ", len(all_files))
+        if len(all_files) == 0:
+            raise RuntimeError(
+                f"No files found in {root_dir} matching pattern {file_pattern}"
+            )
+        filtered = []
+        for fp in all_files:
+            fname = os.path.basename(fp)
+            if any(pid in fname for pid in patient_ids):
+                filtered.append(fp)
+        self.file_list = filtered
+        if len(self.file_list) == 0:
+            raise RuntimeError("No files matched the provided patient_ids filter.")
+        if self.num_random_slices is not None:
+            print(f"Initializing in random slice sampling mode with N={self.num_random_slices} slices per volume.")
+            self.volume_map = []
+            for fp in self.file_list:
+                with h5py.File(fp, "r") as f:
+                    if self.dataset_key not in f:
+                        raise KeyError(f"Dataset key '{self.dataset_key}' not found in file {fp}")
+                    num_slices = f[self.dataset_key].shape[0]
+                    self.volume_map.append((fp, num_slices))
+            self.resample_slices()
+        else:
+            print(f"Initializing in fixed slice mode with slice_idx={self.slice_idx}.")
+            self.slice_index_map = []
+            for fp in self.file_list:
+                with h5py.File(fp, "r") as f:
+                    if self.dataset_key not in f:
+                        raise KeyError(f"Dataset key '{self.dataset_key}' not found in file {fp}")
+                    ds = f[self.dataset_key]
+                    num_slices = ds.shape[0]
+                slices_to_add = []
+                if isinstance(self.slice_idx, int):
+                    if self.slice_idx < num_slices:
+                        slices_to_add = [self.slice_idx]
+                    else:
+                        print(f"Warning: slice_idx {self.slice_idx} is out of bounds for {fp} "
+                              f"(size {num_slices}). Skipping this file for this slice.")
+                elif isinstance(self.slice_idx, range):
+                    slices_to_add = [s for s in self.slice_idx if s < num_slices]
+                    if len(slices_to_add) < len(self.slice_idx):
+                        print(f"Warning: Some requested slices were out of bounds for {fp}. "
+                              f"Using only the valid slice indices from the provided range.")
+                else:
+                    raise TypeError(f"slice_idx must be an int, range, or None, but got {type(self.slice_idx)}")
+                for z in slices_to_add:
+                    self.slice_index_map.append((fp, z))
+        print(f"Dataset initialized with {len(self.slice_index_map)} total slice examples.")
+        self.spokes_per_frame = spokes_per_frame
+        self.spokes_range = initial_spokes_range
+        self.update_spokes_weights()
+    def update_spokes_weights(self):
+        if self.weight_acc:
+            self.spf_weights = [1.0 / spf for spf in self.spokes_range]
+        else:
+            self.spf_weights = [1.0 for _ in self.spokes_range]
+    def resample_slices(self):
+        """
+        Resamples N unique slices from each volume. This should be called at the
+        beginning of each training epoch to ensure the model sees different data.
+        """
+        if self.num_random_slices is None:
+            return
+        self.slice_index_map = []
+        for file_path, num_slices in self.volume_map:
+            if num_slices >= self.num_random_slices:
+                selected_slices = random.sample(range(num_slices), self.num_random_slices)
+            else:
+                print(f"Warning: Volume {os.path.basename(file_path)} has only {num_slices} slices, "
+                      f"which is less than the requested {self.num_random_slices}. Using all available slices.")
+                selected_slices = list(range(num_slices))
+            for z in selected_slices:
+                self.slice_index_map.append((file_path, z))
+    def load_dynamic_img(self, patient_id, slice):
+        H = W = 320
+        data = np.empty((2, self.N_time, H, W), dtype=np.float32)
+        dirname = os.path.dirname(self.root_dir)
+        for t in range(self.N_time):
+            if self.cluster == "Randi":
+                img_path = os.path.join(dirname, f'{patient_id}/slice_{slice:03d}_frame_{t:03d}.nii')
+            elif self.cluster == "DSI":
+                img_path = os.path.join(dirname, f'{patient_id}/slice_{slice:03d}_frame_{t:03d}.nii')
+            else:
+                raise ValueError("Undefined cluster name.")
+            img = nib.load(img_path)
+            img_data = img.get_fdata()
+            if img_data.shape != (2, H, W):
+                raise ValueError(f"{img_path} has shape {img_data.shape}; expected (2, {H}, {W})")
+            data[:, t] = img_data.astype(np.float32)
+        return torch.from_numpy(data)
+    def load_csmaps(self, patient_id, slice):
+        ground_truth_dir = os.path.join(os.path.dirname(self.root_dir), 'cs_maps')
+        csmap_path = os.path.join(ground_truth_dir, patient_id + '_cs_maps', f'cs_map_slice_{slice:03d}.npy')
+        csmap = np.load(csmap_path)
+        return csmap.squeeze()
+    def __len__(self):
+        return len(self.slice_index_map)
+    def __getitem__(self, idx):
+        file_path, current_slice_idx = self.slice_index_map[idx]
+        current_slice_idx = int(current_slice_idx)
+        patient_id = file_path.split('/')[-1].strip('.h5')
+        csmap = self.load_csmaps(patient_id, current_slice_idx)
+        with h5py.File(file_path, "r") as f:
+            kspace_slice = torch.tensor(f[self.dataset_key][current_slice_idx])
+        if self.spf_aug:
+            print("setting random spokes per frame...")
+            spokes_per_frame = random.choices(self.spokes_range, self.spf_weights, k=1)[0]
+        else:
+            spokes_per_frame = self.spokes_per_frame
+            print(f"training with fixed spokes per frame ({spokes_per_frame})")
+        N_coils, N_spokes, N_samples = kspace_slice.shape
+        N_time = N_spokes // spokes_per_frame
+        N_spokes_prep = N_time * spokes_per_frame
+        ksp_redu = kspace_slice[:, :N_spokes_prep, :] # (16, 288, 640)
+        ksp_prep = np.swapaxes(ksp_redu, 0, 1) # (288, 16, 640)
+        ksp_prep_shape = ksp_prep.shape
+        ksp_prep = np.reshape(ksp_prep, [N_time, spokes_per_frame] + list(ksp_prep_shape[1:]))
+        ksp_prep = rearrange(ksp_prep, 't sp c sam -> t c sp sam')
+        real_part = ksp_prep.real
+        imag_part = ksp_prep.imag
+        kspace_final = torch.stack([real_part, imag_part], dim=0).float()
+        kspace_final = torch.flip(kspace_final, dims=[-1])
+        csmap = torch.from_numpy(csmap)
+        csmap_tensor = torch.rot90(csmap, k=2, dims=[-2, -1])
+        csmap = csmap_tensor.numpy()
+        return kspace_final, csmap, N_samples, spokes_per_frame, N_time
 class SliceDataset(Dataset):
     """
     A Dataset that:
@@ -3627,8 +3728,6 @@ class SliceDataset(Dataset):
         self.N_coils = N_coils
         self.spf_aug = spf_aug
         self.weight_acc = weight_accelerations
-        self.interpolate_kspace = interpolate_kspace
-        self.slices_to_interpolate = slices_to_interpolate
         self.cluster=cluster
         all_files = sorted(glob.glob(os.path.join(root_dir, file_pattern)))
         print("Number of files in root directory: ", len(all_files))
@@ -3726,46 +3825,16 @@ class SliceDataset(Dataset):
         csmap_path = os.path.join(ground_truth_dir, patient_id + '_cs_maps', f'cs_map_slice_{slice:03d}.npy')
         csmap = np.load(csmap_path)
         return csmap.squeeze()
-    def load_all_csmaps(self, patient_id):
-        """
-        Loads all csmap slices for a given patient and stacks them into a single array.
-        Args:
-            patient_id (str): The ID of the patient.
-        Returns:
-            numpy.ndarray: A NumPy array containing all the stacked csmap slices
-                        with the shape (1, C, H, W, Z_in).
-        """
-        ground_truth_dir = os.path.join(os.path.dirname(self.root_dir), 'cs_maps')
-        patient_csmap_dir = os.path.join(ground_truth_dir, patient_id + '_cs_maps')
-        slice_paths = sorted(glob.glob(os.path.join(patient_csmap_dir, 'cs_map_slice_*.npy')))
-        if not slice_paths:
-            raise FileNotFoundError(f"No csmap slices found for patient {patient_id} in {patient_csmap_dir}")
-        all_slices = [np.load(path) for path in slice_paths]
-        stacked_csmaps = np.stack(all_slices, axis=-1)
-        print("stacked_csmaps: ", stacked_csmaps.shape)
-        final_csmaps = rearrange(stacked_csmaps, 'c b h w z -> b c h w z')
-        print("final_csmaps: ", final_csmaps.shape)
-        return final_csmaps
     def __len__(self):
         return len(self.slice_index_map)
     def __getitem__(self, idx):
         file_path, current_slice_idx = self.slice_index_map[idx]
         current_slice_idx = int(current_slice_idx)
         patient_id = file_path.split('/')[-1].strip('.h5')
-        if self.interpolate_kspace:
-            csmap_stack = self.load_all_csmaps(patient_id)
-            Seff_stack = resample_csmaps_along_partitions(torch.tensor(csmap_stack), S_out=self.slices_to_interpolate)        # (192, 1, C, H, W)
-            csmap = Seff_stack[current_slice_idx].squeeze()                                            # (1, C, H, W)
-        else:
-            csmap = self.load_csmaps(patient_id, current_slice_idx)
+        csmap = self.load_csmaps(patient_id, current_slice_idx)
         with h5py.File(file_path, "r") as f:
-            if self.interpolate_kspace:
-                ds = torch.tensor(f[self.dataset_key][:])
-                print("shape before interpolation: ", ds.shape)
-                Keff_stack = collapse_partitions_to_slices(ds, S_out=self.slices_to_interpolate)           # (192, T, C, Sp, Sa)
-                kspace_slice = Keff_stack[current_slice_idx]                 # (2, T, C, Sp, Sa)
-            else:
-                kspace_slice = torch.tensor(f[self.dataset_key][current_slice_idx])
+            kspace_slice = torch.tensor(f[self.dataset_key][current_slice_idx])
+        print("loaded kspace shape: ", kspace_slice.shape) # torch.Size([8, 16, 36, 640])
         if self.spf_aug or self.spokes_per_frame:
             total_spokes = kspace_slice.shape[0] * kspace_slice.shape[2]
             N_samples = kspace_slice.shape[-1]
@@ -3788,8 +3857,7 @@ class SliceDataset(Dataset):
         imag_part = kspace_slice.imag
         kspace_final = torch.stack([real_part, imag_part], dim=0).float()
         kspace_final = torch.flip(kspace_final, dims=[-1])
-        if self.interpolate_kspace == False:
-            csmap = torch.from_numpy(csmap)
+        csmap = torch.from_numpy(csmap)
         csmap_tensor = torch.rot90(csmap, k=2, dims=[-2, -1])
         csmap = csmap_tensor.numpy()
         return kspace_final, csmap, N_samples, spokes_per_frame, N_time

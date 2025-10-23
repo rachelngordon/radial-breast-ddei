@@ -18,7 +18,7 @@ data:
   train_spokes_per_frame: 8
   slices: 192
   slices_to_eval: 1
-  eval_frequency: 5
+  eval_frequency: 1
 
 # Experiment settings
 experiment:
@@ -89,7 +89,7 @@ model:
 
 # Training settings
 training:
-  epochs: 1
+  epochs: 2
   save_interval: 1
   plot_interval: 20
   device: "cuda"  # or "cpu"

@@ -2,11 +2,11 @@
 
 # Parameters
 #SBATCH --cpus-per-task=4
-#SBATCH --error=logs/ei_diffeo_no_encoding.err
-#SBATCH --output=logs/ei_diffeo_no_encoding.out
+#SBATCH --error=logs/test_debug.err
+#SBATCH --output=logs/test_debug.out
 #SBATCH --exclude=''
 #SBATCH --gpus-per-node=1
-#SBATCH --job-name=ei_diffeo_no_encoding
+#SBATCH --job-name=test_debug
 #SBATCH --mem-per-gpu=50000
 #SBATCH --nodes=1
 #SBATCH --ntasks-per-node=1
@@ -21,4 +21,4 @@ source /gpfs/data/karczmar-lab/workspaces/rachelgordon/micromamba/etc/profile.d/
 micromamba activate recon_mri
 
 # Run the training script with srun
-python3 train.py --config configs/config_ei_diffeo_no_encoding.yaml --exp_name ei_diffeo_no_encoding --from_checkpoint True
+python3 train_zf.py --config configs/config_mc_zf_debug.yaml --exp_name debug_plots

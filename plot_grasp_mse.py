@@ -197,18 +197,26 @@ for eval_config in MAIN_EVALUATION_PLAN:
 
 N_full = 320 * math.pi / 2
 
-accelerations = {}
-for spf in spf_grasp_mse.keys():
+# temporal resolution = frames/second,  150 seconds / timeframes
 
-    acceleration = N_full / int(spf)
-    accelerations[acceleration] = spf_grasp_mse[spf]
+# accelerations = {}
+# for spf in spf_grasp_mse.keys():
+
+#     acceleration = N_full / int(spf)
+#     accelerations[acceleration] = spf_grasp_mse[spf]
+
+temp_resolutions = {}
+for spf in spf_grasp_mse.keys():
+    num_timeframes = round(288 / int(spf), 0)
+    temp_res = round(150 / num_timeframes, 0)
+    temp_resolutions[temp_res] = spf_grasp_mse[spf]
 
 
 # Create the line plot
-sns.lineplot(x=list(accelerations.keys()), y=list(accelerations.values()), marker='o')
+sns.lineplot(x=list(temp_resolutions.keys()), y=list(temp_resolutions.values()), marker='o')
 
-plt.title("MSE of GRASP Reconstruction vs. Acceleration Factor", fontsize=16)
-plt.xlabel("Acceleration Factor", fontsize=14)
+plt.title("MSE of GRASP Reconstruction vs. Temporal Resolution", fontsize=16)
+plt.xlabel("Temporal Resolution (seconds/frame)", fontsize=14)
 plt.ylabel("MSE", fontsize=14)
 
 plt.xticks(fontsize=12)

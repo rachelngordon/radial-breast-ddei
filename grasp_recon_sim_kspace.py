@@ -12,6 +12,8 @@ from sigpy.mri import app
 from einops import rearrange
 import matplotlib.pyplot as plt
 import argparse
+from utils import to_torch_complex, prep_nufft
+from radial_lsfp import MCNUFFT
 
 def get_traj(spokes_per_frame, csmaps=False, N_spokes=13, N_time=1, base_res=320, gind=1):
 
@@ -70,46 +72,53 @@ parser = argparse.ArgumentParser()
 parser.add_argument("--spokes_per_frame", type=int, required=True)
 args = parser.parse_args()
 
-# %% read in k-space data
-patient_id = '001'
-IN_DIR = f'/ess/scratch/scratch1/rachelgordon/fastMRI_breast_data/full_kspace/fastMRI_breast_{patient_id}_2.h5'
+# load DRO
+dro_id = 30
+sample_dir = f'/ess/scratch/scratch1/rachelgordon/dro_dataset/dro_144frames/sample_{dro_id:03d}_sub{dro_id}'
+
+csmaps = np.load(os.path.join(sample_dir, 'csmaps.npy'))
+dro = np.load(os.path.join(sample_dir, 'dro_ground_truth.npz'))
+
+ground_truth_complex = dro['ground_truth_images']
+ground_truth_torch = torch.from_numpy(ground_truth_complex).permute(2, 0, 1) # T, H, W
+ground_truth_torch = torch.stack([ground_truth_torch.real, ground_truth_torch.imag], dim=0)
+
+# CSMaps: (H, W, C) -> (1, C, H, W) [batch, coils, h, w]
+csmaps_torch = torch.from_numpy(csmaps).permute(2, 0, 1).unsqueeze(0)
+
+# simulate k-space
+device = torch.device("cuda")
+csmap = csmaps_torch.to(device)
+ground_truth = ground_truth_torch.to(device).unsqueeze(0) # Shape: (1, 2, T, H, W)
+
+ground_truth_for_physics = rearrange(to_torch_complex(ground_truth), 'b t h w -> b h w t')
+
+# SIMULATE KSPACE
+# define physics object for evaluation
+N_samples = 640
 spokes_per_frame = args.spokes_per_frame
-center_partition = 31
-images_per_slab = 192
+N_time_eval = int(288 / args.spokes_per_frame)
+eval_ktraj, eval_dcomp, eval_nufft_ob, eval_adjnufft_ob = prep_nufft(N_samples, spokes_per_frame, N_time_eval)
+eval_ktraj = eval_ktraj.to(device)
+eval_dcomp = eval_dcomp.to(device)
+eval_nufft_ob = eval_nufft_ob.to(device)
+eval_adjnufft_ob = eval_adjnufft_ob.to(device)
+
+eval_physics = MCNUFFT(eval_nufft_ob, eval_adjnufft_ob, eval_ktraj, eval_dcomp)
+
+ksp_f = eval_physics(False, ground_truth_for_physics, csmap)
+ksp_f = rearrange(ksp_f, 'c (sp sam) t -> (sp t) sam c', sp=spokes_per_frame).unsqueeze(-1).cpu().numpy()
+print("kspace shape: ", ksp_f.shape)
+
+
 
 device = sp.Device(0 if torch.cuda.is_available() else -1)
 
-f = h5py.File(IN_DIR, 'r')
-ksp_f = f['kspace'][:].T
-ksp_f = np.transpose(ksp_f, (4, 3, 2, 1, 0))
-print('> kspace shape ', ksp_f.shape)
-f.close()
 
 
-print("original k-space type: ", ksp_f.dtype)
-ksp = ksp_f[0] + 1j * ksp_f[1]
-print("k-space type after real/imag combined: ", ksp_f.dtype)
-ksp = np.transpose(ksp, (3, 2, 0, 1))
+ksp = np.transpose(ksp_f, (3, 2, 0, 1))
 
-
-# zero-fill the slice dimension if necessaary
-partitions = ksp.shape[0]
-
-
-if images_per_slab > partitions + 1:
-    shift = int(images_per_slab / 2 - center_partition)
-else:
-    shift = 0
-    print("slices less than or equal to partitions + 1.")
-
-ksp_zf = np.zeros_like(ksp, shape=[images_per_slab] + list(ksp.shape[1:]))
-ksp_zf[shift : shift + partitions, ...] = ksp
-
-
-ksp_zf = sp.fft(ksp_zf, axes=(0,))
-
-
-N_slices, N_coils, N_spokes, N_samples = ksp_zf.shape
+N_slices, N_coils, N_spokes, N_samples = ksp.shape
 
 base_res = N_samples // 2
 
@@ -117,7 +126,7 @@ N_time = N_spokes // spokes_per_frame
 
 N_spokes_prep = N_time * spokes_per_frame
 
-ksp_redu = ksp_zf[:, :, :N_spokes_prep, :]
+ksp_redu = ksp[:, :, :N_spokes_prep, :]
 print('  ksp_redu shape: ', ksp_redu.shape)
 
 # %% retrospecitvely split spokes
@@ -142,24 +151,15 @@ print('  traj shape: ', traj.shape)
 
 # %% slice-by-slice recon
 
-slice_loop = range(N_slices)
-
-acq_slices = []
-# num_slices = 97
-# slice_count = 0
-# for s in slice_loop:
-s = 95
-print('>>> slice ', str(s).zfill(3))
-
 # coil sensitivity maps
 print('> compute coil sensitivity maps')
-C = get_coil(ksp_zf[s], spokes_per_frame, device=device)
+C = get_coil(ksp[0], spokes_per_frame, device=device)
 C = C[:, None, :, :]
 print('  coil shape: ', C.shape)
 
 
 # recon
-k1 = ksp_prep[s]
+k1 = ksp_prep[0]
 print("k1 shape: ", k1.shape)
 print("k1 dtype: ", k1.dtype)
 
@@ -177,14 +177,13 @@ R1 = app.HighDimensionalRecon(k1, C,
                 show_pbar=False,
                 verbose=False).run()
 print("R1 dtype: ", R1.dtype)
-acq_slices.append(R1)
 
     # slice_count += 1
 
     # if slice_count >= num_slices:
     #     break
 
-acq_slices = sp.to_device(acq_slices)
+acq_slices = sp.to_device(R1)
 
 acq_slices = cp.array(acq_slices)
 acq_slices = cp.asnumpy(acq_slices)
@@ -207,4 +206,4 @@ else:
     plt.imshow(np.abs(acq_slices), cmap='gray')
 
 plt.axis("off")
-plt.savefig(f'/gpfs/data/karczmar-lab/workspaces/rachelgordon/breastMRI-recon/ddei/grasp_recon_{spokes_per_frame}spf_fastMRI_{patient_id}_slice{s}.png')
+plt.savefig(f'/gpfs/data/karczmar-lab/workspaces/rachelgordon/breastMRI-recon/ddei/sim_grasp_recon_{spokes_per_frame}spf_dro_{dro_id}.png')

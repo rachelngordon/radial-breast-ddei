@@ -75,10 +75,10 @@ model:
       metric: "MAE"
     ei_loss:
       metric: "MSE"
-      temporal_transform: "warp_subsample"
+      temporal_transform: "none"
       spatial_transform: "all"
       rotate_range: 20
-      weight: 1
+      weight: 40000
       warmup: 25
       duration: 200
       subsample_ratio_min: 0.7

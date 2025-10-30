@@ -1,6 +1,6 @@
 # Directories for input data
 data:
-  root_dir: "/ess/scratch/scratch1/rachelgordon/non_zf_data_83_slices/zf_kspace"
+  root_dir: "/ess/scratch/scratch1/rachelgordon/zf_data_192_slices/zf_kspace"
   dataset_key: "kspace"
   split_file: "/gpfs/data/karczmar-lab/workspaces/rachelgordon/breastMRI-recon/ddei/data/data_split.json"
   val_split_ratio: 0.2
@@ -16,7 +16,7 @@ data:
   weight_accelerations: false
   fpg: 16
   train_spokes_per_frame: 8
-  slices: 83
+  slices: 192
   slices_to_eval: 1
   eval_frequency: 5
 
@@ -75,10 +75,10 @@ model:
       metric: "MAE"
     ei_loss:
       metric: "MSE"
-      temporal_transform: "all"
+      temporal_transform: "none"
       spatial_transform: "all"
       rotate_range: 20
-      weight: 1
+      weight: 60000
       warmup: 25
       duration: 200
       subsample_ratio_min: 0.7

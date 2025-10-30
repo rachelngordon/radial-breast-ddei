@@ -77,8 +77,8 @@ model:
       metric: "MSE"
       temporal_transform: "none"
       spatial_transform: "all"
-      rotate_range: 10
-      weight: 1
+      rotate_range: 20
+      weight: 80000
       warmup: 25
       duration: 200
       subsample_ratio_min: 0.7

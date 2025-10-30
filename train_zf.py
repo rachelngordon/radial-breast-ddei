@@ -160,7 +160,7 @@ def main():
     adj_loss_weight = config["model"]["losses"]["adj_loss"]["weight"]
 
     use_ei_loss = config["model"]["losses"]["use_ei_loss"]
-    target_weight = config["model"]["losses"]["ei_loss"]["weight"]
+    target_w_ei = config["model"]["losses"]["ei_loss"]["weight"]
     warmup = config["model"]["losses"]["ei_loss"]["warmup"]
     duration = config["model"]["losses"]["ei_loss"]["duration"]
 
@@ -378,7 +378,7 @@ def main():
         model, optimizer, start_epoch, target_w_ei, step0_train_ei_loss, epoch_train_mc_loss, train_curves, val_curves, eval_curves = load_checkpoint(model, optimizer, checkpoint_file)
     else:
         start_epoch = 1
-        target_w_ei = 0.0
+        # target_w_ei = 0.0
 
 
     # select metric for loss functions
@@ -821,24 +821,24 @@ def main():
                                 pin_memory=True,
                             )
 
-            if use_ei_loss:
+            # if use_ei_loss:
 
-                # --- Check if it's the transition epoch ---
-                if epoch < warmup + 1:
-                    target_w_ei = 0.0
-                elif epoch == warmup + 1:
-                    # Get the last known MC loss value from the previous epoch
-                    mc_loss_at_transition = epoch_train_mc_loss
+                # # --- Check if it's the transition epoch ---
+                # if epoch < warmup + 1:
+                #     target_w_ei = 0.0
+                # elif epoch == warmup + 1:
+                #     # Get the last known MC loss value from the previous epoch
+                #     mc_loss_at_transition = epoch_train_mc_loss
                     
-                    print(f"Transitioning at Epoch {epoch}. MC Loss: {mc_loss_at_transition:.4e}")
+                #     print(f"Transitioning at Epoch {epoch}. MC Loss: {mc_loss_at_transition:.4e}")
                     
-                    # Calculate the final target weight ONCE
-                    if step0_train_ei_loss > 0:
-                        target_w_ei = mc_loss_at_transition / step0_train_ei_loss
-                    else:
-                        target_w_ei = 0.0 # Prevent division by zero
+                #     # Calculate the final target weight ONCE
+                #     if step0_train_ei_loss > 0:
+                #         target_w_ei = mc_loss_at_transition / step0_train_ei_loss
+                #     else:
+                #         target_w_ei = 0.0 # Prevent division by zero
                         
-                    print(f"Dynamically calculated target EI weight: {target_w_ei:.4f}")
+                #     print(f"Dynamically calculated target EI weight: {target_w_ei:.4f}")
 
 
             if config['training']['multigpu']:

@@ -110,7 +110,7 @@ def main():
     mc_loss_weight = config["model"]["losses"]["mc_loss"]["weight"]
     adj_loss_weight = config["model"]["losses"]["adj_loss"]["weight"]
     use_ei_loss = config["model"]["losses"]["use_ei_loss"]
-    target_weight = config["model"]["losses"]["ei_loss"]["weight"]
+    target_w_ei = config["model"]["losses"]["ei_loss"]["weight"]
     warmup = config["model"]["losses"]["ei_loss"]["warmup"]
     duration = config["model"]["losses"]["ei_loss"]["duration"]
     save_interval = config["training"]["save_interval"]
@@ -271,7 +271,6 @@ def main():
         model, optimizer, start_epoch, target_w_ei, step0_train_ei_loss, epoch_train_mc_loss, train_curves, val_curves, eval_curves = load_checkpoint(model, optimizer, checkpoint_file)
     else:
         start_epoch = 1
-        target_w_ei = 0.0
     if config['model']['losses']['mc_loss']['metric'] == "MSE":
         mc_loss_fn = MCLoss(model_type=model_type)
     elif config['model']['losses']['mc_loss']['metric'] == "MAE":
@@ -592,17 +591,6 @@ def main():
                                 num_workers=config["dataloader"]["num_workers"],
                                 pin_memory=True,
                             )
-            if use_ei_loss:
-                if epoch < warmup + 1:
-                    target_w_ei = 0.0
-                elif epoch == warmup + 1:
-                    mc_loss_at_transition = epoch_train_mc_loss
-                    print(f"Transitioning at Epoch {epoch}. MC Loss: {mc_loss_at_transition:.4e}")
-                    if step0_train_ei_loss > 0:
-                        target_w_ei = mc_loss_at_transition / step0_train_ei_loss
-                    else:
-                        target_w_ei = 0.0 # Prevent division by zero
-                    print(f"Dynamically calculated target EI weight: {target_w_ei:.4f}")
             if config['training']['multigpu']:
                 train_loader.sampler.set_epoch(epoch)
             for measured_kspace, csmap, N_samples, N_spokes, N_time in train_loader_tqdm:  # measured_kspace shape: (B, C, I, S, T)

@@ -48,16 +48,16 @@ class Trainer(submitit.helpers.Checkpointable):
 
 def main():
     # --- Executor Configuration ---
-    job_name = "zero_pad_ei_spatial_curriculum"
-    config_path = 'configs/config_ei_spatial_curriculum.yaml'
-    num_gpus = 4
+    job_name = "ei_spatial_film02"
+    config_path = 'configs/config_ei_spatial_film02.yaml'
+    num_gpus = 2
 
     log_dir = f"submitit_logs/{job_name}"
     os.makedirs(log_dir, exist_ok=True)
 
     executor = submitit.AutoExecutor(folder=log_dir)
 
-    # --- SLURM Parameter Configuration ---
+    # --- SLURM Parameter Configuration --
     executor.update_parameters(
         slurm_partition="gpuq",
         slurm_job_name=job_name,

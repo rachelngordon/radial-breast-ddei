@@ -1070,3 +1070,140 @@ def eval_sample(kspace, csmap, ground_truth, x_recon, physics, mask, grasp_img, 
 
 
 
+
+
+def eval_sample_no_grasp(kspace, csmap, ground_truth, x_recon, physics, mask, acceleration, spokes_per_frame, output_dir, label, device):
+
+    acceleration = round(acceleration.item(), 1)
+
+    # ground_truth = ground_truth.to(device) # Shape: (1, 2, T, H, W)
+    # grasp_recon = grasp_recon.to(device) # Shape: (1, 2, H, T, W)
+
+    # ==========================================================
+    # EVALUATE DATA CONSISTENCY
+    # ==========================================================
+
+
+    # Forward Simulation
+    x_recon_complex = to_torch_complex(x_recon).squeeze()
+    kspace = kspace.squeeze()
+
+
+    recon_kspace = physics(False, x_recon_complex, csmap)
+
+
+    # Compute MSE
+    dc_mse, dc_mae = calc_dc(recon_kspace, kspace, device)
+
+
+    # ==========================================================
+    # EVALUATE SPATIAL IMAGE QUALITY
+    # ==========================================================
+
+    # calculate the single optimal scaling factor 'c'
+    x_recon_np = x_recon.cpu().numpy()
+    ground_truth_np = ground_truth.cpu().numpy()
+
+
+    c = np.dot(x_recon_np.flatten(), ground_truth_np.flatten()) / np.dot(x_recon_np.flatten(), x_recon_np.flatten())
+
+    recon_complex_scaled = torch.tensor(c * x_recon_np, device=device)
+
+
+    # Convert complex images to magnitude
+    recon_mag_scaled = torch.sqrt(recon_complex_scaled[:, 0, ...]**2 + recon_complex_scaled[:, 1, ...]**2)
+    gt_mag = torch.sqrt(ground_truth[:, 0, ...]**2 + ground_truth[:, 1, ...]**2)
+
+    # add batch dimension (input shape: B, C, T, H, W)
+    recon_mag_scaled = rearrange(recon_mag_scaled, 'c h w t -> c t h w').unsqueeze(0)
+    gt_mag = rearrange(gt_mag, 'c t h w -> c t h w').unsqueeze(0)
+
+    # calculate data range from ground truth
+    # data_range = gt_mag.max() - gt_mag.min()
+    min_val = torch.min(gt_mag).item()
+    max_val = torch.max(gt_mag).item()
+    data_range = (min_val, max_val)
+
+    filename=os.path.join(output_dir, f"grasp_metric_inputs.png")
+    ssim, psnr, mse, lpips = calc_image_metrics(recon_mag_scaled.contiguous(), gt_mag.contiguous(), data_range, device, filename)
+
+
+    # ssims = []
+    # psnrs = []
+    # mses = []
+
+    # for t in range(recon_mag_scaled.shape[-1]): # Iterate over time frames
+
+
+    #     frame_recon = recon_mag_scaled[..., t]
+    #     frame_gt = gt_mag[:, t, :, :]
+
+    #     # calculate data range from ground truth
+    #     data_range = frame_gt.max() - frame_gt.min()
+
+
+    #     # Add channel dimension for torchmetrics: (B, H, W) -> (B, 1, H, W)
+    #     frame_recon = frame_recon.unsqueeze(1)
+    #     frame_gt = frame_gt.unsqueeze(1)
+        
+    #     # Calculate Spatial Image Quality Metrics
+    #     filename=os.path.join(output_dir, f"recon_metric_inputs.png")
+    #     ssim, psnr, mse = calc_image_metrics(frame_recon, frame_gt, data_range, device, filename)
+    #     ssims.append(ssim)
+    #     psnrs.append(psnr)
+    #     mses.append(mse)
+
+
+    # ==========================================================
+    # VISUALIZATION
+    # ==========================================================
+
+
+    x_recon_complex_np = to_torch_complex(recon_complex_scaled).squeeze().cpu().numpy()
+
+    gt_squeezed = ground_truth.squeeze()  # Shape: (C, T, H, W) -> (2, 22, 320, 320)
+    gt_rearranged = rearrange(gt_squeezed, 'c t h w -> t c h w') # Shape: (22, 320, 320, 2)
+    gt_complex_tensor = to_torch_complex(gt_rearranged) # Shape: (22, 320, 320)
+    gt_final_tensor = rearrange(gt_complex_tensor, 't h w -> h w t') # Shape: (320, 320, 22)
+    gt_complex_np = gt_final_tensor.cpu().numpy()
+
+    recon_mag_np = np.abs(x_recon_complex_np)
+    gt_mag_np = np.abs(gt_complex_np)
+    
+    masks_np = {key: val.cpu().numpy().squeeze().astype(bool) for key, val in mask.items()}
+
+    num_frames = recon_mag_np.shape[2]
+
+    aif_time_points = np.linspace(0, 150, num_frames)
+
+    # ssim = torchmetrics.image.StructuralSimilarityIndexMeasure(data_range=data_range).to(device)
+    # recon_mag_scaled = rearrange(recon_mag_scaled.squeeze(), 't h w -> h w t')
+    # test_ssim = ssim(recon_mag_scaled.unsqueeze(0), torch.tensor(recon_mag_np, device=recon_mag_scaled.device).unsqueeze(0))
+    # print(f"---- Debugging step: SSIM between ssim input and plot input: {test_ssim}")
+
+    
+
+    print("\nGenerating diagnostic plots...")
+    if mask['malignant'].any() and label is not None:
+        
+        # --- Plot Spatial Quality at a Peak Enhancement Frame ---
+        # Find a frame around peak enhancement (e.g., 1/3 of the way through)
+        peak_frame = num_frames // 3
+        data_range = gt_mag_np[:, :, peak_frame].max() - gt_mag_np[:, :, peak_frame].min()
+
+        plot_single_temporal_curve(
+            img_stack=recon_mag_np,
+            masks=masks_np,
+            time_points=aif_time_points,
+            num_frames=num_frames,
+            filename=os.path.join(output_dir, f"recon_temporal_curve_{label}.png"),
+            acceleration=acceleration,
+            spokes_per_frame=spokes_per_frame,
+        )
+
+        print("Diagnostic plots saved.")
+
+
+    
+    
+    return ssim, psnr, mse, lpips, dc_mse, dc_mae

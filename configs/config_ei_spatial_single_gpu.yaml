@@ -57,8 +57,8 @@ model:
   lambda_spatial_S: 0.05
   gamma: 0.5
   lambda_step: 0.1
-  encode_acceleration: false
-  encode_time_index: false
+  encode_acceleration: true
+  encode_time_index: true
   optimizer:
     name: "Adam"
     lr: 0.0005
@@ -78,7 +78,7 @@ model:
       temporal_transform: "none"
       spatial_transform: "all"
       rotate_range: 20
-      weight: 60000
+      weight: 40000
       warmup: 25
       duration: 200
       subsample_ratio_min: 0.7
@@ -94,7 +94,7 @@ training:
   save_interval: 1
   plot_interval: 20
   device: "cuda"  # or "cpu"
-  multigpu: True
+  multigpu: False
   curriculum_learning:
     enabled: False
     phases:
@@ -117,8 +117,8 @@ training:
 evaluation:
   num_samples: 15
   simulated_dataset_path: "/ess/scratch/scratch1/rachelgordon/dro_dataset"
-  chunk_size: 24
-  chunk_overlap: 12
+  chunk_size: 16
+  chunk_overlap: 8
 
 debugging:
   calc_step_0: True

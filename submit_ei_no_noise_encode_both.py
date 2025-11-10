@@ -48,8 +48,8 @@ class Trainer(submitit.helpers.Checkpointable):
 
 def main():
     # --- Executor Configuration ---
-    job_name = "zero_pad_ei_spatial_w2e4"
-    config_path = 'configs/config_ei_spatial_w2e4.yaml'
+    job_name = "ei_no_noise_encode_both"
+    config_path = 'configs/config_ei_no_noise_encode_both.yaml'
     num_gpus = 4
 
     log_dir = f"submitit_logs/{job_name}"
@@ -57,7 +57,7 @@ def main():
 
     executor = submitit.AutoExecutor(folder=log_dir)
 
-    # --- SLURM Parameter Configuration ---
+    # --- SLURM Parameter Configuration --
     executor.update_parameters(
         slurm_partition="gpuq",
         slurm_job_name=job_name,

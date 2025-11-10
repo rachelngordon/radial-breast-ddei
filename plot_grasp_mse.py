@@ -212,16 +212,34 @@ for spf in spf_grasp_mse.keys():
     temp_resolutions[temp_res] = spf_grasp_mse[spf]
 
 
+# # Create the line plot
+# sns.lineplot(x=list(temp_resolutions.keys()), y=list(temp_resolutions.values()), marker='o')
+
+# plt.title("MSE of GRASP Reconstruction vs. Temporal Resolution", fontsize=16)
+# plt.xlabel("Temporal Resolution (seconds/frame)", fontsize=14)
+# plt.ylabel("MSE", fontsize=14)
+
+# plt.xticks(fontsize=12)
+# plt.yticks(fontsize=12)
+
+# plt.grid(True) # Add a grid for better readability
+
+# plt.savefig('grasp_mse_spf.png')
+
+
+plt.figure(figsize=(8, 4))  # width, height in inches — reduce height here
+
 # Create the line plot
 sns.lineplot(x=list(temp_resolutions.keys()), y=list(temp_resolutions.values()), marker='o')
 
-plt.title("MSE of GRASP Reconstruction vs. Temporal Resolution", fontsize=16)
-plt.xlabel("Temporal Resolution (seconds/frame)", fontsize=14)
-plt.ylabel("MSE", fontsize=14)
+plt.title("MSE of GRASP Reconstruction vs. Temporal Resolution", fontsize=18)
+plt.xlabel("Temporal Resolution (seconds/frame)", fontsize=16)
+plt.ylabel("MSE", fontsize=16)
 
-plt.xticks(fontsize=12)
-plt.yticks(fontsize=12)
+plt.xticks(fontsize=14)
+plt.yticks(fontsize=14)
 
-plt.grid(True) # Add a grid for better readability
+plt.grid(True)
 
-plt.savefig('grasp_mse_spf.png')
+plt.tight_layout()  # Ensures labels fit inside the frame
+plt.savefig('grasp_mse_spf.png', dpi=300)

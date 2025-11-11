@@ -508,8 +508,11 @@ def main():
             val_ei_losses.append(step0_val_ei_loss)
             step0_val_adj_loss = initial_val_adj_loss / len(val_dro_loader)
             val_adj_losses.append(step0_val_adj_loss)
-            print(f"Evaluating on raw k-space with {num_slices_to_eval} slices...")
-            raw_dc_mse, raw_dc_mae, raw_grasp_dc_mse, raw_grasp_dc_mae, raw_dc_std_mse, raw_dc_std_mae, raw_dc_std_grasp_mse, raw_dc_std_grasp_mae = eval_raw_kspace(num_slices_to_eval, val_patient_ids, data_dir, model, N_spokes_eval, N_slices, N_time_eval, eval_chunk_size, eval_chunk_overlap, H, W, eval_ktraj, eval_dcomp, eval_nufft_ob, eval_adjnufft_ob, eval_physics, acceleration_encoding, start_timepoint_index, device, output_dir, label="step0")
+            if config.get("evaluation", {}).get("raw_kspace_eval", False):
+                print(f"Evaluating on raw k-space with {num_slices_to_eval} slices...")
+                raw_dc_mse, raw_dc_mae, raw_grasp_dc_mse, raw_grasp_dc_mae, raw_dc_std_mse, raw_dc_std_mae, raw_dc_std_grasp_mse, raw_dc_std_grasp_mae = eval_raw_kspace(num_slices_to_eval, val_patient_ids, data_dir, model, N_spokes_eval, N_slices, N_time_eval, eval_chunk_size, eval_chunk_overlap, H, W, eval_ktraj, eval_dcomp, eval_nufft_ob, eval_adjnufft_ob, eval_physics, acceleration_encoding, start_timepoint_index, device, output_dir, label="step0")
+            else:
+                raw_dc_mse, raw_dc_mae, raw_grasp_dc_mse, raw_grasp_dc_mae, raw_dc_std_mse, raw_dc_std_mae, raw_dc_std_grasp_mse, raw_dc_std_grasp_mae = 0, 0, 0, 0, 0, 0, 0, 0
             if global_rank == 0 or not config['training']['multigpu']:
                 writer.add_scalar('Loss/Val_MC', step0_val_mc_loss, 0)
                 writer.add_scalar('Loss/Val_EI', step0_val_ei_loss, 0)
@@ -807,8 +810,11 @@ def main():
                                 continue  # skip this batch, go to next one
                             else:
                                 raise  # re-raise other errors
-                print(f"Evaluating on raw k-space with {num_slices_to_eval} slices...")
-                raw_dc_mse, raw_dc_mae, raw_grasp_dc_mse, raw_grasp_dc_mae, raw_dc_std_mse, raw_dc_std_mae, raw_dc_std_grasp_mse, raw_dc_std_grasp_mae = eval_raw_kspace(num_slices_to_eval, val_patient_ids, data_dir, model, N_spokes_eval, N_slices, N_time_eval, eval_chunk_size, eval_chunk_overlap, H, W, eval_ktraj, eval_dcomp, eval_nufft_ob, eval_adjnufft_ob, eval_physics, acceleration_encoding, start_timepoint_index, device, output_dir, label=f"epoch{epoch}")
+                if config.get("evaluation", {}).get("raw_kspace_eval", False):
+                    print(f"Evaluating on raw k-space with {num_slices_to_eval} slices...")
+                    raw_dc_mse, raw_dc_mae, raw_grasp_dc_mse, raw_grasp_dc_mae, raw_dc_std_mse, raw_dc_std_mae, raw_dc_std_grasp_mse, raw_dc_std_grasp_mae = eval_raw_kspace(num_slices_to_eval, val_patient_ids, data_dir, model, N_spokes_eval, N_slices, N_time_eval, eval_chunk_size, eval_chunk_overlap, H, W, eval_ktraj, eval_dcomp, eval_nufft_ob, eval_adjnufft_ob, eval_physics, acceleration_encoding, start_timepoint_index, device, output_dir, label=f"epoch{epoch}")
+                else:
+                    raw_dc_mse, raw_dc_mae, raw_grasp_dc_mse, raw_grasp_dc_mae, raw_dc_std_mse, raw_dc_std_mae, raw_dc_std_grasp_mse, raw_dc_std_grasp_mae = 0, 0, 0, 0, 0, 0, 0, 0
                 if global_rank == 0 or not config['training']['multigpu']:
                     epoch_eval_ssim = np.mean(epoch_eval_ssims)
                     epoch_eval_psnr = np.mean(epoch_eval_psnrs)
@@ -1261,8 +1267,11 @@ def main():
                     spf_grasp_dc_mse[spokes] = np.mean(stress_test_grasp_dc_mses)
                     spf_grasp_dc_mae[spokes] = np.mean(stress_test_grasp_dc_maes)
                     spf_grasp_corr[spokes] = np.mean(stress_test_grasp_corrs)
-                print(f"Evaluating on raw k-space with {num_slices_to_eval} slices...")
-                raw_dc_mse, raw_dc_mae, raw_grasp_dc_mse, raw_grasp_dc_mae, raw_dc_std_mse, raw_dc_std_mae, raw_dc_std_grasp_mse, raw_dc_std_grasp_mae = eval_raw_kspace(num_slices_to_eval, val_patient_ids, data_dir, model, spokes, N_slices, num_frames, eval_chunk_size, eval_chunk_overlap, H, W, ktraj, dcomp, nufft_ob, adjnufft_ob, physics, acceleration_encoding, start_timepoint_index, device, output_dir, label=f"{spokes}spf")
+                if config.get("evaluation", {}).get("raw_kspace_eval", False):
+                    print(f"Evaluating on raw k-space with {num_slices_to_eval} slices...")
+                    raw_dc_mse, raw_dc_mae, raw_grasp_dc_mse, raw_grasp_dc_mae, raw_dc_std_mse, raw_dc_std_mae, raw_dc_std_grasp_mse, raw_dc_std_grasp_mae = eval_raw_kspace(num_slices_to_eval, val_patient_ids, data_dir, model, spokes, N_slices, num_frames, eval_chunk_size, eval_chunk_overlap, H, W, ktraj, dcomp, nufft_ob, adjnufft_ob, physics, acceleration_encoding, start_timepoint_index, device, output_dir, label=f"{spokes}spf")
+                else:
+                    raw_dc_mse, raw_dc_mae, raw_grasp_dc_mse, raw_grasp_dc_mae, raw_dc_std_mse, raw_dc_std_mae, raw_dc_std_grasp_mse, raw_dc_std_grasp_mae = 0, 0, 0, 0, 0, 0, 0, 0
                 spf_raw_dc_mse[spokes] = raw_dc_mse
                 spf_raw_dc_mae[spokes] = raw_dc_mae
                 spf_raw_grasp_dc_mse[spokes] = raw_grasp_dc_mse
@@ -1381,8 +1390,11 @@ def main():
                     spf_grasp_lpipses.append(lpips_grasp)
                     spf_grasp_dc_mses.append(dc_mse_grasp)
                     spf_grasp_dc_maes.append(dc_mae_grasp)
-                print(f"Evaluating on raw k-space with {num_slices_to_eval} slices...")
-                raw_dc_mse, raw_dc_mae, raw_grasp_dc_mse, raw_grasp_dc_mae, raw_dc_std_mse, raw_dc_std_mae, raw_dc_std_grasp_mse, raw_dc_std_grasp_mae = eval_raw_kspace(num_slices_to_eval, val_patient_ids, data_dir, model, spokes, N_slices, num_frames, eval_chunk_size, eval_chunk_overlap, H, W, ktraj, dcomp, nufft_ob, adjnufft_ob, physics, acceleration_encoding, start_timepoint_index, device, output_dir, label=f"{spokes}spf")
+                if config.get("evaluation", {}).get("raw_kspace_eval", False):
+                    print(f"Evaluating on raw k-space with {num_slices_to_eval} slices...")
+                    raw_dc_mse, raw_dc_mae, raw_grasp_dc_mse, raw_grasp_dc_mae, raw_dc_std_mse, raw_dc_std_mae, raw_dc_std_grasp_mse, raw_dc_std_grasp_mae = eval_raw_kspace(num_slices_to_eval, val_patient_ids, data_dir, model, spokes, N_slices, num_frames, eval_chunk_size, eval_chunk_overlap, H, W, ktraj, dcomp, nufft_ob, adjnufft_ob, physics, acceleration_encoding, start_timepoint_index, device, output_dir, label=f"{spokes}spf")
+                else:
+                    raw_dc_mse, raw_dc_mae, raw_grasp_dc_mse, raw_grasp_dc_mae, raw_dc_std_mse, raw_dc_std_mae, raw_dc_std_grasp_mse, raw_dc_std_grasp_mae = 0, 0, 0, 0, 0, 0, 0, 0
                 spf_raw_dc_mse[spokes] = raw_dc_mse
                 spf_raw_dc_mae[spokes] = raw_dc_mae
                 spf_raw_grasp_dc_mse[spokes] = raw_grasp_dc_mse
@@ -3406,6 +3418,51 @@ def eval_sample(kspace, csmap, ground_truth, x_recon, physics, mask, grasp_img, 
     else:
         recon_corr, grasp_corr = None, None
     return ssim, psnr, mse, lpips, dc_mse, dc_mae, recon_corr, grasp_corr
+def eval_sample_no_grasp(kspace, csmap, ground_truth, x_recon, physics, mask, acceleration, spokes_per_frame, output_dir, label, device):
+    acceleration = round(acceleration.item(), 1)
+    x_recon_complex = to_torch_complex(x_recon).squeeze()
+    kspace = kspace.squeeze()
+    recon_kspace = physics(False, x_recon_complex, csmap)
+    dc_mse, dc_mae = calc_dc(recon_kspace, kspace, device)
+    x_recon_np = x_recon.cpu().numpy()
+    ground_truth_np = ground_truth.cpu().numpy()
+    c = np.dot(x_recon_np.flatten(), ground_truth_np.flatten()) / np.dot(x_recon_np.flatten(), x_recon_np.flatten())
+    recon_complex_scaled = torch.tensor(c * x_recon_np, device=device)
+    recon_mag_scaled = torch.sqrt(recon_complex_scaled[:, 0, ...]**2 + recon_complex_scaled[:, 1, ...]**2)
+    gt_mag = torch.sqrt(ground_truth[:, 0, ...]**2 + ground_truth[:, 1, ...]**2)
+    recon_mag_scaled = rearrange(recon_mag_scaled, 'c h w t -> c t h w').unsqueeze(0)
+    gt_mag = rearrange(gt_mag, 'c t h w -> c t h w').unsqueeze(0)
+    min_val = torch.min(gt_mag).item()
+    max_val = torch.max(gt_mag).item()
+    data_range = (min_val, max_val)
+    filename=os.path.join(output_dir, f"grasp_metric_inputs.png")
+    ssim, psnr, mse, lpips = calc_image_metrics(recon_mag_scaled.contiguous(), gt_mag.contiguous(), data_range, device, filename)
+    x_recon_complex_np = to_torch_complex(recon_complex_scaled).squeeze().cpu().numpy()
+    gt_squeezed = ground_truth.squeeze()  # Shape: (C, T, H, W) -> (2, 22, 320, 320)
+    gt_rearranged = rearrange(gt_squeezed, 'c t h w -> t c h w') # Shape: (22, 320, 320, 2)
+    gt_complex_tensor = to_torch_complex(gt_rearranged) # Shape: (22, 320, 320)
+    gt_final_tensor = rearrange(gt_complex_tensor, 't h w -> h w t') # Shape: (320, 320, 22)
+    gt_complex_np = gt_final_tensor.cpu().numpy()
+    recon_mag_np = np.abs(x_recon_complex_np)
+    gt_mag_np = np.abs(gt_complex_np)
+    masks_np = {key: val.cpu().numpy().squeeze().astype(bool) for key, val in mask.items()}
+    num_frames = recon_mag_np.shape[2]
+    aif_time_points = np.linspace(0, 150, num_frames)
+    print("\nGenerating diagnostic plots...")
+    if mask['malignant'].any() and label is not None:
+        peak_frame = num_frames // 3
+        data_range = gt_mag_np[:, :, peak_frame].max() - gt_mag_np[:, :, peak_frame].min()
+        plot_single_temporal_curve(
+            img_stack=recon_mag_np,
+            masks=masks_np,
+            time_points=aif_time_points,
+            num_frames=num_frames,
+            filename=os.path.join(output_dir, f"recon_temporal_curve_{label}.png"),
+            acceleration=acceleration,
+            spokes_per_frame=spokes_per_frame,
+        )
+        print("Diagnostic plots saved.")
+    return ssim, psnr, mse, lpips, dc_mse, dc_mae
 
 === lsp.py ===
 import torch

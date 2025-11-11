@@ -48,8 +48,8 @@ class Trainer(submitit.helpers.Checkpointable):
 
 def main():
     # --- Executor Configuration ---
-    job_name = "ei_spatial_2layers"
-    config_path = 'configs/config_ei_spatial_2layers.yaml'
+    job_name = "ei_spatial_curriculum_encode_both"
+    config_path = 'configs/config_ei_spatial_curriculum.yaml'
     num_gpus = 4
 
     log_dir = f"submitit_logs/{job_name}"

@@ -48,9 +48,9 @@ class Trainer(submitit.helpers.Checkpointable):
 
 def main():
     # --- Executor Configuration ---
-    job_name = "ei_spatial_film02"
-    config_path = 'configs/config_ei_spatial_film02.yaml'
-    num_gpus = 2
+    job_name = "ei_temporal_curriculum_encode_both"
+    config_path = 'configs/config_ei_warp_subsample_curriculum.yaml'
+    num_gpus = 4
 
     log_dir = f"submitit_logs/{job_name}"
     os.makedirs(log_dir, exist_ok=True)

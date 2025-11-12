@@ -517,118 +517,118 @@ def GRASPRecon(csmaps, kspace, spokes_per_frame, num_frames, grasp_path):
 
 
 
-def generate_sliding_window_indices(N_frames, chunk_size, overlap_size):
-    """
-    Generates start and end indices for a sliding window reconstruction.
+# def generate_sliding_window_indices(N_frames, chunk_size, overlap_size):
+#     """
+#     Generates start and end indices for a sliding window reconstruction.
 
-    Args:
-        N_frames (int): Total number of time frames in the dynamic MRI.
-        chunk_size (int): The number of frames in each chunk.
-        overlap_size (int): The number of frames that consecutive chunks will overlap.
+#     Args:
+#         N_frames (int): Total number of time frames in the dynamic MRI.
+#         chunk_size (int): The number of frames in each chunk.
+#         overlap_size (int): The number of frames that consecutive chunks will overlap.
 
-    Returns:
-        list of tuple: A list where each tuple contains (start_index, end_index)
-                       for a chunk.
-    """
-    if chunk_size <= 0 or N_frames <= 0:
-        raise ValueError("chunk_size and N_frames must be positive.")
-    if overlap_size >= chunk_size:
-        raise ValueError("overlap_size must be less than chunk_size.")
-    if overlap_size < 0:
-        raise ValueError("overlap_size cannot be negative.")
+#     Returns:
+#         list of tuple: A list where each tuple contains (start_index, end_index)
+#                        for a chunk.
+#     """
+#     if chunk_size <= 0 or N_frames <= 0:
+#         raise ValueError("chunk_size and N_frames must be positive.")
+#     if overlap_size >= chunk_size:
+#         raise ValueError("overlap_size must be less than chunk_size.")
+#     if overlap_size < 0:
+#         raise ValueError("overlap_size cannot be negative.")
 
-    chunks = []
-    step_size = chunk_size - overlap_size
-    current_start = 0
+#     chunks = []
+#     step_size = chunk_size - overlap_size
+#     current_start = 0
 
-    while True:
-        current_end = current_start + chunk_size
+#     while True:
+#         current_end = current_start + chunk_size
 
-        # If the current chunk goes beyond the total N_frames,
-        # we adjust it to be the last possible full chunk.
-        # This handles the tail end of the sequence.
-        if current_end > N_frames:
-            # If the current_start is already past the beginning of a full chunk,
-            # or if it's the very first chunk and N_frames < chunk_size,
-            # we simply take the last `chunk_size` frames.
-            if N_frames - chunk_size >= 0:
-                current_start = N_frames - chunk_size
-                current_end = N_frames
-            else:
-                # If N_frames is less than chunk_size, just take all frames as one chunk
-                current_start = 0
-                current_end = N_frames
-            chunks.append((current_start, current_end))
-            break # We've covered the end of the sequence
+#         # If the current chunk goes beyond the total N_frames,
+#         # we adjust it to be the last possible full chunk.
+#         # This handles the tail end of the sequence.
+#         if current_end > N_frames:
+#             # If the current_start is already past the beginning of a full chunk,
+#             # or if it's the very first chunk and N_frames < chunk_size,
+#             # we simply take the last `chunk_size` frames.
+#             if N_frames - chunk_size >= 0:
+#                 current_start = N_frames - chunk_size
+#                 current_end = N_frames
+#             else:
+#                 # If N_frames is less than chunk_size, just take all frames as one chunk
+#                 current_start = 0
+#                 current_end = N_frames
+#             chunks.append((current_start, current_end))
+#             break # We've covered the end of the sequence
 
-        chunks.append((current_start, current_end))
+#         chunks.append((current_start, current_end))
 
-        # If we've already reached or passed the end of the sequence, stop
-        if current_end == N_frames:
-            break
+#         # If we've already reached or passed the end of the sequence, stop
+#         if current_end == N_frames:
+#             break
 
-        current_start += step_size
+#         current_start += step_size
 
-    # Remove duplicates if the last chunk was already added in a previous iteration
-    unique_chunks = []
-    seen = set()
-    for chunk in chunks:
-        if chunk not in seen:
-            unique_chunks.append(chunk)
-            seen.add(chunk)
+#     # Remove duplicates if the last chunk was already added in a previous iteration
+#     unique_chunks = []
+#     seen = set()
+#     for chunk in chunks:
+#         if chunk not in seen:
+#             unique_chunks.append(chunk)
+#             seen.add(chunk)
 
-    return unique_chunks
-
-
+#     return unique_chunks
 
 
-def sliding_window_inference(H, W, N_frames, ktraj, dcomp, nufft_ob, adjnufft_ob, chunk_size, chunk_overlap, kspace, csmap, acceleration_encoding, start_timepoint_index, model, epoch, device):
-
-    chunk_indices = generate_sliding_window_indices(N_frames, chunk_size, chunk_overlap)
-
-    # define physics object for chunk of timeframes
-    # ktraj_chunk, dcomp_chunk, nufft_ob_chunk, adjnufft_ob_chunk = prep_nufft(N_samples, N_spokes, chunk_size)
-    # physics_chunk = MCNUFFT(nufft_ob_chunk.to(device), adjnufft_ob_chunk.to(device), ktraj_chunk.to(device), dcomp_chunk.to(device))
-
-    # Define tensor for stitched reconstruction
-    stitched_recon = torch.zeros(1, 2, H, W, N_frames).to(device)
-
-    # Also keep track of how many times each frame is contributed to (for averaging)
-    frame_contribution_count = torch.zeros(H, W, N_frames).to(device)
-
-    csmap = csmap.to(device)
 
 
-    for i, (start_idx, end_idx) in enumerate(chunk_indices):
+# def sliding_window_inference(H, W, N_frames, ktraj, dcomp, nufft_ob, adjnufft_ob, chunk_size, chunk_overlap, kspace, csmap, acceleration_encoding, start_timepoint_index, model, epoch, device):
 
-        print(f"Processing chunk {i+1}: frames {start_idx}-{end_idx}")
+#     chunk_indices = generate_sliding_window_indices(N_frames, chunk_size, chunk_overlap)
 
-        # select chunk from k-space
-        kspace_chunk = kspace[..., start_idx:end_idx].to(device)
-        ktraj_chunk = ktraj[..., start_idx:end_idx].to(device)
-        dcomp_chunk = dcomp[..., start_idx:end_idx].to(device)
+#     # define physics object for chunk of timeframes
+#     # ktraj_chunk, dcomp_chunk, nufft_ob_chunk, adjnufft_ob_chunk = prep_nufft(N_samples, N_spokes, chunk_size)
+#     # physics_chunk = MCNUFFT(nufft_ob_chunk.to(device), adjnufft_ob_chunk.to(device), ktraj_chunk.to(device), dcomp_chunk.to(device))
 
-        physics_chunk = MCNUFFT(nufft_ob, adjnufft_ob, ktraj_chunk, dcomp_chunk)
+#     # Define tensor for stitched reconstruction
+#     stitched_recon = torch.zeros(1, 2, H, W, N_frames).to(device)
 
-        if start_timepoint_index is not None:
-            start_timepoint_index = torch.tensor([start_idx], dtype=torch.float, device=device)
+#     # Also keep track of how many times each frame is contributed to (for averaging)
+#     frame_contribution_count = torch.zeros(H, W, N_frames).to(device)
 
-        # print("Time encoding: ", start_timepoint_index.item())
-
-        # generate reconstruction
-        x_recon_chunk, adj_loss, *_ = model(
-            kspace_chunk.to(device), physics_chunk, csmap, acceleration_encoding, start_timepoint_index, epoch=epoch, norm="both"
-        )
-
-        # Add the reconstructed chunk to the stitched_recon
-        stitched_recon[..., start_idx:end_idx] += x_recon_chunk
-        frame_contribution_count[..., start_idx:end_idx] += 1
+#     csmap = csmap.to(device)
 
 
-    # Average the overlapping regions
-    stitched_recon /= frame_contribution_count # This performs element-wise division
+#     for i, (start_idx, end_idx) in enumerate(chunk_indices):
 
-    return stitched_recon, adj_loss
+#         print(f"Processing chunk {i+1}: frames {start_idx}-{end_idx}")
+
+#         # select chunk from k-space
+#         kspace_chunk = kspace[..., start_idx:end_idx].to(device)
+#         ktraj_chunk = ktraj[..., start_idx:end_idx].to(device)
+#         dcomp_chunk = dcomp[..., start_idx:end_idx].to(device)
+
+#         physics_chunk = MCNUFFT(nufft_ob, adjnufft_ob, ktraj_chunk, dcomp_chunk)
+
+#         if start_timepoint_index is not None:
+#             start_timepoint_index = torch.tensor([start_idx], dtype=torch.float, device=device)
+
+#         # print("Time encoding: ", start_timepoint_index.item())
+
+#         # generate reconstruction
+#         x_recon_chunk, adj_loss, *_ = model(
+#             kspace_chunk.to(device), physics_chunk, csmap, acceleration_encoding, start_timepoint_index, epoch=epoch, norm="both"
+#         )
+
+#         # Add the reconstructed chunk to the stitched_recon
+#         stitched_recon[..., start_idx:end_idx] += x_recon_chunk
+#         frame_contribution_count[..., start_idx:end_idx] += 1
+
+
+#     # Average the overlapping regions
+#     stitched_recon /= frame_contribution_count # This performs element-wise division
+
+#     return stitched_recon, adj_loss.item()
 
 
 def set_seed(seed):
@@ -639,3 +639,131 @@ def set_seed(seed):
     torch.cuda.manual_seed_all(seed)
     torch.backends.cudnn.deterministic = True
     torch.backends.cudnn.benchmark = False
+
+
+
+def generate_sliding_window_indices(N_frames, chunk_size, overlap_size):
+    """
+    Generates start and end indices for a sliding window reconstruction.
+    """
+    if chunk_size <= 0 or N_frames <= 0:
+        raise ValueError("chunk_size and N_frames must be positive.")
+    if overlap_size >= chunk_size:
+        raise ValueError("overlap_size must be less than chunk_size.")
+    if overlap_size < 0:
+        raise ValueError("overlap_size cannot be negative.")
+
+    chunks = []
+    step_size = chunk_size - overlap_size
+    if step_size <= 0:
+        step_size = 1  # ultra-conservative safety
+
+    # Walk forward
+    start = 0
+    while start + chunk_size < N_frames:
+        chunks.append((start, start + chunk_size))
+        start += step_size
+
+    # Ensure we always cover the tail
+    tail_start = max(0, N_frames - chunk_size)
+    if not chunks or chunks[-1][0] != tail_start:
+        chunks.append((tail_start, N_frames))
+
+    # Dedup (rare but safe)
+    uniq = []
+    seen = set()
+    for s, e in chunks:
+        if (s, e) not in seen:
+            uniq.append((s, e))
+            seen.add((s, e))
+    return uniq
+
+
+def _temporal_window(length: int, kind: str = "hann", device=None, dtype=torch.float32):
+    """
+    Create a 1D temporal window of size `length`.
+    Using Hann is standard for overlap-add; if overlap=0, it's equivalent to a box.
+    """
+    if length <= 1:
+        w = torch.ones(1, device=device, dtype=dtype)
+    elif kind == "hann":
+        # torch.hann_window produces length-L Hann in [0,1] with zeros at edges
+        w = torch.hann_window(length, periodic=False, dtype=dtype, device=device)
+        # Avoid exact zeros at boundaries to keep denominator well-conditioned
+        w = torch.clamp(w, min=1e-3)
+    elif kind == "box":
+        w = torch.ones(length, device=device, dtype=dtype)
+    else:
+        raise ValueError(f"Unsupported window kind: {kind}")
+    # Normalize window so that average weight ~1 (aids interpretability of adj_loss mean)
+    w = w * (length / torch.sum(w))
+    return w.view(1, 1, 1, 1, length)  # broadcastable to (B,C,H,W,T_chunk)
+
+
+@torch.no_grad()
+def sliding_window_inference(
+    H, W, N_frames,
+    ktraj, dcomp, nufft_ob, adjnufft_ob,
+    chunk_size, chunk_overlap,
+    kspace, csmap,
+    acceleration_encoding,
+    start_timepoint_index,  # ignored here; recomputed per chunk if time-encoding is enabled
+    model, epoch, device,
+    window_kind: str = "hann"
+):
+    """
+    Edge-safe temporal stitching using Hann overlap-add:
+      - Each chunk is multiplied by a temporal window (Hann by default).
+      - Overlapping chunks are summed and normalized by the accumulated window weights.
+    """
+    chunk_indices = generate_sliding_window_indices(N_frames, chunk_size, chunk_overlap)
+
+    # Pre-allocate stitched recon and weight accumulator
+    # Shape target: (1, 2, H, W, T)
+    stitched_recon = torch.zeros(1, 2, H, W, N_frames, device=device, dtype=torch.float32)
+    weight_sum     = torch.zeros(1, 1, 1, 1, N_frames, device=device, dtype=torch.float32)
+
+    csmap = csmap.to(device)
+    # Keep track of adjoint-loss across chunks (report mean)
+    adj_losses = []
+
+    for i, (start_idx, end_idx) in enumerate(chunk_indices):
+        print(f"Processing chunk {i+1}/{len(chunk_indices)}: frames {start_idx}-{end_idx}")
+
+        # Slice per-chunk signals/operators (time last)
+        kspace_chunk = kspace[..., start_idx:end_idx].to(device)
+        ktraj_chunk  = ktraj[...,  start_idx:end_idx].to(device)
+        dcomp_chunk  = dcomp[...,  start_idx:end_idx].to(device)
+
+        # Per-chunk physics
+        physics_chunk = MCNUFFT(nufft_ob, adjnufft_ob, ktraj_chunk, dcomp_chunk)
+
+        # Time index encoding per chunk (if enabled by your model config)
+        # We recreate start_timepoint_index here so the backbone sees absolute frame index
+        sti = None
+        if start_timepoint_index is not None:
+            sti = torch.tensor([start_idx], dtype=torch.float32, device=device)
+
+        # Forward pass
+        x_recon_chunk, adj_loss, *_ = model(
+            kspace_chunk, physics_chunk, csmap, acceleration_encoding, sti, epoch=epoch, norm="both"
+        )
+        # x_recon_chunk: (1, 2, H, W, T_chunk)
+        adj_losses.append(adj_loss.item())
+
+        # Build temporal window for this chunk and overlap-add
+        T_chunk = end_idx - start_idx
+        w = _temporal_window(T_chunk, kind=window_kind, device=device, dtype=x_recon_chunk.dtype)
+
+        stitched_recon[..., start_idx:end_idx] += x_recon_chunk * w
+        weight_sum[...,     start_idx:end_idx] += w
+
+        # (Optional) free chunk tensors early
+        del kspace_chunk, ktraj_chunk, dcomp_chunk, physics_chunk, x_recon_chunk, w
+        torch.cuda.empty_cache()
+
+    # Normalize by accumulated weights (safe divide)
+    stitched_recon = stitched_recon / torch.clamp(weight_sum, min=1e-8)
+
+    mean_adj_loss = float(np.mean(adj_losses)) if len(adj_losses) else 0.0
+    return stitched_recon, mean_adj_loss

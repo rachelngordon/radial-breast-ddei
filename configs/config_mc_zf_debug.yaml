@@ -89,7 +89,7 @@ model:
 
 # Training settings
 training:
-  epochs: 2
+  epochs: 1
   save_interval: 1
   plot_interval: 20
   device: "cuda"  # or "cpu"
@@ -118,6 +118,8 @@ evaluation:
   simulated_dataset_path: "/ess/scratch/scratch1/rachelgordon/dro_dataset"
   chunk_size: 24
   chunk_overlap: 12
+  raw_kspace_eval: True
+  raw_grasp_slice_idx: 95
 
 debugging:
   calc_step_0: True

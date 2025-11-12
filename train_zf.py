@@ -27,7 +27,7 @@ from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.utils.data.distributed import DistributedSampler
 import h5py
 from torch.utils.tensorboard import SummaryWriter
-from raw_kspace_eval import eval_raw_kspace
+from raw_kspace_eval import eval_raw_kspace, eval_raw_kspace_grasp
 
 
 def setup():
@@ -663,7 +663,7 @@ def main():
                 
 
                 # compute losses
-                initial_val_adj_loss += adj_loss.item()
+                initial_val_adj_loss += adj_loss
                 
                 mc_loss = mc_loss_fn(measured_kspace.to(device), x_recon, eval_physics, csmap)
                 initial_val_mc_loss += mc_loss.item()
@@ -713,9 +713,9 @@ def main():
             # evaluate on raw k-space
             if config.get("evaluation", {}).get("raw_kspace_eval", False):
                 print(f"Evaluating on raw k-space with {num_slices_to_eval} slices...")
-                raw_dc_mse, raw_dc_mae, raw_grasp_dc_mse, raw_grasp_dc_mae, raw_dc_std_mse, raw_dc_std_mae, raw_dc_std_grasp_mse, raw_dc_std_grasp_mae = eval_raw_kspace(num_slices_to_eval, val_patient_ids, data_dir, model, N_spokes_eval, N_slices, N_time_eval, eval_chunk_size, eval_chunk_overlap, H, W, eval_ktraj, eval_dcomp, eval_nufft_ob, eval_adjnufft_ob, eval_physics, acceleration_encoding, start_timepoint_index, device, output_dir, label="step0")
+                raw_dc_mse, raw_dc_mae, raw_dc_std_mse, raw_dc_std_mae = eval_raw_kspace(num_slices_to_eval, val_patient_ids, data_dir, model, N_spokes_eval, N_slices, N_time_eval, eval_chunk_size, eval_chunk_overlap, H, W, eval_ktraj, eval_dcomp, eval_nufft_ob, eval_adjnufft_ob, eval_physics, acceleration_encoding, start_timepoint_index, device, output_dir, label="step0")
             else:
-                raw_dc_mse, raw_dc_mae, raw_grasp_dc_mse, raw_grasp_dc_mae, raw_dc_std_mse, raw_dc_std_mae, raw_dc_std_grasp_mse, raw_dc_std_grasp_mae = 0, 0, 0, 0, 0, 0, 0, 0
+                raw_dc_mse, raw_dc_mae, raw_dc_std_mse, raw_dc_std_mae = 0, 0, 0, 0
 
 
             if global_rank == 0 or not config['training']['multigpu']:
@@ -1127,7 +1127,7 @@ def main():
                             
 
                             # compute losses
-                            val_running_adj_loss += val_adj_loss.item()
+                            val_running_adj_loss += val_adj_loss
 
                             val_mc_loss = mc_loss_fn(val_kspace_batch.to(device), val_x_recon, eval_physics, val_csmap)
                             val_running_mc_loss += val_mc_loss.item()
@@ -1172,9 +1172,9 @@ def main():
                 # evaluate on raw k-space
                 if config.get("evaluation", {}).get("raw_kspace_eval", False):
                     print(f"Evaluating on raw k-space with {num_slices_to_eval} slices...")
-                    raw_dc_mse, raw_dc_mae, raw_grasp_dc_mse, raw_grasp_dc_mae, raw_dc_std_mse, raw_dc_std_mae, raw_dc_std_grasp_mse, raw_dc_std_grasp_mae = eval_raw_kspace(num_slices_to_eval, val_patient_ids, data_dir, model, N_spokes_eval, N_slices, N_time_eval, eval_chunk_size, eval_chunk_overlap, H, W, eval_ktraj, eval_dcomp, eval_nufft_ob, eval_adjnufft_ob, eval_physics, acceleration_encoding, start_timepoint_index, device, output_dir, label=f"epoch{epoch}")
+                    raw_dc_mse, raw_dc_mae, raw_dc_std_mse, raw_dc_std_mae = eval_raw_kspace(num_slices_to_eval, val_patient_ids, data_dir, model, N_spokes_eval, N_slices, N_time_eval, eval_chunk_size, eval_chunk_overlap, H, W, eval_ktraj, eval_dcomp, eval_nufft_ob, eval_adjnufft_ob, eval_physics, acceleration_encoding, start_timepoint_index, device, output_dir, label=f"epoch{epoch}")
                 else:
-                    raw_dc_mse, raw_dc_mae, raw_grasp_dc_mse, raw_grasp_dc_mae, raw_dc_std_mse, raw_dc_std_mae, raw_dc_std_grasp_mse, raw_dc_std_grasp_mae = 0, 0, 0, 0, 0, 0, 0, 0
+                    raw_dc_mse, raw_dc_mae, raw_dc_std_mse, raw_dc_std_mae = 0, 0, 0, 0
 
 
 
@@ -1517,8 +1517,8 @@ def main():
                     print(f"GRASP LPIPS: {np.mean(grasp_lpipses):.4f} ± {np.std(grasp_lpipses):.4f}")
                     print(f"GRASP DC MSE: {np.mean(grasp_dc_mses):.6f} ± {np.std(grasp_dc_mses):.4f}")
                     print(f"GRASP DC MAE: {np.mean(grasp_dc_maes):.6f} ± {np.std(grasp_dc_maes):.4f}")
-                    print(f"GRASP DC MSE: {raw_grasp_dc_mse:.6f} ± {raw_dc_std_grasp_mse:.4f}")
-                    print(f"GRASP DC MAE: {raw_grasp_dc_mae:.6f} ± {raw_dc_std_grasp_mae:.4f}")
+                    # print(f"GRASP DC MSE: {raw_grasp_dc_mse:.6f} ± {raw_dc_std_grasp_mse:.4f}")
+                    # print(f"GRASP DC MAE: {raw_grasp_dc_mae:.6f} ± {raw_dc_std_grasp_mae:.4f}")
                     print(f"GRASP Enhancement Curve Correlation: {np.mean(grasp_curve_corrs):.6f} ± {np.std(grasp_curve_corrs):.4f}")
 
 
@@ -1578,8 +1578,8 @@ def main():
                                 f'{np.mean(grasp_lpipses):.4f} ± {np.std(grasp_lpipses):.4f}', 
                                 f'{np.mean(grasp_dc_mses):.4f} ± {np.std(grasp_dc_mses):.4f}', 
                                 f'{np.mean(grasp_dc_maes):.4f} ± {np.std(grasp_dc_maes):.4f}', 
-                                f"{raw_grasp_dc_mse:.6f} ± {raw_dc_std_grasp_mse:.4f}",
-                                f"{raw_grasp_dc_mae:.6f} ± {raw_dc_std_grasp_mae:.4f}", 
+                                # f"{raw_grasp_dc_mse:.6f} ± {raw_dc_std_grasp_mse:.4f}",
+                                # f"{raw_grasp_dc_mae:.6f} ± {raw_dc_std_grasp_mae:.4f}", 
                                 f'{np.mean(grasp_curve_corrs):.4f} ± {np.std(grasp_curve_corrs):.4f}'])
 
 
@@ -1628,6 +1628,7 @@ def main():
             },
         ]
 
+        raw_grasp_slice_idx = config.get("evaluation", {}).get("raw_grasp_slice_idx", 95)
 
 
         eval_spf_dataset = SimulatedSPFDataset(
@@ -1792,9 +1793,11 @@ def main():
                 # evaluate on raw k-space
                 if config.get("evaluation", {}).get("raw_kspace_eval", False):
                     print(f"Evaluating on raw k-space with {num_slices_to_eval} slices...")
-                    raw_dc_mse, raw_dc_mae, raw_grasp_dc_mse, raw_grasp_dc_mae, raw_dc_std_mse, raw_dc_std_mae, raw_dc_std_grasp_mse, raw_dc_std_grasp_mae = eval_raw_kspace(num_slices_to_eval, val_patient_ids, data_dir, model, spokes, N_slices, num_frames, eval_chunk_size, eval_chunk_overlap, H, W, ktraj, dcomp, nufft_ob, adjnufft_ob, physics, acceleration_encoding, start_timepoint_index, device, output_dir, label=f"{spokes}spf")
+                    raw_dc_mse, raw_dc_mae, raw_dc_std_mse, raw_dc_std_mae, = eval_raw_kspace(num_slices_to_eval, val_patient_ids, data_dir, model, spokes, N_slices, num_frames, eval_chunk_size, eval_chunk_overlap, H, W, ktraj, dcomp, nufft_ob, adjnufft_ob, physics, acceleration_encoding, start_timepoint_index, device, output_dir, label=f"{spokes}spf")
+                    raw_grasp_dc_mse, raw_grasp_dc_mae, raw_dc_std_grasp_mse, raw_dc_std_grasp_mae = eval_raw_kspace_grasp(raw_grasp_slice_idx, val_patient_ids, data_dir, spokes, N_slices, num_frames, physics, device)
                 else:
-                    raw_dc_mse, raw_dc_mae, raw_grasp_dc_mse, raw_grasp_dc_mae, raw_dc_std_mse, raw_dc_std_mae, raw_dc_std_grasp_mse, raw_dc_std_grasp_mae = 0, 0, 0, 0, 0, 0, 0, 0
+                    raw_dc_mse, raw_dc_mae, raw_dc_std_mse, raw_dc_std_mae = 0, 0, 0, 0
+                    raw_grasp_dc_mse, raw_grasp_dc_mae, raw_dc_std_grasp_mse, raw_dc_std_grasp_mae = 0, 0, 0, 0
 
                 spf_raw_dc_mse[spokes] = raw_dc_mse
                 spf_raw_dc_mae[spokes] = raw_dc_mae
@@ -1967,9 +1970,11 @@ def main():
                 # evaluate on raw k-space
                 if config.get("evaluation", {}).get("raw_kspace_eval", False):
                     print(f"Evaluating on raw k-space with {num_slices_to_eval} slices...")
-                    raw_dc_mse, raw_dc_mae, raw_grasp_dc_mse, raw_grasp_dc_mae, raw_dc_std_mse, raw_dc_std_mae, raw_dc_std_grasp_mse, raw_dc_std_grasp_mae = eval_raw_kspace(num_slices_to_eval, val_patient_ids, data_dir, model, spokes, N_slices, num_frames, eval_chunk_size, eval_chunk_overlap, H, W, ktraj, dcomp, nufft_ob, adjnufft_ob, physics, acceleration_encoding, start_timepoint_index, device, output_dir, label=f"{spokes}spf")
+                    raw_dc_mse, raw_dc_mae, raw_dc_std_mse, raw_dc_std_mae = eval_raw_kspace(num_slices_to_eval, val_patient_ids, data_dir, model, spokes, N_slices, num_frames, eval_chunk_size, eval_chunk_overlap, H, W, ktraj, dcomp, nufft_ob, adjnufft_ob, physics, acceleration_encoding, start_timepoint_index, device, output_dir, label=f"{spokes}spf")
+                    raw_grasp_dc_mse, raw_grasp_dc_mae, raw_dc_std_grasp_mse, raw_dc_std_grasp_mae = eval_raw_kspace_grasp(raw_grasp_slice_idx, val_patient_ids, data_dir, spokes, N_slices, num_frames, physics, device)
                 else:
-                    raw_dc_mse, raw_dc_mae, raw_grasp_dc_mse, raw_grasp_dc_mae, raw_dc_std_mse, raw_dc_std_mae, raw_dc_std_grasp_mse, raw_dc_std_grasp_mae = 0, 0, 0, 0, 0, 0, 0, 0
+                    raw_dc_mse, raw_dc_mae, raw_dc_std_mse, raw_dc_std_mae = 0, 0, 0, 0
+                    raw_grasp_dc_mse, raw_grasp_dc_mae, raw_dc_std_grasp_mse, raw_dc_std_grasp_mae = 0, 0, 0, 0
 
                 spf_raw_dc_mse[spokes] = raw_dc_mse
                 spf_raw_dc_mae[spokes] = raw_dc_mae
@@ -2080,50 +2085,54 @@ def main():
         axes[0, 2].set_ylabel("MSE")
 
 
-        # sns.lineplot(x=list(spf_recon_lpips.keys()), 
-        #             y=list(spf_recon_lpips.values()), 
-        #             label="DL Recon", 
-        #             marker='o',
-        #             ax=axes[1, 0])
-
-        # sns.lineplot(x=list(spf_grasp_lpips.keys()), 
-        #             y=list(spf_grasp_lpips.values()), 
-        #             label="Standard Recon", 
-        #             marker='o',
-        #             ax=axes[1, 0])
-        # axes[1, 0].set_title("Evaluation LPIPS vs Spokes/Frame")
-        # axes[1, 0].set_xlabel("Spokes per Frame")
-        # axes[1, 0].set_ylabel("LPIPS")
-
-        sns.lineplot(x=list(spf_raw_dc_mse.keys()), 
-            y=list(spf_raw_dc_mse.values()), 
-            label="DL Recon", 
-            marker='o',
-            ax=axes[1, 0])
+        sns.lineplot(x=list(spf_recon_lpips.keys()), 
+                    y=list(spf_recon_lpips.values()), 
+                    label="DL Recon", 
+                    marker='o',
+                    ax=axes[1, 0])
 
         sns.lineplot(x=list(spf_grasp_lpips.keys()), 
                     y=list(spf_grasp_lpips.values()), 
                     label="Standard Recon", 
                     marker='o',
                     ax=axes[1, 0])
-        axes[1, 0].set_title("Non-DRO Evaluation Raw k-space MAE vs Spokes/Frame")
+        axes[1, 0].set_title("Evaluation LPIPS vs Spokes/Frame")
         axes[1, 0].set_xlabel("Spokes per Frame")
-        axes[1, 0].set_ylabel("MAE")
+        axes[1, 0].set_ylabel("LPIPS")
 
-        sns.lineplot(x=list(spf_recon_dc_mae.keys()), 
-                    y=list(spf_recon_dc_mae.values()), 
-                    label="DL Recon", 
-                    marker='o',
-                    ax=axes[1, 1])
 
-        sns.lineplot(x=list(spf_grasp_dc_mae.keys()), 
-                    y=list(spf_grasp_dc_mae.values()), 
+
+
+
+        sns.lineplot(x=list(spf_raw_dc_mse.keys()), 
+            y=list(spf_raw_dc_mse.values()), 
+            label="DL Recon", 
+            marker='o',
+            ax=axes[1, 1])
+
+        sns.lineplot(x=list(spf_raw_grasp_dc_mse.keys()), 
+                    y=list(spf_raw_grasp_dc_mse.values()), 
                     label="Standard Recon", 
                     marker='o',
                     ax=axes[1, 1])
-        axes[1, 1].set_title("DRO Evaluation Simulated k-space MAE vs Spokes/Frame")
+        axes[1, 1].set_title("Non-DRO Evaluation Raw k-space MAE vs Spokes/Frame")
         axes[1, 1].set_xlabel("Spokes per Frame")
         axes[1, 1].set_ylabel("MAE")
+
+        # sns.lineplot(x=list(spf_recon_dc_mae.keys()), 
+        #             y=list(spf_recon_dc_mae.values()), 
+        #             label="DL Recon", 
+        #             marker='o',
+        #             ax=axes[1, 1])
+
+        # sns.lineplot(x=list(spf_grasp_dc_mae.keys()), 
+        #             y=list(spf_grasp_dc_mae.values()), 
+        #             label="Standard Recon", 
+        #             marker='o',
+        #             ax=axes[1, 1])
+        # axes[1, 1].set_title("DRO Evaluation Simulated k-space MAE vs Spokes/Frame")
+        # axes[1, 1].set_xlabel("Spokes per Frame")
+        # axes[1, 1].set_ylabel("MAE")
 
         sns.lineplot(x=list(spf_recon_corr.keys()), 
                     y=list(spf_recon_corr.values()), 
@@ -2143,6 +2152,8 @@ def main():
         plt.tight_layout()
         plt.savefig(os.path.join(output_dir, "spf_eval_metrics.png"))
         plt.close()
+
+
 
 
     if global_rank == 0 or not config['training']['multigpu']:

@@ -78,7 +78,7 @@ def process_kspace(kspace_path, device, spokes_per_frame, images_per_slab, cente
     f = h5py.File(kspace_path, 'r')
     ksp_zf = f['kspace'][:]#.T
     # ksp_zf = np.transpose(ksp_f, (4, 3, 2, 1, 0))
-    print('> kspace shape ', ksp_zf.shape)
+    # print('> kspace shape ', ksp_zf.shape)
     f.close()
 
 
@@ -120,23 +120,23 @@ def process_kspace(kspace_path, device, spokes_per_frame, images_per_slab, cente
     N_spokes_prep = N_time * spokes_per_frame
 
     ksp_redu = ksp_zf[:, :, :N_spokes_prep, :]
-    print('  ksp_redu shape: ', ksp_redu.shape) # (192, 16, 288, 640)
+    # print('  ksp_redu shape: ', ksp_redu.shape) # (192, 16, 288, 640)
 
     # %% retrospecitvely split spokes
     ksp_prep = np.swapaxes(ksp_redu, 0, 2)
 
-    print("ksp_prep: ", ksp_prep.shape) # (288, 16, 192, 640)
+    # print("ksp_prep: ", ksp_prep.shape) # (288, 16, 192, 640)
     ksp_prep_shape = ksp_prep.shape
     ksp_prep = np.reshape(ksp_prep, [N_time, spokes_per_frame] + list(ksp_prep_shape[1:])) # (36, 8, 16, 192, 640)
 
-    print("ksp_prep after reshape: ", ksp_prep.shape) # (36, 8, 16, 192, 640)
+    # print("ksp_prep after reshape: ", ksp_prep.shape) # (36, 8, 16, 192, 640)
 
     ksp_prep = np.transpose(ksp_prep, (3, 0, 2, 1, 4))
 
 
     ksp_prep = ksp_prep[:, :, None, :, None, :, :]
-    print('  ksp_prep shape: ', ksp_prep.shape)
-    print('  ksp_prep dtype: ', ksp_prep.dtype)
+    # print('  ksp_prep shape: ', ksp_prep.shape)
+    # print('  ksp_prep dtype: ', ksp_prep.dtype)
 
     traj = get_traj(spokes_per_frame, N_spokes=spokes_per_frame,
                 N_time=N_time, base_res=base_res,
@@ -351,8 +351,8 @@ def eval_raw_kspace(num_slices_to_eval, val_patient_ids, data_dir, model, spokes
     
     avg_dc_mses = []
     avg_dc_maes = []
-    avg_grasp_dc_mses = []
-    avg_grasp_dc_maes = []
+    # avg_grasp_dc_mses = []
+    # avg_grasp_dc_maes = []
     with torch.no_grad():
         for patient_id in val_patient_ids:
 
@@ -361,13 +361,13 @@ def eval_raw_kspace(num_slices_to_eval, val_patient_ids, data_dir, model, spokes
             dir = os.path.dirname(data_dir)
             zf_kspace, binned_kspace, traj = process_kspace(raw_kspace_path, device=sp_device, spokes_per_frame=spokes_per_frame, images_per_slab=N_slices, center_partition=31)
 
-            grasp_img_path = os.path.join(dir, f'{patient_id}_2', f'grasp_recon_{spokes_per_frame}spf.npy')
+            # grasp_img_path = os.path.join(dir, f'{patient_id}_2', f'grasp_recon_{spokes_per_frame}spf.npy')
 
-            if not os.path.exists(grasp_img_path):
-                grasp_img_slices = raw_grasp_recon(zf_kspace, binned_kspace, traj, N_slices=N_slices, spokes_per_frame=spokes_per_frame, device=sp_device)
-                np.save(grasp_img_path, grasp_img_slices)
-            else:
-                grasp_img_slices = np.load(grasp_img_path)
+            # if not os.path.exists(grasp_img_path):
+            #     grasp_img_slices = raw_grasp_recon(zf_kspace, binned_kspace, traj, N_slices=N_slices, spokes_per_frame=spokes_per_frame, device=sp_device)
+            #     np.save(grasp_img_path, grasp_img_slices)
+            # else:
+            #     grasp_img_slices = np.load(grasp_img_path)
             
 
             csmap = load_all_csmaps(dir, f'{patient_id}_2')
@@ -375,13 +375,13 @@ def eval_raw_kspace(num_slices_to_eval, val_patient_ids, data_dir, model, spokes
 
             slice_dc_mses = []
             slice_dc_maes = []
-            grasp_slice_dc_mses = []
-            grasp_slice_dc_maes = []
+            # grasp_slice_dc_mses = []
+            # grasp_slice_dc_maes = []
 
             for slice_idx in random_slice_indices:
 
                 kspace_slice = torch.tensor(binned_kspace[slice_idx].squeeze())
-                grasp_img_slice = torch.tensor(grasp_img_slices[slice_idx])
+                # grasp_img_slice = torch.tensor(grasp_img_slices[slice_idx])
                 csmap_slice = torch.tensor(csmap[..., slice_idx])
 
                 kspace_slice_flat = rearrange(kspace_slice, 't c sp sam -> c (sp sam) t').to(dtype)
@@ -401,170 +401,203 @@ def eval_raw_kspace(num_slices_to_eval, val_patient_ids, data_dir, model, spokes
                 x_recon = to_torch_complex(x_recon)
                 sim_kspace = physics(False, x_recon.to(device), csmap_slice.to(device))
 
-                print("grasp_img: ", grasp_img_slice.shape)
+                # print("grasp_img: ", grasp_img_slice.shape)
                 
-                if grasp_img_slice.shape[1] == 2:
-                    grasp_img_slice = to_torch_complex(grasp_img_slice)
+                # if grasp_img_slice.shape[1] == 2:
+                #     grasp_img_slice = to_torch_complex(grasp_img_slice)
 
-                if grasp_img_slice.shape[-2] == num_frames: 
-                    grasp_img_slice = rearrange(grasp_img_slice, 'b h t w -> b h w t')
+                # if grasp_img_slice.shape[-2] == num_frames: 
+                #     grasp_img_slice = rearrange(grasp_img_slice, 'b h t w -> b h w t')
 
 
-                grasp_img_slice = rearrange(grasp_img_slice, 't h w -> h w t').unsqueeze(0)
+                # grasp_img_slice = rearrange(grasp_img_slice, 't h w -> h w t').unsqueeze(0)
 
-                sim_kspace_grasp = physics(False, grasp_img_slice.to(x_recon.dtype).to(device), csmap_slice.to(device))
+                # sim_kspace_grasp = physics(False, grasp_img_slice.to(x_recon.dtype).to(device), csmap_slice.to(device))
 
                 raw_dc_mse, raw_dc_mae = calc_dc(sim_kspace, kspace_slice_flat, device)
-                raw_grasp_dc_mse, raw_grasp_dc_mae = calc_dc(sim_kspace_grasp, kspace_slice_flat, device)
+                # raw_grasp_dc_mse, raw_grasp_dc_mae = calc_dc(sim_kspace_grasp, kspace_slice_flat, device)
 
                 slice_dc_mses.append(raw_dc_mse)
                 slice_dc_maes.append(raw_dc_mae)
-                grasp_slice_dc_mses.append(raw_grasp_dc_mse)
-                grasp_slice_dc_maes.append(raw_grasp_dc_mae)
+                # grasp_slice_dc_mses.append(raw_grasp_dc_mse)
+                # grasp_slice_dc_maes.append(raw_grasp_dc_mae)
 
 
             avg_dc_mses.append(np.mean(slice_dc_mses))
             avg_dc_maes.append(np.mean(slice_dc_maes))
-            avg_grasp_dc_mses.append(np.mean(grasp_slice_dc_mses))
-            avg_grasp_dc_maes.append(np.mean(grasp_slice_dc_maes))
+            # avg_grasp_dc_mses.append(np.mean(grasp_slice_dc_mses))
+            # avg_grasp_dc_maes.append(np.mean(grasp_slice_dc_maes))
 
     
     avg_mse = np.mean(avg_dc_mses)
     avg_mae = np.mean(avg_dc_maes)
-    avg_grasp_mse = np.mean(avg_grasp_dc_mses)
-    avg_grasp_mae = np.mean(avg_grasp_dc_maes)
+    # avg_grasp_mse = np.mean(avg_grasp_dc_mses)
+    # avg_grasp_mae = np.mean(avg_grasp_dc_maes)
 
     std_mse = np.std(avg_dc_mses)
     std_mae = np.std(avg_dc_maes)
+    # std_grasp_mse = np.std(avg_grasp_dc_mses)
+    # std_grasp_mae = np.std(avg_grasp_dc_maes)
+
+
+    # plot example image comparison
+    # plot_path = os.path.join(out_dir, f'raw_kspace_recon_comparison_{label}.png')
+    # timeframe = num_frames // 2 
+
+    # # Extract the specific timeframe for both images.
+    # # Since the first dimension is 1, we can squeeze it out.
+    # x_recon_timeframe = x_recon[0, :, :, timeframe]
+    # # grasp_img_timeframe = grasp_img_slice[..., timeframe]
+
+    # # Create a figure with two subplots, arranged horizontally.
+    # fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(10, 5))
+
+    # # Display the first image slice.
+    # ax1.imshow(np.abs(x_recon_timeframe.squeeze().cpu().numpy()), cmap='gray')
+    # ax1.set_title(f'DL Recon - Timeframe: {timeframe}, Slice: {slice_idx}')
+    # ax1.axis('off')
+
+    # # Display the second image slice.
+    # ax2.imshow(np.abs(grasp_img_timeframe.squeeze().cpu().numpy()), cmap='gray')
+    # ax2.set_title(f'GRASP Recon - Timeframe: {timeframe}, Slice: {slice_idx}')
+    # ax2.axis('off')
+
+    # # Adjust layout and display the plot.
+    # plt.tight_layout()
+    # plt.savefig(plot_path)
+    # print(f"---- DL GRASP Orientation Comparsion Saved to: {plot_path} ----")
+
+
+    return avg_mse, avg_mae, std_mse, std_mae
+
+
+
+
+def eval_raw_kspace_grasp(slice_idx, val_patient_ids, data_dir, spokes_per_frame, N_slices, num_frames, physics, device):
+    
+    sp_device = sp.Device(0 if torch.cuda.is_available() else -1)
+    dtype = torch.complex64
+
+    # select random slices to evaluate on
+    # NOTE: fix after testing
+    # random_slice_indices = random.sample(range(N_slices), num_slices_to_eval)
+    # random_slice_indices = [1]
+
+    # NOTE: temporarily set val_patient_ids for testing
+    # val_patient_ids = ['fastMRI_breast_001']
+    
+    # avg_dc_mses = []
+    # avg_dc_maes = []
+    avg_grasp_dc_mses = []
+    avg_grasp_dc_maes = []
+    with torch.no_grad():
+        for patient_id in val_patient_ids:
+
+            raw_kspace_path = os.path.join(data_dir, f'{patient_id}_2.h5')
+
+            dir = os.path.dirname(data_dir)
+            zf_kspace, binned_kspace, traj = process_kspace(raw_kspace_path, device=sp_device, spokes_per_frame=spokes_per_frame, images_per_slab=N_slices, center_partition=31)
+
+            grasp_img_path = os.path.join(dir, f'{patient_id}_2', f'grasp_recon_{spokes_per_frame}spf_{num_frames}frames_slice{slice_idx}.npy')
+
+            # if not os.path.exists(grasp_img_path):
+            #     grasp_img_slices = raw_grasp_recon(zf_kspace, binned_kspace, traj, N_slices=N_slices, spokes_per_frame=spokes_per_frame, device=sp_device)
+            #     np.save(grasp_img_path, grasp_img_slices)
+            # else:
+            grasp_img_slice = np.load(grasp_img_path)
+            
+
+            csmap = load_all_csmaps(dir, f'{patient_id}_2')
+
+
+            # for slice_idx in random_slice_indices:
+
+            kspace_slice = torch.tensor(binned_kspace[slice_idx].squeeze())
+            # grasp_img_slice = torch.tensor(grasp_img_slices[slice_idx])
+            csmap_slice = torch.tensor(csmap[..., slice_idx])
+
+            kspace_slice_flat = rearrange(kspace_slice, 't c sp sam -> c (sp sam) t').to(dtype)
+            csmap_slice = csmap_slice.to(dtype)
+
+            # # model inference 
+            # if num_frames > eval_chunk_size:
+            #     x_recon, _ = sliding_window_inference(H, W, num_frames, ktraj, dcomp, nufft_ob, adjnufft_ob, eval_chunk_size, eval_chunk_overlap, kspace_slice_flat, csmap_slice, acceleration_encoding, start_timepoint_index, model, epoch=None, device=device)  
+            # else:
+            #     x_recon, *_ = model(
+            #         kspace_slice_flat.to(device), physics, csmap_slice, acceleration_encoding, start_timepoint_index, epoch=None, norm="both"
+            #     )
+
+            # calculate data consistency of output with original k-space input
+            # simulate k-space for DL and GRASP recons
+
+            # x_recon = to_torch_complex(x_recon)
+            # sim_kspace = physics(False, x_recon.to(device), csmap_slice.to(device))
+
+            # print("grasp_img: ", grasp_img_slice.shape)
+            
+            if grasp_img_slice.shape[1] == 2:
+                grasp_img_slice = to_torch_complex(grasp_img_slice)
+                grasp_img_slice = rearrange(grasp_img_slice, 't h w -> h w t').unsqueeze(0)
+
+            if grasp_img_slice.shape[-2] == num_frames: 
+                grasp_img_slice = rearrange(grasp_img_slice, 'b h t w -> b h w t')
+
+
+            grasp_img_slice = torch.tensor(grasp_img_slice, dtype=csmap.dtype, device=device)
+            sim_kspace_grasp = physics(False, grasp_img_slice, csmap_slice.to(device))
+
+            # raw_dc_mse, raw_dc_mae = calc_dc(sim_kspace, kspace_slice_flat, device)
+            raw_grasp_dc_mse, raw_grasp_dc_mae = calc_dc(sim_kspace_grasp, kspace_slice_flat, device)
+
+            # slice_dc_mses.append(raw_dc_mse)
+            # slice_dc_maes.append(raw_dc_mae)
+            # grasp_slice_dc_mses.append(raw_grasp_dc_mse)
+            # grasp_slice_dc_maes.append(raw_grasp_dc_mae)
+
+
+            # avg_dc_mses.append(np.mean(slice_dc_mses))
+            # avg_dc_maes.append(np.mean(slice_dc_maes))
+            avg_grasp_dc_mses.append(raw_grasp_dc_mse)
+            avg_grasp_dc_maes.append(raw_grasp_dc_mae)
+
+    
+    # avg_mse = np.mean(avg_dc_mses)
+    # avg_mae = np.mean(avg_dc_maes)
+    avg_grasp_mse = np.mean(avg_grasp_dc_mses)
+    avg_grasp_mae = np.mean(avg_grasp_dc_maes)
+
+    # std_mse = np.std(avg_dc_mses)
+    # std_mae = np.std(avg_dc_maes)
     std_grasp_mse = np.std(avg_grasp_dc_mses)
     std_grasp_mae = np.std(avg_grasp_dc_maes)
 
 
     # plot example image comparison
-    plot_path = os.path.join(out_dir, f'raw_kspace_recon_comparison_{label}.png')
-    timeframe = num_frames // 2 
+    # plot_path = os.path.join(out_dir, f'raw_kspace_recon_comparison_{label}.png')
+    # timeframe = num_frames // 2 
 
-    # Extract the specific timeframe for both images.
-    # Since the first dimension is 1, we can squeeze it out.
-    x_recon_timeframe = x_recon[0, :, :, timeframe]
-    grasp_img_timeframe = grasp_img_slice[..., timeframe]
+    # # Extract the specific timeframe for both images.
+    # # Since the first dimension is 1, we can squeeze it out.
+    # x_recon_timeframe = x_recon[0, :, :, timeframe]
+    # # grasp_img_timeframe = grasp_img_slice[..., timeframe]
 
-    # Create a figure with two subplots, arranged horizontally.
-    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(10, 5))
+    # # Create a figure with two subplots, arranged horizontally.
+    # fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(10, 5))
 
-    # Display the first image slice.
-    ax1.imshow(np.abs(x_recon_timeframe.squeeze().cpu().numpy()), cmap='gray')
-    ax1.set_title(f'DL Recon - Timeframe: {timeframe}, Slice: {slice_idx}')
-    ax1.axis('off')
+    # # Display the first image slice.
+    # ax1.imshow(np.abs(x_recon_timeframe.squeeze().cpu().numpy()), cmap='gray')
+    # ax1.set_title(f'DL Recon - Timeframe: {timeframe}, Slice: {slice_idx}')
+    # ax1.axis('off')
 
-    # Display the second image slice.
-    ax2.imshow(np.abs(grasp_img_timeframe.squeeze().cpu().numpy()), cmap='gray')
-    ax2.set_title(f'GRASP Recon - Timeframe: {timeframe}, Slice: {slice_idx}')
-    ax2.axis('off')
+    # # Display the second image slice.
+    # ax2.imshow(np.abs(grasp_img_timeframe.squeeze().cpu().numpy()), cmap='gray')
+    # ax2.set_title(f'GRASP Recon - Timeframe: {timeframe}, Slice: {slice_idx}')
+    # ax2.axis('off')
 
-    # Adjust layout and display the plot.
-    plt.tight_layout()
-    plt.savefig(plot_path)
-    print(f"---- DL GRASP Orientation Comparsion Saved to: {plot_path} ----")
-
-
-    return avg_mse, avg_mae, avg_grasp_mse, avg_grasp_mae, std_mse, std_mae, std_grasp_mse, std_grasp_mae
+    # # Adjust layout and display the plot.
+    # plt.tight_layout()
+    # plt.savefig(plot_path)
+    # print(f"---- DL GRASP Orientation Comparsion Saved to: {plot_path} ----")
 
 
-
-# load data
-# exp_name = "ei_rotate20_diffeo_no_encoding"
-
-# split_file = "/gpfs/data/karczmar-lab/workspaces/rachelgordon/breastMRI-recon/ddei/data/data_split.json"
-# with open(split_file, "r") as fp:
-#     splits = json.load(fp)
-
-
-# val_dro_patient_ids = splits["val_dro"]
-# val_patient_ids = splits["val"]
-
-# # Load the configuration file
-# with open(f"output/{exp_name}/config.yaml", "r") as file:
-#     config = yaml.safe_load(file)
-
-
-# data_dir = '/ess/scratch/scratch1/rachelgordon/fastMRI_breast_data/full_kspace/' 
-
-# N_slices = 192
-# spokes_per_frame = 8
-# num_frames = 36
-# eval_chunk_size = 24
-# eval_chunk_overlap = 12
-# H, W = 320, 320
-# N_full = H * math.pi / 2
-# N_samples = 640
-
-# device = torch.device("cuda")
-# dtype = torch.complex64
-
-# # calculate acceleration factor
-# acceleration = torch.tensor([N_full / int(spokes_per_frame)], dtype=torch.float, device=device)
-
-# if config['model']['encode_acceleration']:
-#     acceleration_encoding = acceleration
-# else: 
-#     acceleration_encoding = None
-
-# if config['model']['encode_time_index'] == False:
-#     start_timepoint_index = None
-# else:
-#     start_timepoint_index = torch.tensor([0], dtype=torch.float, device=device)
-
-# ktraj, dcomp, nufft_ob, adjnufft_ob = prep_nufft(N_samples, spokes_per_frame, num_frames)
-# physics = MCNUFFT(nufft_ob.to(device), adjnufft_ob.to(device), ktraj.to(device), dcomp.to(device))
-
-
-# # define model
-# initial_lambdas = {'lambda_L': config['model']['lambda_L'], 
-#                     'lambda_S': config['model']['lambda_S'], 
-#                     'lambda_spatial_L': config['model']['lambda_spatial_L'],
-#                     'lambda_spatial_S': config['model']['lambda_spatial_S'],
-#                     'gamma': config['model']['gamma'],
-#                     'lambda_step': config['model']['lambda_step']}
-
-# output_dir = os.path.join(config["experiment"]["output_dir"], exp_name)
-# block_dir = os.path.join(output_dir, "block_outputs")
-# eval_dir = os.path.join(output_dir, "eval_results")
-
-# lsfp_backbone = LSFPNet(LayerNo=config["model"]["num_layers"], 
-#                         lambdas=initial_lambdas, 
-#                         channels=config['model']['channels'],
-#                         style_dim=config['model']['style_dim'],
-#                         svd_mode=config['model']['svd_mode'],
-#                         use_lowk_dc=config['model']['use_lowk_dc'],
-#                         lowk_frac=config['model']['lowk_frac'],
-#                         lowk_alpha=config['model']['lowk_alpha'],
-#                         film_bounded=config['model']['film_bounded'],
-#                         film_gain=config['model']['film_gain'],
-#                         film_identity_init=config['model']['film_identity_init'],
-#                         svd_noise_std=config['model']['svd_noise_std'],
-#                         film_L=config['model']['film_L'],
-#                         )
-    
-# if config['model']['encode_acceleration'] and config['model']['encode_time_index']:
-#     model = ArtifactRemovalLSFPNet(lsfp_backbone, block_dir, channels=2).to(device)
-# else:
-#     model = ArtifactRemovalLSFPNet(lsfp_backbone, block_dir, channels=1).to(device)
-
-
-
-# optimizer = torch.optim.AdamW(
-#     model.parameters(),
-#     lr=config["model"]["optimizer"]["lr"],
-#     betas=(config["model"]["optimizer"]["b1"], config["model"]["optimizer"]["b2"]),
-#     eps=config["model"]["optimizer"]["eps"],
-#     weight_decay=config["model"]["optimizer"]["weight_decay"],
-# )
-
-# checkpoint_file = f'output/{exp_name}/{exp_name}_model.pth'
-# model, optimizer, start_epoch, target_w_ei, step0_train_ei_loss, epoch_train_mc_loss, train_curves, val_curves, eval_curves = load_checkpoint(model, optimizer, checkpoint_file)
-
-
-# slice_idx = 18
-
-
+    return avg_grasp_mse, avg_grasp_mae, std_grasp_mse, std_grasp_mae

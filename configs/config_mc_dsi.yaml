@@ -1,8 +1,8 @@
 # Directories for input data
 data:
-  root_dir: "/net/scratch2/rachelgordon/dce-8tf/binned_kspace"
-  dataset_key: "ktspace"
-  split_file: "~/mri_recon/breastMRI-recon/ddei/data/data_split.json"
+  root_dir: "/net/scratch2/rachelgordon/zf_data_192_slices/zf_kspace"
+  dataset_key: "kspace"
+  split_file: "/home/rachelgordon/mri_recon/breastMRI-recon/ddei/data/data_split.json"
   val_split_ratio: 0.2
   height: 320
   width: 320
@@ -16,6 +16,9 @@ data:
   weight_accelerations: false
   fpg: 24
   train_spokes_per_frame: 8
+  slices: 192
+  slices_to_eval: 1
+  eval_frequency: 1
 
 # Experiment settings
 experiment:
@@ -91,7 +94,7 @@ training:
   save_interval: 1
   plot_interval: 20
   device: "cuda"  # or "cpu"
-  multigpu: True
+  multigpu: False
   curriculum_learning:
     enabled: False
     phases:
@@ -116,6 +119,9 @@ evaluation:
   simulated_dataset_path: "/net/scratch2/rachelgordon/dro_dataset"
   chunk_size: 24
   chunk_overlap: 12
+  raw_kspace_eval: True
+  raw_grasp_slice_idx: 95
+
 
 debugging:
   calc_step_0: true

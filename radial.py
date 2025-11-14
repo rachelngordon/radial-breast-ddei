@@ -3,13 +3,19 @@ import deepinv as dinv
 import numpy as np
 import torch
 import torch.nn as nn
-from deepinv.physics.time import TimeMixin
 from einops import rearrange
 from torchkbnufft import KbNufft, KbNufftAdjoint
 from noise import ZeroNoise
 import warnings
 from torch import Tensor
 from time import time
+
+try:
+    # Try the new import path first
+    from deepinv.utils.mixins import TimeMixin
+except ImportError:
+    # Fallback to the old import path
+    from deepinv.physics.time import TimeMixin
 
 
 def to_torch_complex(x: torch.Tensor):

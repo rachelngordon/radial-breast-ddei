@@ -48,8 +48,8 @@ class Trainer(submitit.helpers.Checkpointable):
 
 def main():
     # --- Executor Configuration ---
-    job_name = "ei_temporal_curriculum_encode_both"
-    config_path = 'configs/config_ei_warp_subsample_curriculum.yaml'
+    job_name = "ei_temporal_weight3e4"
+    config_path = 'configs/config_ei_temporal_weight3e4.yaml'
     num_gpus = 4
 
     log_dir = f"submitit_logs/{job_name}"

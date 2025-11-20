@@ -189,6 +189,8 @@ def main():
     eval_chunk_size = config["evaluation"]["chunk_size"]
     eval_chunk_overlap = config["evaluation"]["chunk_overlap"]
 
+    raw_grasp_slice_idx = config.get("evaluation", {}).get("raw_grasp_slice_idx", 95)
+
     cluster = config["experiment"].get("cluster", "Randi")
     
 
@@ -320,10 +322,13 @@ def main():
 
     val_dro_dataset = SimulatedDataset(
         root_dir=config["evaluation"]["simulated_dataset_path"], 
+        raw_kspace_path=data_dir,
         model_type=model_type, 
         patient_ids=val_dro_patient_ids,
+        dataset_key=config["data"]["dataset_key"],
         spokes_per_frame=N_spokes_eval,
-        num_frames=N_time_eval)
+        num_frames=N_time_eval,
+        grasp_slice_idx=raw_grasp_slice_idx)
 
 
     val_dro_loader = DataLoader(
@@ -484,6 +489,8 @@ def main():
     grasp_dc_mses = []
     grasp_dc_maes = []
     grasp_curve_corrs = []
+    raw_grasp_dc_mses = []
+    raw_grasp_dc_maes = []
 
     lambda_Ls = []
     lambda_Ss = []
@@ -510,6 +517,8 @@ def main():
         initial_eval_dc_mses = []
         initial_eval_dc_maes = []
         initial_eval_curve_corrs = []
+        initial_eval_raw_dc_mses = []
+        initial_eval_raw_dc_maes = []
 
 
         with torch.no_grad():
@@ -606,37 +615,18 @@ def main():
 
 
             # Evaluate on validation data
-            for measured_kspace, csmap, ground_truth, grasp_img, mask, grasp_path in tqdm(val_dro_loader, desc="Step 0 Validation Evaluation"):
+            for dro_kspace, csmap, ground_truth, dro_grasp_img, mask, grasp_path, raw_kspace, raw_grasp_img, raw_csmaps in tqdm(val_dro_loader, desc="Step 0 Validation Evaluation"):
 
                 csmap = csmap.squeeze(0).to(device)   # Remove batch dim
                 ground_truth = ground_truth.to(device) # Shape: (1, 2, T, H, W)
 
-                # simulate k-space for validation if path does not exist
-                if type(measured_kspace) is list:
+                dro_kspace = dro_kspace.squeeze(0).to(device) # Remove batch dim
+                dro_grasp_img = dro_grasp_img.to(device) # Shape: (1, 2, H, T, W)
 
-                    ground_truth_for_physics = rearrange(to_torch_complex(ground_truth), 'b t h w -> b h w t')
-                    kspace_path = measured_kspace[0]
+                raw_kspace = raw_kspace.squeeze(0).to(device) # Remove batch dim
+                raw_grasp_img = raw_grasp_img.to(device) # Shape: (1, 2, H, T, W)
+                raw_csmaps = raw_csmaps.squeeze(0).to(device)   # Remove batch dim
 
-                    # SIMULATE KSPACE
-                    measured_kspace = eval_physics(False, ground_truth_for_physics, csmap)
-
-                    # save k-space 
-                    np.save(kspace_path, measured_kspace.cpu().numpy())
-
-
-                measured_kspace = measured_kspace.squeeze(0).to(device) # Remove batch dim
-
-                # check if GRASP image exists or if we need to perform GRASP recon
-                if type(grasp_img) is int or len(grasp_img.shape) == 1:
-                    print(f"No GRASP file found, performing reconstruction with {val_dro_dataset.spokes_per_frame} spokes/frame and {val_dro_dataset.num_frames} frames.")
-
-                    grasp_img = GRASPRecon(csmap, measured_kspace, val_dro_dataset.spokes_per_frame, val_dro_dataset.num_frames, grasp_path[0])
-
-                    grasp_recon_torch = torch.from_numpy(grasp_img).permute(2, 0, 1) # T, H, W
-                    grasp_recon_torch = torch.stack([grasp_recon_torch.real, grasp_recon_torch.imag], dim=0)
-
-                    grasp_img = torch.flip(grasp_recon_torch, dims=[-3])
-                    grasp_img = torch.rot90(grasp_img, k=3, dims=[-3,-1]).unsqueeze(0)
 
                 N_spokes = eval_ktraj.shape[1] / config['data']['samples']
                 acceleration = torch.tensor([N_full / int(N_spokes)], dtype=torch.float, device=device)
@@ -651,21 +641,26 @@ def main():
                 else:
                     start_timepoint_index = torch.tensor([0], dtype=torch.float, device=device)
 
+                # inference
                 if N_time_eval > eval_chunk_size:
-                    print("Performing sliding window eval...")
-                    print("measured kspace input shape: ", measured_kspace.shape)
-                    x_recon, adj_loss = sliding_window_inference(H, W, N_time_eval, eval_ktraj, eval_dcomp, eval_nufft_ob, eval_adjnufft_ob, eval_chunk_size, eval_chunk_overlap, measured_kspace, csmap, acceleration_encoding, start_timepoint_index, model, epoch="val0", device=device)  
+                    x_recon, adj_loss = sliding_window_inference(H, W, N_time_eval, eval_ktraj, eval_dcomp, eval_nufft_ob, eval_adjnufft_ob, eval_chunk_size, eval_chunk_overlap, dro_kspace, csmap, acceleration_encoding, start_timepoint_index, model, epoch="val0", device=device)  
+                    raw_x_recon, _ = sliding_window_inference(H, W, N_time_eval, eval_ktraj, eval_dcomp, eval_nufft_ob, eval_adjnufft_ob, eval_chunk_size, eval_chunk_overlap, raw_kspace, raw_csmaps, acceleration_encoding, start_timepoint_index, model, epoch="val0", device=device)  
                 else:
-                    print("measured kspace input shape: ", measured_kspace.shape)
                     x_recon, adj_loss, *_ = model(
-                    measured_kspace.to(device), eval_physics, csmap, acceleration_encoding, start_timepoint_index, epoch="val0", norm=config['model']['norm']
+                    dro_kspace.to(device), eval_physics, csmap, acceleration_encoding, start_timepoint_index, epoch="val0", norm=config['model']['norm']
                     )
+                    raw_x_recon, *_ = model(
+                    raw_kspace.to(device), eval_physics, raw_csmaps, acceleration_encoding, start_timepoint_index, epoch="val0", norm=config['model']['norm']
+                    )
+
+                # fix orientation of raw k-space recon
+                raw_x_recon = torch.rot90(raw_x_recon, k=2, dims=[-3,-2])
                 
 
                 # compute losses
                 initial_val_adj_loss += adj_loss
                 
-                mc_loss = mc_loss_fn(measured_kspace.to(device), x_recon, eval_physics, csmap)
+                mc_loss = mc_loss_fn(dro_kspace.to(device), x_recon, eval_physics, csmap)
                 initial_val_mc_loss += mc_loss.item()
 
                 if use_ei_loss:
@@ -675,12 +670,10 @@ def main():
 
                     initial_val_ei_loss += ei_loss.item()
 
-                ground_truth = ground_truth.to(device) # Shape: (1, 2, T, H, W)
-                grasp_recon = grasp_img.to(device) # Shape: (1, 2, H, T, W)
 
                 # calculate grasp metrics
                 if global_rank == 0 or not config['training']['multigpu']:
-                    ssim_grasp, psnr_grasp, mse_grasp, lpips_grasp, dc_mse_grasp, dc_mae_grasp = eval_grasp(measured_kspace, csmap, ground_truth, grasp_recon, eval_physics, device, eval_dir)
+                    ssim_grasp, psnr_grasp, mse_grasp, lpips_grasp, dc_mse_grasp, dc_mae_grasp = eval_grasp(dro_kspace, csmap, ground_truth, dro_grasp_img, eval_physics, device, eval_dir, dro_eval=True)
                     grasp_ssims.append(ssim_grasp)
                     grasp_psnrs.append(psnr_grasp)
                     grasp_mses.append(mse_grasp)
@@ -688,7 +681,7 @@ def main():
                     grasp_dc_mses.append(dc_mse_grasp)
                     grasp_dc_maes.append(dc_mae_grasp)
 
-                    ssim, psnr, mse, lpips, dc_mse, dc_mae, recon_corr, grasp_corr = eval_sample(measured_kspace, csmap, ground_truth, x_recon, eval_physics, mask, grasp_recon, acceleration, int(N_spokes), eval_dir, label='val0', device=device)
+                    ssim, psnr, mse, lpips, dc_mse, dc_mae, recon_corr, grasp_corr = eval_sample(dro_kspace, csmap, ground_truth, x_recon, eval_physics, mask, dro_grasp_img, acceleration, int(N_spokes), eval_dir, label='val0', device=device, dro_eval=True)
                     initial_eval_ssims.append(ssim)
                     initial_eval_psnrs.append(psnr)
                     initial_eval_mses.append(mse)
@@ -700,6 +693,16 @@ def main():
                         initial_eval_curve_corrs.append(recon_corr)
                         grasp_curve_corrs.append(grasp_corr)
 
+                    # raw k-space eval
+                    dc_mse_raw_grasp, dc_mae_raw_grasp = eval_grasp(raw_kspace, raw_csmaps, ground_truth, raw_grasp_img, eval_physics, device, eval_dir, dro_eval=False)
+                    dc_mse_raw, dc_mae_raw = eval_sample(raw_kspace, raw_csmaps, ground_truth, raw_x_recon, eval_physics, mask, raw_grasp_img, acceleration, int(N_spokes), eval_dir, label='val0', device=device, dro_eval=False)
+
+                    raw_grasp_dc_mses.append(dc_mse_raw_grasp)
+                    raw_grasp_dc_maes.append(dc_mae_raw_grasp)
+                    initial_eval_raw_dc_mses.append(dc_mse_raw)
+                    initial_eval_raw_dc_maes.append(dc_mae_raw)
+
+
             step0_val_mc_loss = initial_val_mc_loss / len(val_dro_loader)
             val_mc_losses.append(step0_val_mc_loss)
 
@@ -708,14 +711,6 @@ def main():
 
             step0_val_adj_loss = initial_val_adj_loss / len(val_dro_loader)
             val_adj_losses.append(step0_val_adj_loss)
-
-
-            # evaluate on raw k-space
-            if config.get("evaluation", {}).get("raw_kspace_eval", False):
-                print(f"Evaluating on raw k-space with {num_slices_to_eval} slices...")
-                raw_dc_mse, raw_dc_mae, raw_dc_std_mse, raw_dc_std_mae = eval_raw_kspace(num_slices_to_eval, val_patient_ids, data_dir, model, N_spokes_eval, N_slices, N_time_eval, eval_chunk_size, eval_chunk_overlap, H, W, eval_ktraj, eval_dcomp, eval_nufft_ob, eval_adjnufft_ob, eval_physics, acceleration_encoding, start_timepoint_index, device, output_dir, label="step0")
-            else:
-                raw_dc_mse, raw_dc_mae, raw_dc_std_mse, raw_dc_std_mae = 0, 0, 0, 0
 
 
             if global_rank == 0 or not config['training']['multigpu']:
@@ -732,6 +727,8 @@ def main():
             initial_eval_dc_mse = np.mean(initial_eval_dc_mses)
             initial_eval_dc_mae = np.mean(initial_eval_dc_maes)
             initial_eval_curve_corr = np.mean(initial_eval_curve_corrs)
+            initial_eval_raw_dc_mse = np.mean(initial_eval_raw_dc_mses)
+            initial_eval_raw_dc_mae = np.mean(initial_eval_raw_dc_maes)
 
             eval_ssims.append(initial_eval_ssim)
             eval_psnrs.append(initial_eval_psnr)
@@ -739,8 +736,8 @@ def main():
             eval_lpipses.append(initial_eval_lpips)
             eval_dc_mses.append(initial_eval_dc_mse) 
             eval_dc_maes.append(initial_eval_dc_mae) 
-            eval_raw_dc_mses.append(raw_dc_mse) 
-            eval_raw_dc_maes.append(raw_dc_mae) 
+            eval_raw_dc_mses.append(initial_eval_raw_dc_mse) 
+            eval_raw_dc_maes.append(initial_eval_raw_dc_mae) 
             eval_curve_corrs.append(initial_eval_curve_corr)
 
             if global_rank == 0 or not config['training']['multigpu']:
@@ -750,12 +747,24 @@ def main():
                 writer.add_scalar('Metric/LPIPS', initial_eval_lpips, 0)
                 writer.add_scalar('Metric/DC_MSE', initial_eval_dc_mse, 0)
                 writer.add_scalar('Metric/DC_MAE', initial_eval_dc_mae, 0)
-                writer.add_scalar('Metric/RAW_DC_MSE', raw_dc_mse, 0)
-                writer.add_scalar('Metric/RAW_DC_MAE', raw_dc_mae, 0)
+                writer.add_scalar('Metric/RAW_DC_MSE', initial_eval_raw_dc_mse, 0)
+                writer.add_scalar('Metric/RAW_DC_MAE', initial_eval_raw_dc_mae, 0)
                 writer.add_scalar('Metric/EC_Corr', initial_eval_curve_corr, 0)
 
         print(f"Step 0 Train Losses: MC: {step0_train_mc_loss}, EI: {step0_train_ei_loss}, Adj: {step0_train_adj_loss}")
         print(f"Step 0 Val Losses: MC: {step0_val_mc_loss}, EI: {step0_val_ei_loss}, Adj: {step0_val_adj_loss}")
+
+        # calculate average GRASP metrics
+        avg_grasp_ssim = np.mean(grasp_ssims)
+        avg_grasp_psnr = np.mean(grasp_psnrs)
+        avg_grasp_mse = np.mean(grasp_mses)
+        avg_grasp_lpips = np.mean(grasp_lpipses)
+        avg_grasp_dc_mse = np.mean(grasp_dc_mses)
+        avg_grasp_dc_mae = np.mean(grasp_dc_maes)
+        avg_grasp_curve_corr = np.mean(grasp_curve_corrs)
+        avg_grasp_raw_dc_mae = np.mean(raw_grasp_dc_maes)
+        avg_grasp_raw_dc_mse = np.mean(raw_grasp_dc_mses)
+
 
     # Training Loop
     svd_fail_count = 0
@@ -778,6 +787,8 @@ def main():
             epoch_eval_dc_mses = []
             epoch_eval_dc_maes = []
             epoch_eval_curve_corrs = []
+            epoch_eval_raw_dc_mses = []
+            epoch_eval_raw_dc_maes = []
 
 
             train_loader_tqdm = tqdm(
@@ -1065,40 +1076,18 @@ def main():
                     leave=False,
                 )
                 with torch.no_grad():
-                    for val_kspace_batch, val_csmap, val_ground_truth, val_grasp_img, val_mask, grasp_path in tqdm(val_dro_loader):
+                    for val_dro_kspace_batch, val_csmap, val_ground_truth, val_dro_grasp_img, val_mask, grasp_path, val_raw_kspace, val_raw_grasp_img, val_raw_csmaps in tqdm(val_dro_loader):
 
                         val_csmap = val_csmap.squeeze(0).to(device)   # Remove batch dim
                         val_ground_truth = val_ground_truth.to(device) # Shape: (1, 2, T, H, W)
 
-                        # simulate k-space for validation if path does not exist
-                        if type(val_kspace_batch) is list:
-
-                            ground_truth_for_physics = rearrange(to_torch_complex(val_ground_truth), 'b t h w -> b h w t')
-                            # ground_truth_for_physics = rearrange(val_ground_truth, 'b c t h w -> b c h w t')
-                            kspace_path = val_kspace_batch[0]
-
-                            # SIMULATE KSPACE
-                            val_kspace_batch = eval_physics(False, ground_truth_for_physics, val_csmap)
-
-                            # save k-space 
-                            # np.save(kspace_path, val_kspace_batch)
-
                         # prepare inputs
-                        val_kspace_batch = val_kspace_batch.squeeze(0).to(device) # Remove batch dim
+                        val_dro_kspace_batch = val_dro_kspace_batch.squeeze(0).to(device) # Remove batch dim
+                        val_dro_grasp_img = val_dro_grasp_img.to(device)
 
-                        # check if GRASP image exists or if we need to perform GRASP recon
-                        if type(val_grasp_img) is int or len(val_grasp_img.shape) == 1:
-                            print(f"No GRASP file found, performing reconstruction with {val_dro_dataset.spokes_per_frame} spokes/frame and {val_dro_dataset.num_frames} frames.")
-
-                            val_grasp_img = GRASPRecon(val_csmap, val_kspace_batch, val_dro_dataset.spokes_per_frame, val_dro_dataset.num_frames, grasp_path[0])
-
-                            val_grasp_img = torch.from_numpy(val_grasp_img).permute(2, 0, 1) # T, H, W
-                            val_grasp_img = torch.stack([val_grasp_img.real, val_grasp_img.imag], dim=0)
-
-                            val_grasp_img = torch.flip(val_grasp_img, dims=[-3])
-                            val_grasp_img = torch.rot90(val_grasp_img, k=3, dims=[-3,-1]).unsqueeze(0)
-
-                        val_grasp_img_tensor = val_grasp_img.to(device)
+                        val_raw_kspace = val_raw_kspace.squeeze(0).to(device) # Remove batch dim
+                        val_raw_grasp_img = val_raw_grasp_img.to(device)
+                        val_raw_csmaps = val_raw_csmaps.squeeze(0).to(device)
 
                         # calculate acceleration factor
                         N_spokes = eval_ktraj.shape[1] / config['data']['samples']
@@ -1116,11 +1105,14 @@ def main():
                             
                         try:
                             if N_time_eval > eval_chunk_size:
-                                print("Performing sliding window eval...")
-                                val_x_recon, val_adj_loss = sliding_window_inference(H, W, N_time_eval, eval_ktraj, eval_dcomp, eval_nufft_ob, eval_adjnufft_ob, eval_chunk_size, eval_chunk_overlap, val_kspace_batch, val_csmap, acceleration_encoding, start_timepoint_index, model, epoch=f"val{epoch}", device=device)  
+                                val_x_recon, val_adj_loss = sliding_window_inference(H, W, N_time_eval, eval_ktraj, eval_dcomp, eval_nufft_ob, eval_adjnufft_ob, eval_chunk_size, eval_chunk_overlap, val_dro_kspace_batch, val_csmap, acceleration_encoding, start_timepoint_index, model, epoch=f"val{epoch}", device=device)  
+                                val_raw_x_recon, _ = sliding_window_inference(H, W, N_time_eval, eval_ktraj, eval_dcomp, eval_nufft_ob, eval_adjnufft_ob, eval_chunk_size, eval_chunk_overlap, val_raw_kspace, val_raw_csmaps, acceleration_encoding, start_timepoint_index, model, epoch="val0", device=device)  
                             else:
                                 val_x_recon, val_adj_loss, *_ = model(
-                                val_kspace_batch.to(device), eval_physics, val_csmap, acceleration_encoding, start_timepoint_index, epoch=f"val{epoch}", norm=config['model']['norm']
+                                val_dro_kspace_batch.to(device), eval_physics, val_csmap, acceleration_encoding, start_timepoint_index, epoch=f"val{epoch}", norm=config['model']['norm']
+                                )
+                                val_raw_x_recon, *_ = model(
+                                val_raw_kspace.to(device), eval_physics, val_raw_csmaps, acceleration_encoding, start_timepoint_index, epoch="val0", norm=config['model']['norm']
                                 )
 
 
@@ -1129,7 +1121,7 @@ def main():
                             # compute losses
                             val_running_adj_loss += val_adj_loss
 
-                            val_mc_loss = mc_loss_fn(val_kspace_batch.to(device), val_x_recon, eval_physics, val_csmap)
+                            val_mc_loss = mc_loss_fn(val_dro_kspace_batch.to(device), val_x_recon, eval_physics, val_csmap)
                             val_running_mc_loss += val_mc_loss.item()
 
                             if use_ei_loss:
@@ -1147,7 +1139,7 @@ def main():
 
                             ## Evaluation
                             if global_rank == 0 or not config['training']['multigpu']:
-                                ssim, psnr, mse, lpips, dc_mse, dc_mae, recon_corr, _ = eval_sample(val_kspace_batch, val_csmap, val_ground_truth, val_x_recon, eval_physics, val_mask, val_grasp_img_tensor, acceleration, int(N_spokes), eval_dir, f'epoch{epoch}', device)
+                                ssim, psnr, mse, lpips, dc_mse, dc_mae, recon_corr, _ = eval_sample(val_dro_kspace_batch, val_csmap, val_ground_truth, val_x_recon, eval_physics, val_mask, val_dro_grasp_img, acceleration, int(N_spokes), eval_dir, f'epoch{epoch}', device, dro_eval=True)
                                 epoch_eval_ssims.append(ssim)
                                 epoch_eval_psnrs.append(psnr)
                                 epoch_eval_mses.append(mse)
@@ -1157,6 +1149,13 @@ def main():
 
                                 if recon_corr is not None:
                                     epoch_eval_curve_corrs.append(recon_corr)
+
+                                # raw k-space eval
+                                dc_mse_raw, dc_mae_raw = eval_sample(val_raw_kspace, val_raw_csmaps, val_ground_truth, val_raw_x_recon, eval_physics, val_mask, val_raw_grasp_img, acceleration, int(N_spokes), eval_dir, label=f'epoch{epoch}', device=device, dro_eval=False)
+
+                                epoch_eval_raw_dc_mses.append(dc_mse_raw)
+                                epoch_eval_raw_dc_maes.append(dc_mae_raw)
+
                             
                         except RuntimeError as e:
                             # catch only SVD-related failures
@@ -1169,13 +1168,6 @@ def main():
                             else:
                                 raise  # re-raise other errors
 
-                # evaluate on raw k-space
-                if config.get("evaluation", {}).get("raw_kspace_eval", False):
-                    print(f"Evaluating on raw k-space with {num_slices_to_eval} slices...")
-                    raw_dc_mse, raw_dc_mae, raw_dc_std_mse, raw_dc_std_mae = eval_raw_kspace(num_slices_to_eval, val_patient_ids, data_dir, model, N_spokes_eval, N_slices, N_time_eval, eval_chunk_size, eval_chunk_overlap, H, W, eval_ktraj, eval_dcomp, eval_nufft_ob, eval_adjnufft_ob, eval_physics, acceleration_encoding, start_timepoint_index, device, output_dir, label=f"epoch{epoch}")
-                else:
-                    raw_dc_mse, raw_dc_mae, raw_dc_std_mse, raw_dc_std_mae = 0, 0, 0, 0
-
 
 
                 # Calculate and store average validation evaluation metrics
@@ -1187,6 +1179,8 @@ def main():
                     epoch_eval_dc_mse = np.mean(epoch_eval_dc_mses)
                     epoch_eval_dc_mae = np.mean(epoch_eval_dc_maes)
                     epoch_eval_curve_corr = np.mean(epoch_eval_curve_corrs)
+                    epoch_eval_raw_dc_mse = np.mean(epoch_eval_raw_dc_mses)
+                    epoch_eval_raw_dc_mae = np.mean(epoch_eval_raw_dc_maes)
 
                     eval_ssims.append(epoch_eval_ssim)
                     eval_psnrs.append(epoch_eval_psnr)
@@ -1194,8 +1188,8 @@ def main():
                     eval_lpipses.append(epoch_eval_lpips)
                     eval_dc_mses.append(epoch_eval_dc_mse) 
                     eval_dc_maes.append(epoch_eval_dc_mae) 
-                    eval_raw_dc_mses.append(raw_dc_mse) 
-                    eval_raw_dc_maes.append(raw_dc_mae)    
+                    eval_raw_dc_mses.append(epoch_eval_raw_dc_mse) 
+                    eval_raw_dc_maes.append(epoch_eval_raw_dc_mae)    
                     eval_curve_corrs.append(epoch_eval_curve_corr)  
 
     
@@ -1205,8 +1199,8 @@ def main():
                     writer.add_scalar('Metric/LPIPS', epoch_eval_lpips, epoch)
                     writer.add_scalar('Metric/DC_MSE', epoch_eval_dc_mse, epoch)
                     writer.add_scalar('Metric/DC_MAE', epoch_eval_dc_mae, epoch)
-                    writer.add_scalar('Metric/RAW_DC_MSE', raw_dc_mse, epoch)
-                    writer.add_scalar('Metric/RAW_DC_MAE', raw_dc_mae, epoch)
+                    writer.add_scalar('Metric/RAW_DC_MSE', epoch_eval_raw_dc_mse, epoch)
+                    writer.add_scalar('Metric/RAW_DC_MAE', epoch_eval_raw_dc_mae, epoch)
                     writer.add_scalar('Metric/EC_Corr', epoch_eval_curve_corr, epoch)
 
 
@@ -1220,18 +1214,18 @@ def main():
                             f"Validation Sample - Epoch {epoch} (AF = {round(acceleration.item(), 1)}, SPF = {int(N_spokes)})",
                             f"val_sample_epoch_{epoch}",
                             output_dir,
-                            val_grasp_img
+                            val_dro_grasp_img
                         )
 
                         val_x_recon_reshaped = rearrange(val_x_recon, 'b c h w t -> b c t h w')
 
                         plot_enhancement_curve(
                             val_x_recon_reshaped,
-                            output_filename = os.path.join(output_dir, 'enhancement_curves', f'val_sample_enhancement_curve_epoch_{epoch}.png'))
+                            output_filename = os.path.join(output_dir, 'enhancement_curves', f'val_dro_sample_enhancement_curve_epoch_{epoch}.png'))
                         
                         plot_enhancement_curve(
-                            val_grasp_img,
-                            output_filename = os.path.join(output_dir, 'enhancement_curves', f'val_grasp_sample_enhancement_curve_epoch_{epoch}.png'))
+                            val_dro_grasp_img,
+                            output_filename = os.path.join(output_dir, 'enhancement_curves', f'val_dro_grasp_sample_enhancement_curve_epoch_{epoch}.png'))
 
 
                         if use_ei_loss:
@@ -1411,6 +1405,7 @@ def main():
 
 
                         # plot evaluation metrics in one figure
+
                         # Set the seaborn style
                         sns.set_style("whitegrid")
 
@@ -1422,36 +1417,43 @@ def main():
                         axes[0, 0].set_title("DRO Evaluation SSIM")
                         axes[0, 0].set_xlabel("Epoch")
                         axes[0, 0].set_ylabel("SSIM")
+                        axes[0, 0].axhline(y=avg_grasp_ssim, color='red', linestyle='--', linewidth=2)
 
                         sns.lineplot(x=range(0, len(eval_psnrs)*eval_frequency, eval_frequency), y=eval_psnrs, ax=axes[0, 1])
                         axes[0, 1].set_title("DRO Evaluation PSNR")
                         axes[0, 1].set_xlabel("Epoch")
                         axes[0, 1].set_ylabel("PSNR")
+                        axes[0, 1].axhline(y=avg_grasp_psnr, color='red', linestyle='--', linewidth=2)
 
                         sns.lineplot(x=range(0, len(eval_mses)*eval_frequency, eval_frequency), y=eval_mses, ax=axes[0, 2])
                         axes[0, 2].set_title("DRO Evaluation Image MSE")
                         axes[0, 2].set_xlabel("Epoch")
                         axes[0, 2].set_ylabel("MSE")
+                        axes[0, 2].axhline(y=avg_grasp_mse, color='red', linestyle='--', linewidth=2)
 
-                        # sns.lineplot(x=range(len(eval_lpipses)), y=eval_lpipses, ax=axes[1, 0])
-                        # axes[1, 0].set_title("Evaluation LPIPS")
-                        # axes[1, 0].set_xlabel("Epoch")
-                        # axes[1, 0].set_ylabel("LPIPS")
-
-                        sns.lineplot(x=range(0, len(eval_dc_maes)*eval_frequency, eval_frequency), y=eval_dc_maes, ax=axes[1, 0])
-                        axes[1, 0].set_title("DRO Evaluation Simulated k-space MAE")
+                        sns.lineplot(x=range(len(eval_lpipses)), y=eval_lpipses, ax=axes[1, 0])
+                        axes[1, 0].set_title("Evaluation LPIPS")
                         axes[1, 0].set_xlabel("Epoch")
-                        axes[1, 0].set_ylabel("MAE")
+                        axes[1, 0].set_ylabel("LPIPS")
+                        axes[1, 0].axhline(y=avg_grasp_lpips, color='red', linestyle='--', linewidth=2)
+
+                        # sns.lineplot(x=range(0, len(eval_dc_maes)*eval_frequency, eval_frequency), y=eval_dc_maes, ax=axes[1, 0])
+                        # axes[1, 0].set_title("DRO Evaluation Simulated k-space MAE")
+                        # axes[1, 0].set_xlabel("Epoch")
+                        # axes[1, 0].set_ylabel("MAE")
+                        # axes[1, 0].axhline(y=avg_grasp_dc_mae, color='red', linestyle='--', linewidth=2)
 
                         sns.lineplot(x=range(0, len(eval_raw_dc_maes)*eval_frequency, eval_frequency), y=eval_raw_dc_maes, ax=axes[1, 1])
                         axes[1, 1].set_title("Non-DRO Evaluation Raw k-space MAE")
                         axes[1, 1].set_xlabel("Epoch")
                         axes[1, 1].set_ylabel("MAE")
+                        axes[1, 1].axhline(y=avg_grasp_raw_dc_mae, color='red', linestyle='--', linewidth=2)
 
                         sns.lineplot(x=range(0, len(eval_curve_corrs)*eval_frequency, eval_frequency), y=eval_curve_corrs, ax=axes[1, 2])
                         axes[1, 2].set_title("DRO Tumor Enhancement Curve Correlation")
                         axes[1, 2].set_xlabel("Epoch")
                         axes[1, 2].set_ylabel("Pearson Correlation Coefficient")
+                        axes[1, 2].axhline(y=avg_grasp_curve_corr, color='red', linestyle='--', linewidth=2)
 
                         plt.tight_layout(rect=[0, 0.03, 1, 0.95])
                         plt.savefig(os.path.join(output_dir, "eval_metrics.png"))
@@ -1459,9 +1461,17 @@ def main():
 
                         epoch_labels = range(0, len(eval_dc_mses)*eval_frequency, eval_frequency)
 
+                        
 
                         plt.figure()
                         plt.plot(epoch_labels, eval_dc_mses)
+                        plt.axhline(
+                            y=avg_grasp_dc_mse,
+                            color="red",
+                            linestyle="--",
+                            linewidth=2,
+                            label="GRASP Avg"
+                        )
                         plt.xlabel("Epoch")
                         plt.ylabel("DRO Simulated k-space MSE")
                         plt.title("Evaluation Data Consistency (MSE)")
@@ -1469,8 +1479,32 @@ def main():
                         plt.savefig(os.path.join(eval_dir, "eval_dc_mses.png"))
                         plt.close()
 
+
+                        plt.figure()
+                        plt.plot(epoch_labels, eval_dc_maes)
+                        plt.axhline(
+                            y=avg_grasp_dc_mae,
+                            color="red",
+                            linestyle="--",
+                            linewidth=2,
+                            label="GRASP Avg"
+                        )
+                        plt.xlabel("Epoch")
+                        plt.ylabel("DRO Simulated k-space MAE")
+                        plt.title("Evaluation Data Consistency (MAE)")
+                        plt.grid(True)
+                        plt.savefig(os.path.join(eval_dir, "eval_dc_maes.png"))
+                        plt.close()
+
                         plt.figure()
                         plt.plot(epoch_labels, eval_raw_dc_mses)
+                        plt.axhline(
+                            y=avg_grasp_raw_dc_mse,
+                            color="red",
+                            linestyle="--",
+                            linewidth=2,
+                            label="GRASP Avg"
+                        )
                         plt.xlabel("Epoch")
                         plt.ylabel("Non-DRO Raw k-space MSE")
                         plt.title("Evaluation Data Consistency (MSE)")
@@ -1478,14 +1512,6 @@ def main():
                         plt.savefig(os.path.join(eval_dir, "eval_raw_dc_mses.png"))
                         plt.close()
 
-                        plt.figure()
-                        plt.plot(epoch_labels, eval_lpipses)
-                        plt.xlabel("Epoch")
-                        plt.ylabel("LPIPS")
-                        plt.title("DRO Image Evaluation LPIPS")
-                        plt.grid(True)
-                        plt.savefig(os.path.join(eval_dir, "eval_lpipses.png"))
-                        plt.close()
 
                 if global_rank == 0 or not config['training']['multigpu']:
                     # Print epoch summary
@@ -1508,18 +1534,22 @@ def main():
                     print(f"Recon LPIPS: {epoch_eval_lpips:.4f} ± {np.std(epoch_eval_lpipses):.4f}")
                     print(f"Recon DC MSE: {epoch_eval_dc_mse:.4f} ± {np.std(epoch_eval_dc_mses):.4f}")
                     print(f"Recon DC MAE: {epoch_eval_dc_mae:.4f} ± {np.std(epoch_eval_dc_maes):.4f}")
-                    print(f"Recon Raw DC MSE: {raw_dc_mse:.4f} ± {raw_dc_std_mse:.4f}")
-                    print(f"Recon Raw DC MAE: {raw_dc_mae:.4f} ± {raw_dc_std_mae:.4f}")
+                    print(f"Recon Raw DC MSE: {epoch_eval_raw_dc_mse:.4f} ± {np.std(epoch_eval_raw_dc_mses):.4f}")
+                    print(f"Recon Raw DC MAE: {epoch_eval_raw_dc_mae:.4f} ± {np.std(epoch_eval_raw_dc_maes):.4f}")
                     print(f"Recon Enhancement Curve Correlation: {epoch_eval_curve_corr:.4f} ± {np.std(epoch_eval_curve_corrs):.4f}")
-                    print(f"GRASP SSIM: {np.mean(grasp_ssims):.4f} ± {np.std(grasp_ssims):.4f}")
-                    print(f"GRASP PSNR: {np.mean(grasp_psnrs):.4f} ± {np.std(grasp_psnrs):.4f}")
-                    print(f"GRASP MSE: {np.mean(grasp_mses):.4f} ± {np.std(grasp_mses):.4f}")
-                    print(f"GRASP LPIPS: {np.mean(grasp_lpipses):.4f} ± {np.std(grasp_lpipses):.4f}")
-                    print(f"GRASP DC MSE: {np.mean(grasp_dc_mses):.6f} ± {np.std(grasp_dc_mses):.4f}")
-                    print(f"GRASP DC MAE: {np.mean(grasp_dc_maes):.6f} ± {np.std(grasp_dc_maes):.4f}")
-                    # print(f"GRASP DC MSE: {raw_grasp_dc_mse:.6f} ± {raw_dc_std_grasp_mse:.4f}")
-                    # print(f"GRASP DC MAE: {raw_grasp_dc_mae:.6f} ± {raw_dc_std_grasp_mae:.4f}")
-                    print(f"GRASP Enhancement Curve Correlation: {np.mean(grasp_curve_corrs):.6f} ± {np.std(grasp_curve_corrs):.4f}")
+                    print(f"GRASP SSIM: {avg_grasp_ssim:.4f} ± {np.std(grasp_ssims):.4f}")
+                    print(f"GRASP PSNR: {avg_grasp_psnr:.4f} ± {np.std(grasp_psnrs):.4f}")
+                    print(f"GRASP MSE: {avg_grasp_mse:.4f} ± {np.std(grasp_mses):.4f}")
+                    print(f"GRASP LPIPS: {avg_grasp_lpips:.4f} ± {np.std(grasp_lpipses):.4f}")
+                    print(f"GRASP DC MSE: {avg_grasp_dc_mse:.6f} ± {np.std(grasp_dc_mses):.4f}")
+                    print(f"GRASP DC MAE: {avg_grasp_dc_mae:.6f} ± {np.std(grasp_dc_maes):.4f}")
+                    print(f"GRASP DC MSE: {avg_grasp_raw_dc_mse:.6f} ± {np.std(raw_grasp_dc_maes):.4f}")
+                    print(f"GRASP DC MAE: {avg_grasp_raw_dc_mae:.6f} ± {np.std(raw_grasp_dc_mses):.4f}")
+                    print(f"GRASP Enhancement Curve Correlation: {avg_grasp_curve_corr:.6f} ± {np.std(grasp_curve_corrs):.4f}")
+
+
+
+                    
 
 
     # Save the model at the end of training
@@ -1559,55 +1589,55 @@ def main():
             metrics_path = os.path.join(eval_dir, "eval_metrics.csv")
 
             with open(metrics_path, 'w', newline='') as csvfile:
-                writer = csv.writer(csvfile)
-                writer.writerow(['Recon', 'SSIM', 'PSNR', 'MSE', 'LPIPS', 'DC MSE', 'DC MAE', 'EC Correlation'])
-                writer.writerow(['DL', 
+                csvwriter = csv.writer(csvfile)
+                csvwriter.writerow(['Recon', 'SSIM', 'PSNR', 'MSE', 'LPIPS', 'DC MSE', 'DC MAE', 'EC Correlation'])
+                csvwriter.writerow(['DL', 
                                 f'{epoch_eval_ssim:.4f} ± {np.std(epoch_eval_ssims):.4f}', 
                                 f'{epoch_eval_psnr:.4f} ± {np.std(epoch_eval_psnrs):.4f}', 
                                 f'{epoch_eval_mse:.4f} ± {np.std(epoch_eval_mses):.4f}',
                                 f'{epoch_eval_lpips:.4f} ± {np.std(epoch_eval_lpipses):.4f}',  
                                 f'{epoch_eval_dc_mse:.4f} ± {np.std(epoch_eval_dc_mses):.4f}', 
                                 f'{epoch_eval_dc_mae:.4f} ± {np.std(epoch_eval_dc_maes):.4f}', 
-                                f"{raw_dc_mse:.4f} ± {raw_dc_std_mse:.4f}", 
-                                f"{raw_dc_mae:.4f} ± {raw_dc_std_mae:.4f}", 
+                                f"{epoch_eval_raw_dc_mse:.4f} ± {np.std(epoch_eval_raw_dc_mses):.4f}", 
+                                f"{epoch_eval_raw_dc_mae:.4f} ± {np.std(epoch_eval_raw_dc_maes):.4f}", 
                                 f'{epoch_eval_curve_corr:.4f} ± {np.std(epoch_eval_curve_corrs):.4f}'])
-                writer.writerow(['GRASP', 
-                                f'{np.mean(grasp_ssims):.4f} ± {np.std(grasp_ssims):.4f}', 
-                                f'{np.mean(grasp_psnrs):.4f} ± {np.std(grasp_psnrs):.4f}', 
-                                f'{np.mean(grasp_mses):.4f} ± {np.std(grasp_mses):.4f}', 
-                                f'{np.mean(grasp_lpipses):.4f} ± {np.std(grasp_lpipses):.4f}', 
-                                f'{np.mean(grasp_dc_mses):.4f} ± {np.std(grasp_dc_mses):.4f}', 
-                                f'{np.mean(grasp_dc_maes):.4f} ± {np.std(grasp_dc_maes):.4f}', 
-                                # f"{raw_grasp_dc_mse:.6f} ± {raw_dc_std_grasp_mse:.4f}",
-                                # f"{raw_grasp_dc_mae:.6f} ± {raw_dc_std_grasp_mae:.4f}", 
-                                f'{np.mean(grasp_curve_corrs):.4f} ± {np.std(grasp_curve_corrs):.4f}'])
+                csvwriter.writerow(['GRASP', 
+                                f'{avg_grasp_ssim:.4f} ± {np.std(grasp_ssims):.4f}', 
+                                f'{avg_grasp_psnr:.4f} ± {np.std(grasp_psnrs):.4f}', 
+                                f'{avg_grasp_mse:.4f} ± {np.std(grasp_mses):.4f}', 
+                                f'{avg_grasp_lpips:.4f} ± {np.std(grasp_lpipses):.4f}', 
+                                f'{avg_grasp_dc_mse:.4f} ± {np.std(grasp_dc_mses):.4f}', 
+                                f'{avg_grasp_dc_mae:.4f} ± {np.std(grasp_dc_maes):.4f}', 
+                                f"{avg_grasp_raw_dc_mse:.6f} ± {np.std(raw_grasp_dc_mses):.4f}",
+                                f"{avg_grasp_raw_dc_mae:.6f} ± {np.std(raw_grasp_dc_maes):.4f}", 
+                                f'{avg_grasp_curve_corr:.4f} ± {np.std(grasp_curve_corrs):.4f}'])
 
 
 
         # EVALUATE WITH VARIABLE SPOKES PER FRAME
 
-        MAIN_EVALUATION_PLAN = [
-            {
-                "spokes_per_frame": 8,
-                "num_frames": 36, # 8 * 36 = 288 total spokes
-                "description": "High temporal resolution"
-            },
-            {
-                "spokes_per_frame": 16,
-                "num_frames": 18, # 16 * 18 = 288 total spokes
-                "description": "High temporal resolution"
-            },
-            {
-                "spokes_per_frame": 24,
-                "num_frames": 12, # 24 * 12 = 288 total spokes
-                "description": "Good temporal resolution"
-            },
-            {
-                "spokes_per_frame": 32,
-                "num_frames": 8, # 36 * 8 = 288 total spokes
-                "description": "Standard temporal resolution"
-            },
-        ]
+        # MAIN_EVALUATION_PLAN = [
+        #     {
+        #         "spokes_per_frame": 8,
+        #         "num_frames": 36, # 8 * 36 = 288 total spokes
+        #         "description": "High temporal resolution"
+        #     },
+        #     {
+        #         "spokes_per_frame": 16,
+        #         "num_frames": 18, # 16 * 18 = 288 total spokes
+        #         "description": "High temporal resolution"
+        #     },
+        #     {
+        #         "spokes_per_frame": 24,
+        #         "num_frames": 12, # 24 * 12 = 288 total spokes
+        #         "description": "Good temporal resolution"
+        #     },
+        #     {
+        #         "spokes_per_frame": 32,
+        #         "num_frames": 8, # 36 * 8 = 288 total spokes
+        #         "description": "Standard temporal resolution"
+        #     },
+        # ]
 
 
 
@@ -1626,15 +1656,36 @@ def main():
                 "num_frames": 72, # 4 * 72 = 288 total spokes
                 "description": "Stress test: max temporal points, 4 spokes"
             },
+            {
+                "spokes_per_frame": 8,
+                "num_frames": 36, # 8 * 36 = 288 total spokes
+                "description": "High temporal resolution"
+            },
+            {
+                "spokes_per_frame": 16,
+                "num_frames": 18, # 16 * 18 = 288 total spokes
+                "description": "High temporal resolution"
+            },
+            {
+                "spokes_per_frame": 24,
+                "num_frames": 12, # 24 * 12 = 288 total spokes
+                "description": "Good temporal resolution"
+            },
+            {
+                "spokes_per_frame": 36,
+                "num_frames": 8, # 36 * 8 = 288 total spokes
+                "description": "Standard temporal resolution"
+            }
         ]
-
-        raw_grasp_slice_idx = config.get("evaluation", {}).get("raw_grasp_slice_idx", 95)
 
 
         eval_spf_dataset = SimulatedSPFDataset(
             root_dir=config["evaluation"]["simulated_dataset_path"], 
+            raw_kspace_path=data_dir,
             model_type=model_type, 
             patient_ids=val_dro_patient_ids,
+            dataset_key=config["data"]["dataset_key"],
+            grasp_slice_idx=raw_grasp_slice_idx
             )
 
 
@@ -1686,6 +1737,11 @@ def main():
                 stress_test_grasp_dc_mses = []
                 stress_test_grasp_dc_maes = []
                 stress_test_grasp_corrs = []
+                stress_test_raw_dc_mses = []
+                stress_test_raw_dc_maes = []
+                stress_test_raw_grasp_dc_mses = []
+                stress_test_raw_grasp_dc_maes = []
+
 
                 spokes = eval_config["spokes_per_frame"]
                 num_frames = eval_config["num_frames"]
@@ -1695,11 +1751,17 @@ def main():
                 eval_spf_dataset._update_sample_paths()
 
 
-                for csmap, ground_truth, grasp_img, mask, grasp_path in tqdm(eval_spf_loader, desc="Variable Spokes Per Frame Evaluation"):
+                for csmap, ground_truth, dro_grasp_img, mask, grasp_path, raw_kspace, raw_csmaps, raw_grasp_img in tqdm(eval_spf_loader, desc="Variable Spokes Per Frame Evaluation"):
 
 
                     csmap = csmap.squeeze(0).to(device)   # Remove batch dim
                     ground_truth = ground_truth.to(device) # Shape: (1, 2, T, H, W)
+
+                    dro_grasp_img = dro_grasp_img.to(device) # Shape: (1, 2, H, T, W)
+
+                    raw_kspace = raw_kspace.squeeze(0).to(device) # Remove batch dim
+                    raw_grasp_img = raw_grasp_img.to(device) # Shape: (1, 2, H, T, W)
+                    raw_csmaps = raw_csmaps.squeeze(0).to(device)   # Remove batch dim
 
                     # SIMULATE KSPACE
                     ktraj, dcomp, nufft_ob, adjnufft_ob = prep_nufft(N_samples, spokes, num_frames)
@@ -1724,33 +1786,40 @@ def main():
 
 
                     # check if GRASP image exists or if we need to perform GRASP recon
-                    if type(grasp_img) is int or len(grasp_img.shape) == 1:
+                    if type(dro_grasp_img) is int or len(dro_grasp_img.shape) == 1:
                         print(f"No GRASP file found, performing reconstruction with {spokes} spokes/frame and {num_frames} frames.")
 
-                        grasp_img = GRASPRecon(csmap, sim_kspace, spokes, num_frames, grasp_path[0])
+                        dro_grasp_img = GRASPRecon(csmap, sim_kspace, spokes, num_frames, grasp_path[0])
 
-                        grasp_recon_torch = torch.from_numpy(grasp_img).permute(2, 0, 1) # T, H, W
+                        grasp_recon_torch = torch.from_numpy(dro_grasp_img).permute(2, 0, 1) # T, H, W
                         grasp_recon_torch = torch.stack([grasp_recon_torch.real, grasp_recon_torch.imag], dim=0)
 
-                        grasp_img = torch.flip(grasp_recon_torch, dims=[-3])
-                        grasp_img = torch.rot90(grasp_img, k=3, dims=[-3,-1]).unsqueeze(0)
+                        dro_grasp_img = torch.flip(grasp_recon_torch, dims=[-3])
+                        dro_grasp_img = torch.rot90(dro_grasp_img, k=3, dims=[-3,-1]).unsqueeze(0)
 
-                    grasp_img = grasp_img.to(device)
+                    dro_grasp_img = dro_grasp_img.to(device)
 
                     if num_frames > eval_chunk_size:
                         print("Performing sliding window eval...")
                         x_recon, _ = sliding_window_inference(H, W, num_frames, ktraj, dcomp, nufft_ob, adjnufft_ob, eval_chunk_size, eval_chunk_overlap, kspace, csmap, acceleration_encoding, start_timepoint_index, model, epoch=None, device=device)  
+                        raw_x_recon, _ = sliding_window_inference(H, W, num_frames, ktraj, dcomp, nufft_ob, adjnufft_ob, eval_chunk_size, eval_chunk_overlap, raw_kspace, raw_csmaps, acceleration_encoding, start_timepoint_index, model, epoch="val0", device=device)  
                     else:
                         x_recon, *_ = model(
                             kspace.to(device), physics, csmap, acceleration_encoding, start_timepoint_index, epoch=None, norm=config['model']['norm']
+                        )
+                        raw_x_recon, adj_loss, *_ = model(
+                        raw_kspace.to(device), physics, raw_csmaps, acceleration_encoding, start_timepoint_index, epoch=None, norm=config['model']['norm']
                         )
 
                     ground_truth = torch.stack([ground_truth.real, ground_truth.imag], dim=1)
                     ground_truth = rearrange(ground_truth, 'b i h w t -> b i t h w')
 
+                    # fix orientation of raw k-space recon
+                    raw_x_recon = torch.rot90(raw_x_recon, k=2, dims=[-3,-2])
+
 
                     ## Evaluation
-                    ssim, psnr, mse, lpips, dc_mse, dc_mae, recon_corr, grasp_corr = eval_sample(kspace, csmap, ground_truth, x_recon, physics, mask, grasp_img, acceleration, int(spokes), eval_dir, f"{spokes}spf", device)
+                    ssim, psnr, mse, lpips, dc_mse, dc_mae, recon_corr, grasp_corr = eval_sample(kspace, csmap, ground_truth, x_recon, physics, mask, dro_grasp_img, acceleration, int(spokes), eval_dir, f"{spokes}spf", device, dro_eval=True)
                     stress_test_ssims.append(ssim)
                     stress_test_psnrs.append(psnr)
                     stress_test_mses.append(mse)
@@ -1763,7 +1832,7 @@ def main():
                         stress_test_grasp_corrs.append(grasp_corr)
 
 
-                    ssim_grasp, psnr_grasp, mse_grasp, lpips_grasp, dc_mse_grasp, dc_mae_grasp = eval_grasp(kspace, csmap, ground_truth, grasp_img, physics, device, eval_dir)
+                    ssim_grasp, psnr_grasp, mse_grasp, lpips_grasp, dc_mse_grasp, dc_mae_grasp = eval_grasp(kspace, csmap, ground_truth, dro_grasp_img, physics, device, eval_dir, dro_eval=True)
                     stress_test_grasp_ssims.append(ssim_grasp)
                     stress_test_grasp_psnrs.append(psnr_grasp)
                     stress_test_grasp_mses.append(mse_grasp)
@@ -1772,59 +1841,61 @@ def main():
                     stress_test_grasp_dc_maes.append(dc_mae_grasp)
 
 
-                    spf_recon_ssim[spokes] = np.mean(stress_test_ssims)
-                    spf_recon_psnr[spokes] = np.mean(stress_test_psnrs)
-                    spf_recon_mse[spokes] = np.mean(stress_test_mses)
-                    spf_recon_lpips[spokes] = np.mean(stress_test_lpipses)
-                    spf_recon_dc_mse[spokes] = np.mean(stress_test_dc_mses)
-                    spf_recon_dc_mae[spokes] = np.mean(stress_test_dc_maes)
-                    spf_recon_corr[spokes] = np.mean(stress_test_corrs)
+                    # raw k-space
+                    dc_mse_raw_grasp, dc_mae_raw_grasp = eval_grasp(raw_kspace, raw_csmaps, ground_truth, raw_grasp_img, physics, device, eval_dir, dro_eval=False)
+                    dc_mse_raw, dc_mae_raw = eval_sample(raw_kspace, raw_csmaps, ground_truth, raw_x_recon, physics, mask, raw_grasp_img, acceleration, int(N_spokes), eval_dir, label=f"{spokes}spf", device=device, dro_eval=False)
 
-                    spf_grasp_ssim[spokes] = np.mean(stress_test_grasp_ssims)
-                    spf_grasp_psnr[spokes] = np.mean(stress_test_grasp_psnrs)
-                    spf_grasp_mse[spokes] = np.mean(stress_test_grasp_mses)
-                    spf_grasp_lpips[spokes] = np.mean(stress_test_grasp_lpipses)
-                    spf_grasp_dc_mse[spokes] = np.mean(stress_test_grasp_dc_mses)
-                    spf_grasp_dc_mae[spokes] = np.mean(stress_test_grasp_dc_maes)
-                    spf_grasp_corr[spokes] = np.mean(stress_test_grasp_corrs)
+                    stress_test_raw_grasp_dc_mses.append(dc_mse_raw_grasp)
+                    stress_test_raw_grasp_dc_maes.append(dc_mae_raw_grasp)
+                    stress_test_raw_dc_mses.append(dc_mse_raw)
+                    stress_test_raw_dc_maes.append(dc_mae_raw)
 
 
 
-                # evaluate on raw k-space
-                if config.get("evaluation", {}).get("raw_kspace_eval", False):
-                    print(f"Evaluating on raw k-space with {num_slices_to_eval} slices...")
-                    raw_dc_mse, raw_dc_mae, raw_dc_std_mse, raw_dc_std_mae, = eval_raw_kspace(num_slices_to_eval, val_patient_ids, data_dir, model, spokes, N_slices, num_frames, eval_chunk_size, eval_chunk_overlap, H, W, ktraj, dcomp, nufft_ob, adjnufft_ob, physics, acceleration_encoding, start_timepoint_index, device, output_dir, label=f"{spokes}spf")
-                    raw_grasp_dc_mse, raw_grasp_dc_mae, raw_dc_std_grasp_mse, raw_dc_std_grasp_mae = eval_raw_kspace_grasp(raw_grasp_slice_idx, val_patient_ids, data_dir, spokes, N_slices, num_frames, physics, device)
-                else:
-                    raw_dc_mse, raw_dc_mae, raw_dc_std_mse, raw_dc_std_mae = 0, 0, 0, 0
-                    raw_grasp_dc_mse, raw_grasp_dc_mae, raw_dc_std_grasp_mse, raw_dc_std_grasp_mae = 0, 0, 0, 0
 
-                spf_raw_dc_mse[spokes] = raw_dc_mse
-                spf_raw_dc_mae[spokes] = raw_dc_mae
-                spf_raw_grasp_dc_mse[spokes] = raw_grasp_dc_mse
-                spf_raw_grasp_dc_mae[spokes] = raw_grasp_dc_mae
+                spf_recon_ssim[spokes] = np.mean(stress_test_ssims)
+                spf_recon_psnr[spokes] = np.mean(stress_test_psnrs)
+                spf_recon_mse[spokes] = np.mean(stress_test_mses)
+                spf_recon_lpips[spokes] = np.mean(stress_test_lpipses)
+                spf_recon_dc_mse[spokes] = np.mean(stress_test_dc_mses)
+                spf_recon_dc_mae[spokes] = np.mean(stress_test_dc_maes)
+                spf_recon_corr[spokes] = np.mean(stress_test_corrs)
+
+                spf_grasp_ssim[spokes] = np.mean(stress_test_grasp_ssims)
+                spf_grasp_psnr[spokes] = np.mean(stress_test_grasp_psnrs)
+                spf_grasp_mse[spokes] = np.mean(stress_test_grasp_mses)
+                spf_grasp_lpips[spokes] = np.mean(stress_test_grasp_lpipses)
+                spf_grasp_dc_mse[spokes] = np.mean(stress_test_grasp_dc_mses)
+                spf_grasp_dc_mae[spokes] = np.mean(stress_test_grasp_dc_maes)
+                spf_grasp_corr[spokes] = np.mean(stress_test_grasp_corrs)
+
+
+                spf_raw_dc_mse[spokes] = np.mean(stress_test_raw_dc_mses)
+                spf_raw_dc_mae[spokes] = np.mean(stress_test_raw_dc_maes)
+                spf_raw_grasp_dc_mse[spokes] = np.mean(stress_test_raw_grasp_dc_mses)
+                spf_raw_grasp_dc_mae[spokes] = np.mean(stress_test_raw_grasp_dc_maes)
 
 
 
-                # Calculate and store average validation evaluation metrics
-                if global_rank == 0 or not config['training']['multigpu']:
-                    epoch_eval_ssim = np.mean(epoch_eval_ssims)
-                    epoch_eval_psnr = np.mean(epoch_eval_psnrs)
-                    epoch_eval_mse = np.mean(epoch_eval_mses)
-                    epoch_eval_lpips = np.mean(epoch_eval_lpipses)
-                    epoch_eval_dc_mse = np.mean(epoch_eval_dc_mses)
-                    epoch_eval_dc_mae = np.mean(epoch_eval_dc_maes)
-                    epoch_eval_curve_corr = np.mean(epoch_eval_curve_corrs)
+                # # Calculate and store average validation evaluation metrics
+                # if global_rank == 0 or not config['training']['multigpu']:
+                #     epoch_eval_ssim = np.mean(epoch_eval_ssims)
+                #     epoch_eval_psnr = np.mean(epoch_eval_psnrs)
+                #     epoch_eval_mse = np.mean(epoch_eval_mses)
+                #     epoch_eval_lpips = np.mean(epoch_eval_lpipses)
+                #     epoch_eval_dc_mse = np.mean(epoch_eval_dc_mses)
+                #     epoch_eval_dc_mae = np.mean(epoch_eval_dc_maes)
+                #     epoch_eval_curve_corr = np.mean(epoch_eval_curve_corrs)
 
-                    eval_ssims.append(epoch_eval_ssim)
-                    eval_psnrs.append(epoch_eval_psnr)
-                    eval_mses.append(epoch_eval_mse)
-                    eval_lpipses.append(epoch_eval_lpips)
-                    eval_dc_mses.append(epoch_eval_dc_mse) 
-                    eval_dc_maes.append(epoch_eval_dc_mae) 
-                    eval_raw_dc_mses.append(raw_dc_mse) 
-                    eval_raw_dc_maes.append(raw_dc_mae)   
-                    eval_curve_corrs.append(epoch_eval_curve_corr)   
+                #     eval_ssims.append(epoch_eval_ssim)
+                #     eval_psnrs.append(epoch_eval_psnr)
+                #     eval_mses.append(epoch_eval_mse)
+                #     eval_lpipses.append(epoch_eval_lpips)
+                #     eval_dc_mses.append(epoch_eval_dc_mse) 
+                #     eval_dc_maes.append(epoch_eval_dc_mae) 
+                #     eval_raw_dc_mses.append(dc_mse_raw) 
+                #     eval_raw_dc_maes.append(dc_mae_raw)   
+                #     eval_curve_corrs.append(epoch_eval_curve_corr)   
                         
 
                 # Save Results
@@ -1840,8 +1911,8 @@ def main():
                     f'{np.mean(stress_test_lpipses):.4f} ± {np.std(stress_test_lpipses):.4f}', 
                     f'{np.mean(stress_test_dc_mses):.4f} ± {np.std(stress_test_dc_mses):.4f}',
                     f'{np.mean(stress_test_dc_maes):.4f} ± {np.std(stress_test_dc_maes):.4f}',
-                    f'{raw_dc_mse:.4f} ± {raw_dc_std_mse:.4f}',
-                    f'{raw_dc_mae:.4f} ± {raw_dc_std_mae:.4f}',
+                    f'{np.mean(stress_test_raw_dc_mses):.4f} ± {np.std(stress_test_raw_dc_mses):.4f}',
+                    f'{np.mean(stress_test_raw_dc_maes):.4f} ± {np.std(stress_test_raw_dc_maes):.4f}',
                     f'{np.mean(stress_test_corrs):.4f} ± {np.std(stress_test_corrs):.4f}'
                     ])
 
@@ -1852,8 +1923,8 @@ def main():
                     f'{np.mean(stress_test_grasp_lpipses):.4f} ± {np.std(stress_test_grasp_lpipses):.4f}', 
                     f'{np.mean(stress_test_grasp_dc_mses):.4f} ± {np.std(stress_test_grasp_dc_mses):.4f}',
                     f'{np.mean(stress_test_grasp_dc_maes):.4f} ± {np.std(stress_test_grasp_dc_maes):.4f}',
-                    f'{raw_grasp_dc_mse:.4f} ± {raw_dc_std_grasp_mse:.4f}',
-                    f'{raw_grasp_dc_mae:.4f} ± {raw_dc_std_grasp_mae:.4f}',
+                    f'{np.mean(stress_test_raw_grasp_dc_mses):.4f} ± {np.std(stress_test_raw_grasp_dc_mses):.4f}',
+                    f'{np.mean(stress_test_raw_grasp_dc_maes):.4f} ± {np.std(stress_test_raw_grasp_dc_maes):.4f}',
                     f'{np.mean(stress_test_grasp_corrs):.4f} ± {np.std(stress_test_grasp_corrs):.4f}',
                     ])
 
@@ -1863,171 +1934,171 @@ def main():
 
 
 
-            print("--- Running Main Evaluation (Budget: 320 spokes) ---")
-            for eval_config in MAIN_EVALUATION_PLAN:
+            # print("--- Running Main Evaluation (Budget: 320 spokes) ---")
+            # for eval_config in MAIN_EVALUATION_PLAN:
 
-                spf_eval_ssims = []
-                spf_eval_psnrs = []
-                spf_eval_mses = []
-                spf_eval_lpipses = []
-                spf_eval_dc_mses = []
-                spf_eval_dc_maes = []
-                spf_eval_curve_corrs = []
-                spf_grasp_ssims = []
-                spf_grasp_psnrs = []
-                spf_grasp_mses = []
-                spf_grasp_lpipses = []
-                spf_grasp_dc_mses = []
-                spf_grasp_dc_maes = []
-                spf_grasp_curve_corrs = []
+            #     spf_eval_ssims = []
+            #     spf_eval_psnrs = []
+            #     spf_eval_mses = []
+            #     spf_eval_lpipses = []
+            #     spf_eval_dc_mses = []
+            #     spf_eval_dc_maes = []
+            #     spf_eval_curve_corrs = []
+            #     spf_grasp_ssims = []
+            #     spf_grasp_psnrs = []
+            #     spf_grasp_mses = []
+            #     spf_grasp_lpipses = []
+            #     spf_grasp_dc_mses = []
+            #     spf_grasp_dc_maes = []
+            #     spf_grasp_curve_corrs = []
 
-                spokes = eval_config["spokes_per_frame"]
-                num_frames = eval_config["num_frames"]
+            #     spokes = eval_config["spokes_per_frame"]
+            #     num_frames = eval_config["num_frames"]
 
-                eval_spf_dataset.spokes_per_frame = spokes
-                eval_spf_dataset.num_frames = num_frames
-                eval_spf_dataset._update_sample_paths()
+            #     eval_spf_dataset.spokes_per_frame = spokes
+            #     eval_spf_dataset.num_frames = num_frames
+            #     eval_spf_dataset._update_sample_paths()
 
-                for csmap, ground_truth, grasp_img, mask, grasp_path in tqdm(eval_spf_loader, desc="Variable Spokes Per Frame Evaluation"):
+            #     for csmap, ground_truth, grasp_img, mask, grasp_path in tqdm(eval_spf_loader, desc="Variable Spokes Per Frame Evaluation"):
 
 
-                    csmap = csmap.squeeze(0).to(device)   # Remove batch dim
-                    ground_truth = ground_truth.to(device) # Shape: (1, 2, T, H, W)
+            #         csmap = csmap.squeeze(0).to(device)   # Remove batch dim
+            #         ground_truth = ground_truth.to(device) # Shape: (1, 2, T, H, W)
 
-                    # SIMULATE KSPACE
-                    ktraj, dcomp, nufft_ob, adjnufft_ob = prep_nufft(N_samples, spokes, num_frames)
-                    physics = MCNUFFT(nufft_ob.to(device), adjnufft_ob.to(device), ktraj.to(device), dcomp.to(device))
+            #         # SIMULATE KSPACE
+            #         ktraj, dcomp, nufft_ob, adjnufft_ob = prep_nufft(N_samples, spokes, num_frames)
+            #         physics = MCNUFFT(nufft_ob.to(device), adjnufft_ob.to(device), ktraj.to(device), dcomp.to(device))
 
-                    sim_kspace = physics(False, ground_truth, csmap)
+            #         sim_kspace = physics(False, ground_truth, csmap)
 
-                    kspace = sim_kspace.squeeze(0).to(device) # Remove batch dim
+            #         kspace = sim_kspace.squeeze(0).to(device) # Remove batch dim
                     
-                    # calculate acceleration factor
-                    acceleration = torch.tensor([N_full / int(spokes)], dtype=torch.float, device=device)
+            #         # calculate acceleration factor
+            #         acceleration = torch.tensor([N_full / int(spokes)], dtype=torch.float, device=device)
 
-                    if config['model']['encode_acceleration']:
-                        acceleration_encoding = acceleration
-                    else: 
-                        acceleration_encoding = None
+            #         if config['model']['encode_acceleration']:
+            #             acceleration_encoding = acceleration
+            #         else: 
+            #             acceleration_encoding = None
                     
-                    if config['model']['encode_time_index'] == False:
-                        start_timepoint_index = None
-                    else:
-                        start_timepoint_index = torch.tensor([0], dtype=torch.float, device=device)
+            #         if config['model']['encode_time_index'] == False:
+            #             start_timepoint_index = None
+            #         else:
+            #             start_timepoint_index = torch.tensor([0], dtype=torch.float, device=device)
 
 
-                    # check if GRASP image exists or if we need to perform GRASP recon
-                    if type(grasp_img) is int or len(grasp_img.shape) == 1:
-                        print(f"No GRASP file found, performing reconstruction with {spokes} spokes/frame and {num_frames} frames.")
+            #         # check if GRASP image exists or if we need to perform GRASP recon
+            #         if type(grasp_img) is int or len(grasp_img.shape) == 1:
+            #             print(f"No GRASP file found, performing reconstruction with {spokes} spokes/frame and {num_frames} frames.")
 
-                        grasp_img = GRASPRecon(csmap, sim_kspace, spokes, num_frames, grasp_path[0])
+            #             grasp_img = GRASPRecon(csmap, sim_kspace, spokes, num_frames, grasp_path[0])
 
-                        grasp_recon_torch = torch.from_numpy(grasp_img).permute(2, 0, 1) # T, H, W
-                        grasp_recon_torch = torch.stack([grasp_recon_torch.real, grasp_recon_torch.imag], dim=0)
+            #             grasp_recon_torch = torch.from_numpy(grasp_img).permute(2, 0, 1) # T, H, W
+            #             grasp_recon_torch = torch.stack([grasp_recon_torch.real, grasp_recon_torch.imag], dim=0)
 
-                        grasp_img = torch.flip(grasp_recon_torch, dims=[-3])
-                        grasp_img = torch.rot90(grasp_img, k=3, dims=[-3,-1]).unsqueeze(0)
+            #             grasp_img = torch.flip(grasp_recon_torch, dims=[-3])
+            #             grasp_img = torch.rot90(grasp_img, k=3, dims=[-3,-1]).unsqueeze(0)
 
-                    grasp_img = grasp_img.to(device)
+            #         grasp_img = grasp_img.to(device)
 
-                    if num_frames > eval_chunk_size:
-                        print("Performing sliding window eval...")
-                        x_recon, _ = sliding_window_inference(H, W, num_frames, ktraj, dcomp, nufft_ob, adjnufft_ob, eval_chunk_size, eval_chunk_overlap, kspace, csmap, acceleration_encoding, start_timepoint_index, model, epoch=None, device=device)  
-                    else:
-                        x_recon, *_ = model(
-                        kspace.to(device), physics, csmap, acceleration_encoding, start_timepoint_index, epoch=None, norm=config['model']['norm']
-                        )
+            #         if num_frames > eval_chunk_size:
+            #             print("Performing sliding window eval...")
+            #             x_recon, _ = sliding_window_inference(H, W, num_frames, ktraj, dcomp, nufft_ob, adjnufft_ob, eval_chunk_size, eval_chunk_overlap, kspace, csmap, acceleration_encoding, start_timepoint_index, model, epoch=None, device=device)  
+            #         else:
+            #             x_recon, *_ = model(
+            #             kspace.to(device), physics, csmap, acceleration_encoding, start_timepoint_index, epoch=None, norm=config['model']['norm']
+            #             )
 
                     
 
-                    ground_truth = torch.stack([ground_truth.real, ground_truth.imag], dim=1)
-                    ground_truth = rearrange(ground_truth, 'b i h w t -> b i t h w')
+            #         ground_truth = torch.stack([ground_truth.real, ground_truth.imag], dim=1)
+            #         ground_truth = rearrange(ground_truth, 'b i h w t -> b i t h w')
 
 
-                    ## Evaluation
-                    ssim, psnr, mse, lpips, dc_mse, dc_mae, recon_corr, grasp_corr = eval_sample(kspace, csmap, ground_truth, x_recon, physics, mask, grasp_img, acceleration, int(spokes), eval_dir, f'{spokes}spf', device)
-                    spf_eval_ssims.append(ssim)
-                    spf_eval_psnrs.append(psnr)
-                    spf_eval_mses.append(mse)
-                    spf_eval_lpipses.append(lpips)
-                    spf_eval_dc_mses.append(dc_mse)
-                    spf_eval_dc_maes.append(dc_mae)
+            #         ## Evaluation
+            #         ssim, psnr, mse, lpips, dc_mse, dc_mae, recon_corr, grasp_corr = eval_sample(kspace, csmap, ground_truth, x_recon, physics, mask, grasp_img, acceleration, int(spokes), eval_dir, f'{spokes}spf', device)
+            #         spf_eval_ssims.append(ssim)
+            #         spf_eval_psnrs.append(psnr)
+            #         spf_eval_mses.append(mse)
+            #         spf_eval_lpipses.append(lpips)
+            #         spf_eval_dc_mses.append(dc_mse)
+            #         spf_eval_dc_maes.append(dc_mae)
 
-                    if recon_corr is not None:
-                        spf_eval_curve_corrs.append(recon_corr)
-                        spf_grasp_curve_corrs.append(grasp_corr)
-
-
-                    ssim_grasp, psnr_grasp, mse_grasp, lpips_grasp, dc_mse_grasp, dc_mae_grasp = eval_grasp(kspace, csmap, ground_truth, grasp_img, physics, device, eval_dir)
-                    spf_grasp_ssims.append(ssim_grasp)
-                    spf_grasp_psnrs.append(psnr_grasp)
-                    spf_grasp_mses.append(mse_grasp)
-                    spf_grasp_lpipses.append(lpips_grasp)
-                    spf_grasp_dc_mses.append(dc_mse_grasp)
-                    spf_grasp_dc_maes.append(dc_mae_grasp)
+            #         if recon_corr is not None:
+            #             spf_eval_curve_corrs.append(recon_corr)
+            #             spf_grasp_curve_corrs.append(grasp_corr)
 
 
-                # evaluate on raw k-space
-                if config.get("evaluation", {}).get("raw_kspace_eval", False):
-                    print(f"Evaluating on raw k-space with {num_slices_to_eval} slices...")
-                    raw_dc_mse, raw_dc_mae, raw_dc_std_mse, raw_dc_std_mae = eval_raw_kspace(num_slices_to_eval, val_patient_ids, data_dir, model, spokes, N_slices, num_frames, eval_chunk_size, eval_chunk_overlap, H, W, ktraj, dcomp, nufft_ob, adjnufft_ob, physics, acceleration_encoding, start_timepoint_index, device, output_dir, label=f"{spokes}spf")
-                    raw_grasp_dc_mse, raw_grasp_dc_mae, raw_dc_std_grasp_mse, raw_dc_std_grasp_mae = eval_raw_kspace_grasp(raw_grasp_slice_idx, val_patient_ids, data_dir, spokes, N_slices, num_frames, physics, device)
-                else:
-                    raw_dc_mse, raw_dc_mae, raw_dc_std_mse, raw_dc_std_mae = 0, 0, 0, 0
-                    raw_grasp_dc_mse, raw_grasp_dc_mae, raw_dc_std_grasp_mse, raw_dc_std_grasp_mae = 0, 0, 0, 0
+            #         ssim_grasp, psnr_grasp, mse_grasp, lpips_grasp, dc_mse_grasp, dc_mae_grasp = eval_grasp(kspace, csmap, ground_truth, grasp_img, physics, device, eval_dir)
+            #         spf_grasp_ssims.append(ssim_grasp)
+            #         spf_grasp_psnrs.append(psnr_grasp)
+            #         spf_grasp_mses.append(mse_grasp)
+            #         spf_grasp_lpipses.append(lpips_grasp)
+            #         spf_grasp_dc_mses.append(dc_mse_grasp)
+            #         spf_grasp_dc_maes.append(dc_mae_grasp)
 
-                spf_raw_dc_mse[spokes] = raw_dc_mse
-                spf_raw_dc_mae[spokes] = raw_dc_mae
-                spf_raw_grasp_dc_mse[spokes] = raw_grasp_dc_mse
-                spf_raw_grasp_dc_mae[spokes] = raw_grasp_dc_mae
+
+            #     # evaluate on raw k-space
+            #     if config.get("evaluation", {}).get("raw_kspace_eval", False):
+            #         print(f"Evaluating on raw k-space with {num_slices_to_eval} slices...")
+            #         raw_dc_mse, raw_dc_mae, raw_dc_std_mse, raw_dc_std_mae = eval_raw_kspace(num_slices_to_eval, val_patient_ids, data_dir, model, spokes, N_slices, num_frames, eval_chunk_size, eval_chunk_overlap, H, W, ktraj, dcomp, nufft_ob, adjnufft_ob, physics, acceleration_encoding, start_timepoint_index, device, output_dir, label=f"{spokes}spf")
+            #         raw_grasp_dc_mse, raw_grasp_dc_mae, raw_dc_std_grasp_mse, raw_dc_std_grasp_mae = eval_raw_kspace_grasp(raw_grasp_slice_idx, val_patient_ids, data_dir, spokes, N_slices, num_frames, physics, device)
+            #     else:
+            #         raw_dc_mse, raw_dc_mae, raw_dc_std_mse, raw_dc_std_mae = 0, 0, 0, 0
+            #         raw_grasp_dc_mse, raw_grasp_dc_mae, raw_dc_std_grasp_mse, raw_dc_std_grasp_mae = 0, 0, 0, 0
+
+            #     spf_raw_dc_mse[spokes] = raw_dc_mse
+            #     spf_raw_dc_mae[spokes] = raw_dc_mae
+            #     spf_raw_grasp_dc_mse[spokes] = raw_grasp_dc_mse
+            #     spf_raw_grasp_dc_mae[spokes] = raw_grasp_dc_mae
                 
-                spf_recon_ssim[spokes] = np.mean(spf_eval_ssims)
-                spf_recon_psnr[spokes] = np.mean(spf_eval_psnrs)
-                spf_recon_mse[spokes] = np.mean(spf_eval_mses)
-                spf_recon_lpips[spokes] = np.mean(spf_eval_lpipses)
-                spf_recon_dc_mse[spokes] = np.mean(spf_eval_dc_mses)
-                spf_recon_dc_mae[spokes] = np.mean(spf_eval_dc_maes)
-                spf_recon_corr[spokes] = np.mean(spf_eval_curve_corrs)
+            #     spf_recon_ssim[spokes] = np.mean(spf_eval_ssims)
+            #     spf_recon_psnr[spokes] = np.mean(spf_eval_psnrs)
+            #     spf_recon_mse[spokes] = np.mean(spf_eval_mses)
+            #     spf_recon_lpips[spokes] = np.mean(spf_eval_lpipses)
+            #     spf_recon_dc_mse[spokes] = np.mean(spf_eval_dc_mses)
+            #     spf_recon_dc_mae[spokes] = np.mean(spf_eval_dc_maes)
+            #     spf_recon_corr[spokes] = np.mean(spf_eval_curve_corrs)
 
-                spf_grasp_ssim[spokes] = np.mean(spf_grasp_ssims)
-                spf_grasp_psnr[spokes] = np.mean(spf_grasp_psnrs)
-                spf_grasp_mse[spokes] = np.mean(spf_grasp_mses)
-                spf_grasp_lpips[spokes] = np.mean(spf_grasp_lpipses)
-                spf_grasp_dc_mse[spokes] = np.mean(spf_grasp_dc_mses)
-                spf_grasp_dc_mae[spokes] = np.mean(spf_grasp_dc_maes)
-                spf_grasp_corr[spokes] = np.mean(spf_grasp_curve_corrs)
+            #     spf_grasp_ssim[spokes] = np.mean(spf_grasp_ssims)
+            #     spf_grasp_psnr[spokes] = np.mean(spf_grasp_psnrs)
+            #     spf_grasp_mse[spokes] = np.mean(spf_grasp_mses)
+            #     spf_grasp_lpips[spokes] = np.mean(spf_grasp_lpipses)
+            #     spf_grasp_dc_mse[spokes] = np.mean(spf_grasp_dc_mses)
+            #     spf_grasp_dc_mae[spokes] = np.mean(spf_grasp_dc_maes)
+            #     spf_grasp_corr[spokes] = np.mean(spf_grasp_curve_corrs)
 
 
-                # Save Results
-                spf_metrics_path = os.path.join(eval_dir, "eval_metrics.csv")
-                with open(spf_metrics_path, 'a', newline='') as csvfile:
+                # # Save Results
+                # spf_metrics_path = os.path.join(eval_dir, "eval_metrics.csv")
+                # with open(spf_metrics_path, 'a', newline='') as csvfile:
 
-                    csvwriter = csv.writer(csvfile)
-                    csvwriter.writerow(['Recon', 'Spokes Per Frame', 'SSIM', 'PSNR', 'MSE', 'LPIPS', 'DC MSE', 'DC MAE', 'EC Correlation'])
+                #     csvwriter = csv.writer(csvfile)
+                #     csvwriter.writerow(['Recon', 'Spokes Per Frame', 'SSIM', 'PSNR', 'MSE', 'LPIPS', 'DC MSE', 'DC MAE', 'EC Correlation'])
 
-                    csvwriter.writerow(['DL', spokes, 
-                    f'{np.mean(spf_eval_ssims):.4f} ± {np.std(spf_eval_ssims):.4f}', 
-                    f'{np.mean(spf_eval_psnrs):.4f} ± {np.std(spf_eval_psnrs):.4f}', 
-                    f'{np.mean(spf_eval_mses):.4f} ± {np.std(spf_eval_mses):.4f}', 
-                    f'{np.mean(spf_eval_lpipses):.4f} ± {np.std(spf_eval_lpipses):.4f}', 
-                    f'{np.mean(spf_eval_dc_mses):.4f} ± {np.std(spf_eval_dc_mses):.4f}',
-                    f'{np.mean(spf_eval_dc_maes):.4f} ± {np.std(spf_eval_dc_maes):.4f}',
-                    f'{raw_dc_mse:.4f} ± {raw_dc_std_mse:.4f}',
-                    f'{raw_dc_mae:.4f} ± {raw_dc_std_mae:.4f}',
-                    f'{np.mean(spf_eval_curve_corrs):.4f} ± {np.std(spf_eval_curve_corrs):.4f}'
-                    ])
+                #     csvwriter.writerow(['DL', spokes, 
+                #     f'{np.mean(spf_eval_ssims):.4f} ± {np.std(spf_eval_ssims):.4f}', 
+                #     f'{np.mean(spf_eval_psnrs):.4f} ± {np.std(spf_eval_psnrs):.4f}', 
+                #     f'{np.mean(spf_eval_mses):.4f} ± {np.std(spf_eval_mses):.4f}', 
+                #     f'{np.mean(spf_eval_lpipses):.4f} ± {np.std(spf_eval_lpipses):.4f}', 
+                #     f'{np.mean(spf_eval_dc_mses):.4f} ± {np.std(spf_eval_dc_mses):.4f}',
+                #     f'{np.mean(spf_eval_dc_maes):.4f} ± {np.std(spf_eval_dc_maes):.4f}',
+                #     f'{raw_dc_mse:.4f} ± {raw_dc_std_mse:.4f}',
+                #     f'{raw_dc_mae:.4f} ± {raw_dc_std_mae:.4f}',
+                #     f'{np.mean(spf_eval_curve_corrs):.4f} ± {np.std(spf_eval_curve_corrs):.4f}'
+                #     ])
 
-                    csvwriter.writerow(['GRASP', spokes, 
-                    f'{np.mean(spf_grasp_ssims):.4f} ± {np.std(spf_grasp_ssims):.4f}', 
-                    f'{np.mean(spf_grasp_psnrs):.4f} ± {np.std(spf_grasp_psnrs):.4f}', 
-                    f'{np.mean(spf_grasp_mses):.4f} ± {np.std(spf_grasp_mses):.4f}', 
-                    f'{np.mean(spf_grasp_lpipses):.4f} ± {np.std(spf_grasp_lpipses):.4f}', 
-                    f'{np.mean(spf_grasp_dc_mses):.4f} ± {np.std(spf_grasp_dc_mses):.4f}',
-                    f'{np.mean(spf_grasp_dc_maes):.4f} ± {np.std(spf_grasp_dc_maes):.4f}',
-                    f'{raw_grasp_dc_mse:.4f} ± {raw_dc_std_grasp_mse:.4f}',
-                    f'{raw_grasp_dc_mae:.4f} ± {raw_dc_std_grasp_mae:.4f}',
-                    f'{np.mean(spf_grasp_curve_corrs):.4f} ± {np.std(spf_grasp_curve_corrs):.4f}'
-                    ])
+                #     csvwriter.writerow(['GRASP', spokes, 
+                #     f'{np.mean(spf_grasp_ssims):.4f} ± {np.std(spf_grasp_ssims):.4f}', 
+                #     f'{np.mean(spf_grasp_psnrs):.4f} ± {np.std(spf_grasp_psnrs):.4f}', 
+                #     f'{np.mean(spf_grasp_mses):.4f} ± {np.std(spf_grasp_mses):.4f}', 
+                #     f'{np.mean(spf_grasp_lpipses):.4f} ± {np.std(spf_grasp_lpipses):.4f}', 
+                #     f'{np.mean(spf_grasp_dc_mses):.4f} ± {np.std(spf_grasp_dc_mses):.4f}',
+                #     f'{np.mean(spf_grasp_dc_maes):.4f} ± {np.std(spf_grasp_dc_maes):.4f}',
+                #     f'{raw_grasp_dc_mse:.4f} ± {raw_dc_std_grasp_mse:.4f}',
+                #     f'{raw_grasp_dc_mae:.4f} ± {raw_dc_std_grasp_mae:.4f}',
+                #     f'{np.mean(spf_grasp_curve_corrs):.4f} ± {np.std(spf_grasp_curve_corrs):.4f}'
+                #     ])
 
             
 

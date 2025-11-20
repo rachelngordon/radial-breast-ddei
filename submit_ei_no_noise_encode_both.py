@@ -48,7 +48,7 @@ class Trainer(submitit.helpers.Checkpointable):
 
 def main():
     # --- Executor Configuration ---
-    job_name = "ei_no_noise_encode_both"
+    job_name = "ei_baseline_no_noise_encode_both"
     config_path = 'configs/config_ei_no_noise_encode_both.yaml'
     num_gpus = 4
 

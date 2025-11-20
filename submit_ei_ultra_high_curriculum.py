@@ -30,11 +30,10 @@ class Trainer(submitit.helpers.Checkpointable):
             f"train_zf.py "
             f"--config {self.config_path} "
             f"--exp_name {self.exp_name} "
-            f"--from_checkpoint True "
         )
 
-        # if self.from_checkpoint:
-        #     command_str += " --from_checkpoint True"
+        if self.from_checkpoint:
+            command_str += " --from_checkpoint True"
 
         # Using shell=True to handle the source and && operators
         subprocess.run(command_str, shell=True, check=True, executable='/bin/bash')
@@ -49,9 +48,9 @@ class Trainer(submitit.helpers.Checkpointable):
 
 def main():
     # --- Executor Configuration ---
-    job_name = "ei_diffeo_encode_both"
-    config_path = 'configs/config_ei_diffeo_encode_both.yaml'
-    num_gpus = 8
+    job_name = "ei_no_noise__ultra_high_curriculum_encode_both"
+    config_path = 'configs/config_ei_temporal_curriculum_ultra_high.yaml'
+    num_gpus = 4
 
     log_dir = f"submitit_logs/{job_name}"
     os.makedirs(log_dir, exist_ok=True)
@@ -68,7 +67,6 @@ def main():
         cpus_per_task=4,
         slurm_mem_per_gpu="50000",
         timeout_min=1440,
-        slurm_exclusive=True
     )
 
     # --- Job Submission ---

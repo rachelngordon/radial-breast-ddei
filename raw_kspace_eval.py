@@ -543,7 +543,7 @@ def eval_raw_kspace_grasp(slice_idx, val_patient_ids, data_dir, spokes_per_frame
                 grasp_img_slice = rearrange(grasp_img_slice, 'b h t w -> b h w t')
 
 
-            grasp_img_slice = torch.tensor(grasp_img_slice, dtype=csmap.dtype, device=device)
+            grasp_img_slice = torch.tensor(grasp_img_slice, dtype=dtype, device=device)
             sim_kspace_grasp = physics(False, grasp_img_slice, csmap_slice.to(device))
 
             # raw_dc_mse, raw_dc_mae = calc_dc(sim_kspace, kspace_slice_flat, device)

@@ -48,8 +48,8 @@ class Trainer(submitit.helpers.Checkpointable):
 
 def main():
     # --- Executor Configuration ---
-    job_name = "ei_spatial_edge_safe_sliding_window"
-    config_path = 'configs/config_ei_spatial_encode_both.yaml'
+    job_name = "ei_temporal_weight2e4"
+    config_path = 'configs/config_ei_temporal_weight2e4.yaml'
     num_gpus = 4
 
     log_dir = f"submitit_logs/{job_name}"

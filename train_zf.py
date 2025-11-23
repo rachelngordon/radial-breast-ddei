@@ -1115,6 +1115,9 @@ def main():
                                 val_raw_kspace.to(device), eval_physics, val_raw_csmaps, acceleration_encoding, start_timepoint_index, epoch="val0", norm=config['model']['norm']
                                 )
 
+                            # fix orientation of raw k-space recon
+                            val_raw_x_recon = torch.rot90(val_raw_x_recon, k=2, dims=[-3,-2])
+
 
                             
 
@@ -1431,7 +1434,7 @@ def main():
                         axes[0, 2].set_ylabel("MSE")
                         axes[0, 2].axhline(y=avg_grasp_mse, color='red', linestyle='--', linewidth=2)
 
-                        sns.lineplot(x=range(len(eval_lpipses)), y=eval_lpipses, ax=axes[1, 0])
+                        sns.lineplot(x=range(0, len(eval_lpipses)*eval_frequency, eval_frequency), y=eval_lpipses, ax=axes[1, 0])
                         axes[1, 0].set_title("Evaluation LPIPS")
                         axes[1, 0].set_xlabel("Epoch")
                         axes[1, 0].set_ylabel("LPIPS")

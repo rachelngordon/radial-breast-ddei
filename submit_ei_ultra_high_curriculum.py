@@ -48,7 +48,7 @@ class Trainer(submitit.helpers.Checkpointable):
 
 def main():
     # --- Executor Configuration ---
-    job_name = "ei_no_noise__ultra_high_curriculum_encode_both"
+    job_name = "ei_no_noise_ultra_high_curriculum_encode_both"
     config_path = 'configs/config_ei_temporal_curriculum_ultra_high.yaml'
     num_gpus = 4
 

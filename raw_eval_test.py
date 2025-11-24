@@ -50,6 +50,7 @@ from torch.utils.data.distributed import DistributedSampler
 import h5py
 from torch.utils.tensorboard import SummaryWriter
 from raw_kspace_eval import eval_raw_kspace, eval_raw_kspace_grasp
+from cluster_paths import apply_cluster_paths
 
 class SimulatedDataset(Dataset):
     """
@@ -213,6 +214,8 @@ class SimulatedDataset(Dataset):
 # load params
 with open('configs/config_mc_zf_debug.yaml', "r") as file:
     config = yaml.safe_load(file)
+
+config = apply_cluster_paths(config)
 
 split_file = config["data"]["split_file"]
 
@@ -405,6 +408,5 @@ for dro_kspace, csmap, ground_truth, dro_grasp_img, mask, grasp_path, raw_kspace
     # raw k-space
     dc_mse_raw_grasp, dc_mae_raw_grasp = eval_grasp(raw_kspace, raw_csmaps, ground_truth, raw_grasp_img, eval_physics, device, eval_dir, dro_eval=False)
     dc_mse_raw, dc_mae_raw = eval_sample(raw_kspace, raw_csmaps, ground_truth, raw_x_recon, eval_physics, mask, raw_grasp_img, acceleration, int(N_spokes), eval_dir, label='val0', device=device, dro_eval=False)
-
 
 

@@ -28,6 +28,7 @@ from torch.utils.data.distributed import DistributedSampler
 import h5py
 from torch.utils.tensorboard import SummaryWriter
 from raw_kspace_eval import eval_raw_kspace, eval_raw_kspace_grasp
+from cluster_paths import apply_cluster_paths
 
 
 def setup():
@@ -80,6 +81,10 @@ def main():
             config = yaml.safe_load(file)
 
         epochs = config['training']["epochs"]
+
+    config = apply_cluster_paths(config)
+    if args.from_checkpoint:
+        new_config = apply_cluster_paths(new_config)
 
 
         

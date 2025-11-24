@@ -22,6 +22,7 @@ import random
 import time 
 import seaborn as sns
 from loss_metrics import LPIPSVideoMetric, SSIMVideoMetric
+from cluster_paths import apply_cluster_paths
 
 set_seed(12)
 
@@ -70,6 +71,7 @@ else:
 
     epochs = config['training']["epochs"]
 
+config = apply_cluster_paths(config)
 
 # create output directories
 output_dir = os.path.join(config["experiment"]["output_dir"], exp_name)

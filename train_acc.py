@@ -29,6 +29,7 @@ import h5py
 from torch.utils.tensorboard import SummaryWriter
 from raw_kspace_eval import eval_raw_kspace
 import contextlib
+from cluster_paths import apply_cluster_paths
 
 
 
@@ -83,6 +84,7 @@ def main():
 
         epochs = config['training']["epochs"]
 
+    config = apply_cluster_paths(config)
 
         
 

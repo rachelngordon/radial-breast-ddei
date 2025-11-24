@@ -28,6 +28,7 @@ from torch.utils.data.distributed import DistributedSampler
 import h5py
 from torch.utils.tensorboard import SummaryWriter
 import sigpy as sp
+from cluster_paths import apply_cluster_paths
 
 def setup():
     """Initializes the distributed process group."""
@@ -80,6 +81,7 @@ def main():
 
         epochs = config['training']["epochs"]
 
+    config = apply_cluster_paths(config)
 
         
 
@@ -2153,5 +2155,4 @@ def main():
 
 if __name__ == '__main__':
     main()
-
 

@@ -8,7 +8,8 @@ This project trains a reconstruction agent for highly undersampled breast DCE-MR
 - **Flexible transforms**: EI loss supports spatial transforms (rotation, warp, subsample) and optional noise/augmentation scheduling via YAML config.
 
 ## Data & Splits
-- **Dataset**: fastMRI breast DCE-MRI; 300 radial k-space scans (288 spokes, 640 samples/spoke). 83 z-partitions are zero-padded to 192 slices then FFTed to image space.
+- **Dataset**: fastMRI breast DCE-MRI; 300 radial k-space scans (288 spokes, 640 samples/spoke). 83 z-partitions are zero-padded to 192 slices then FFTed to image space. The data is located at /net/scratch2/rachelgordon/zf_data_192_slices/zf_kspace. 
+The sensitivity maps are in /net/scratch2/rachelgordon/zf_data_192_slices/, each within a separate directory for the patient id. Tumor segmentations for each non-DRO malignant scan are in /net/scratch2/rachelgordon/zf_data_192_slices/tumor_segmentations.
 - **Splits**: 258 train / 15 val / remainder test (`data/data_split.json`).
 - **Slice strategy**: One slice/partition per scan per epoch, randomly resampled each epoch (`dataloader.py` supports `num_random_slices`).
 - **Temporal setup**: 8 spokes per frame → 36 timepoints. Training draws a random 24-frame window per scan; evaluation reconstructs with a sliding window of 24 frames with 12-frame overlap.
@@ -25,6 +26,7 @@ This project trains a reconstruction agent for highly undersampled breast DCE-MR
 ## Evaluation
 - **Metrics**: SSIM, PSNR, MSE, LPIPS (with complex-to-magnitude handling in `loss_metrics.py`), k-space MSE/MAE, and Pearson correlation of tumor enhancement curve. Validation/test use DRO-simulated ground truth for reference.
 - **Sliding evaluation**: Uses chunked inference (`utils.sliding_window_inference`) with configurable chunk size/overlap (`evaluation.chunk_size`, `evaluation.chunk_overlap`).
+- **Data**: Evaluation is conducted only on IDs within the DRO dataset (data/DROSubID_vs_fastMRIbreastID.csv), and is conducted for both DRO (/net/scratch2/rachelgordon/dro_dataset contains directories for DROs with different temporal resolutions, indicated by number of timeframes, which each contain the DRO image/mask, GRASP reconstruction, and simulated k-space) with ground truth and non-DRO using only raw k-space (/net/scratch2/rachelgordon/zf_data_192_slices/zf_kspace) and generated tumor segmentations (/net/scratch2/rachelgordon/zf_data_192_slices/tumor_segmentations). Both evaluations compare deep learning and GRASP reconstructions with either non-DRO or DRO data.
 
 ## Running Experiments
 - **Single run**: `python3 train_zf.py --config configs/config_ei_no_noise_encode_both.yaml --exp_name <name>`.

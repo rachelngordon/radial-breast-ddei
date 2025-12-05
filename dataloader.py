@@ -95,7 +95,6 @@ class ZFSliceDataset(Dataset):
             print(f"Initializing in random slice sampling mode with N={self.num_random_slices} slices per volume.")
             self.volume_map = []
             for fp in self.file_list:
-                print("file_path: ", fp)
                 with h5py.File(fp, "r") as f:
                     if self.dataset_key not in f:
                         raise KeyError(f"Dataset key '{self.dataset_key}' not found in file {fp}")

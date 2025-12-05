@@ -6,7 +6,7 @@ from deepinv.loss.loss import Loss
 from deepinv.loss.metric.metric import Metric
 from deepinv.transform.base import Transform
 from einops import rearrange
-from radial import to_torch_complex
+from radial_lsfp import to_torch_complex
 
 
 class EILoss(Loss):

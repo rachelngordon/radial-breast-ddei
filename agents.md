@@ -1,31 +1,37 @@
-# Agents
+# Breast DCE-MRI Reconstruction Agent
 
-This is a starter blueprint for automating work in this repo with task-specific agents. Refine roles, interfaces, and runbooks as the system matures.
+This project trains a reconstruction agent for highly undersampled breast DCE-MRI using the Dynamic Diffeomorphic Equivariant Imaging (DDEI) framework. The goal is to recover diagnostic-quality temporal dynamics for cancer treatment, diagnosis, and risk prediction without requiring ground-truth images during training.
 
-## Agent roster
-- **Data Agent**: Ingests raw k-space/HDF5 drops, validates structure, updates split files, and materializes manifests that training/eval can consume.
-- **Reconstruction Agent**: Runs GRASP and related recon scripts (e.g., `grasp_recon.py`, `grasp_recon_for_val.py`), tracks run configs, and deposits reconstructed volumes in `output/<exp>/recons`.
-- **Training Agent**: Launches model training (`train.py`, `train_zf.py`, `train_distributed.py`) using configs in `configs/`, manages checkpoints, and records TensorBoard/log artifacts.
-- **Evaluation Agent**: Executes evaluation scripts (`eval.py`, `raw_kspace_eval.py`, `raw_grasp_eval.py`), computes metrics (SSIM/LPIPS, etc.), and writes summaries under `output/<exp>/eval_results`.
-- **Reporting Agent**: Aggregates metrics across experiments, snapshots plots, and pushes concise experiment cards (inputs, config hash, key numbers, links to artifacts).
+## Core Ideas
+- **Unsupervised objective**: Combine a measurement consistency (MC) loss in k-space with an equivariant imaging (EI) loss in image space to enforce physics fidelity and artifact removal without paired labels (`mc.py`, `ei.py`).
+- **Backbone**: LSFPNet unrolls the Low-rank + Sparsity with Framelet transform and primal–dual fixed-point optimization; includes learnable cascades, Film-style modulation, and optional low-k DC (`lsfpnet.py`, `lsfpnet_encoding.py`, `radial_lsfp.py`).
+- **Flexible transforms**: EI loss supports spatial transforms (rotation, warp, subsample) and optional noise/augmentation scheduling via YAML config.
 
-## Core workflows
-1. **New dataset drop** → Data Agent validates and updates splits → Reconstruction Agent produces reconstructions if needed → Training Agent runs jobs → Evaluation Agent scores → Reporting Agent publishes results.
-2. **Model/config change** → Training Agent runs targeted jobs → Evaluation Agent compares against baselines → Reporting Agent highlights deltas/regressions.
-3. **Quality sweep** → Evaluation Agent batches held-out evals on recent checkpoints → Reporting Agent updates leaderboards and flags regressions.
+## Data & Splits
+- **Dataset**: fastMRI breast DCE-MRI; 300 radial k-space scans (288 spokes, 640 samples/spoke). 83 z-partitions are zero-padded to 192 slices then FFTed to image space.
+- **Splits**: 258 train / 15 val / remainder test (`data/data_split.json`).
+- **Slice strategy**: One slice/partition per scan per epoch, randomly resampled each epoch (`dataloader.py` supports `num_random_slices`).
+- **Temporal setup**: 8 spokes per frame → 36 timepoints. Training draws a random 24-frame window per scan; evaluation reconstructs with a sliding window of 24 frames with 12-frame overlap.
 
-## Hand-offs and interfaces
-- Shared storage roots: `data/` (raw/splits), `output/` (checkpoints, logs, evals), `configs/` (yaml configs), `grid_search_results/` (search outputs).
-- Each agent writes a machine-readable receipt per run (JSON/YAML) capturing inputs, git commit, config path, seeds, and artifact pointers.
-- Artifacts are addressed by `output/<exp_name>/<run_id>/...` to keep multi-run histories.
-- Logging: prefer structured logs plus short human-readable summaries for quick triage.
+## Training Pipeline
+- **Entry point**: `train_zf.py --config <yaml> --exp_name <run_id> [--from_checkpoint true]`. Multi-GPU uses NCCL; logs, configs, checkpoints, evals stored under `output/<exp_name>/`.
+- **Config example**: `configs/config_ei_no_noise_encode_both.yaml` (LSFPNet, EI on, MC weight 10, adjoint loss weight 1, Adam lr 5e-4, batch size 1, curriculum optional).
+- **Loss terms**:
+  - MC loss on forward NUFFT outputs (`MCLoss`).
+  - EI loss on transformed reconstructions (`EILoss`); warmup and duration schedule via `model.losses.ei_loss`.
+  - Optional adjoint loss and normalization (spatial, temporal, or both).
+- **Transforms & physics**: NUFFT operator (`radial_lsfp.MCNUFFT`) built from k-space metadata; optional time warps, rotations, subsampling (`transform.py`).
 
-## Guardrails and approvals
-- GPU use should be scheduled to avoid contention; Training/Recon agents check for available devices before launch.
-- Dangerous actions (deleting outputs, rerunning long jobs, modifying splits) require explicit human approval.
-- Always pin the git commit and config file path in receipts to make results reproducible.
+## Evaluation
+- **Metrics**: SSIM, PSNR, MSE, LPIPS (with complex-to-magnitude handling in `loss_metrics.py`), k-space MSE/MAE, and Pearson correlation of tumor enhancement curve. Validation/test use DRO-simulated ground truth for reference.
+- **Sliding evaluation**: Uses chunked inference (`utils.sliding_window_inference`) with configurable chunk size/overlap (`evaluation.chunk_size`, `evaluation.chunk_overlap`).
 
-## Open questions
-- Which dataset versions are canonical and immutable?
-- What thresholds define a regression for SSIM/LPIPS/adjacency losses?
-- Do we need automated alerts (e-mail/Slack) from the Reporting Agent, and what cadence?
+## Running Experiments
+- **Single run**: `python3 train_zf.py --config configs/config_ei_no_noise_encode_both.yaml --exp_name <name>`.
+- **Grid search**: `grid_search_batch.py` splits hyperparameter sweeps across batches; default grid searches `model.losses.adj_loss.weight` and `model.losses.ei_loss.weight`. Update `base_config_file` to an existing YAML before running. SLURM example in `grid_search.sh`.
+- **Outputs**: Each run writes `eval_results/eval_metrics.csv` for downstream parsing (`parse_results` in `grid_search_batch.py`).
+
+## Notes & Tips
+- Keep `data.root_dir` and `experiment.cluster` aligned with your cluster paths; `cluster_paths.py` can rewrite paths per environment.
+- For curriculum learning, adjust `training.curriculum_learning.phases` to introduce higher accelerations gradually.
+- When extending transforms, ensure they operate on rearranged video tensors (see `EILoss` and `transform.py`) and preserve complex channel conventions.

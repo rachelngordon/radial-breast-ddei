@@ -1,0 +1,10 @@
+output/
+logs/
+*.err
+*.out
+__pycache__
+*.h5
+*.nii
+*.png
+*.txt
+submitit_logs/

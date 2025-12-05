@@ -1,0 +1,23 @@
+name: recon_mri
+channels:
+  - conda-forge
+  - pytorch
+dependencies:
+  - python=3.11
+  - pytorch
+  - pytorch-cuda=12.4
+  - torchvision
+  - cudnn
+  - cupy
+  - cutensor
+  - nccl
+  - ipykernel
+  - nibabel
+  - tmux
+  - numpy<2.0
+  # you can add these here instead of a separate install step if you want:
+  - scipy
+  - numba
+  - pywavelets
+  - tqdm
+  - pip

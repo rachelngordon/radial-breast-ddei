@@ -9,7 +9,7 @@ This project trains a reconstruction agent for highly undersampled breast DCE-MR
 
 ## Data & Splits
 - **Dataset**: fastMRI breast DCE-MRI; 300 radial k-space scans (288 spokes, 640 samples/spoke). 83 z-partitions are zero-padded to 192 slices then FFTed to image space. The data is located at /net/scratch2/rachelgordon/zf_data_192_slices/zf_kspace. 
-The sensitivity maps are in /net/scratch2/rachelgordon/zf_data_192_slices/, each within a separate directory for the patient id. Tumor segmentations for each non-DRO malignant scan are in /net/scratch2/rachelgordon/zf_data_192_slices/tumor_segmentations.
+The sensitivity maps are in /net/scratch2/rachelgordon/zf_data_192_slices/, each within a separate directory for the patient id. Tumor segmentations for each non-DRO malignant scan are in /net/scratch2/rachelgordon/zf_data_192_slices/tumor_segmentations. The reconstructions stored in subdirectories for each patient in /net/scratch2/rachelgordon/zf_data_192_slices/ are of shape (2, 320, 320) and are complex, so they should be converted to real for plotting by np.abs(img[0]+1j*img[1])
 - **Splits**: 258 train / 15 val / remainder test (`data/data_split.json`).
 - **Slice strategy**: One slice/partition per scan per epoch, randomly resampled each epoch (`dataloader.py` supports `num_random_slices`).
 - **Temporal setup**: 8 spokes per frame → 36 timepoints. Training draws a random 24-frame window per scan; evaluation reconstructs with a sliding window of 24 frames with 12-frame overlap.

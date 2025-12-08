@@ -39,7 +39,7 @@ dataloader:
 # Model settings
 model:
   name: "LSFPNet"
-  num_layers: 3
+  num_layers: 4
   cascades: 2
   channels: 16
   style_dim: 128

@@ -1,5 +1,7 @@
 import glob
 import os
+import csv
+from pathlib import Path
 
 import h5py
 import numpy as np
@@ -14,8 +16,32 @@ from radial_lsfp import MCNUFFT
 import time
 from typing import Union, List, Optional
 import re
-import csv
 import pandas as pd
+
+REPO_ROOT = Path(__file__).resolve().parent
+SLICE_MAP_PATH = REPO_ROOT / "data" / "largest_tumor_slices.csv"
+
+
+def load_slice_map(csv_path: Path) -> dict:
+    """Load patient -> slice index map; return empty dict if missing."""
+    if not csv_path.exists():
+        print(f"Slice map not found at {csv_path}; falling back to configured slice indices.")
+        return {}
+
+    mapping = {}
+    with open(csv_path, newline="") as f:
+        reader = csv.DictReader(f)
+        for row in reader:
+            pid = row.get("fastMRI_breast_id")
+            idx = row.get("largest_slice_idx")
+            if pid is None or idx is None:
+                continue
+            pid = pid.replace(".nii", "")
+            try:
+                mapping[pid] = int(idx)
+            except ValueError:
+                continue
+    return mapping
 
 
 class ZFSliceDataset(Dataset):
@@ -519,6 +545,7 @@ class SimulatedDataset(Dataset):
         self.num_frames = num_frames
         self.grasp_slice_idx = grasp_slice_idx
         self.dataset_key = dataset_key
+        self.slice_map = load_slice_map(SLICE_MAP_PATH)
         self._update_sample_paths()
 
 
@@ -595,9 +622,14 @@ class SimulatedDataset(Dataset):
 
         # load raw k-space and GRASP recon
         fastmri_id = self.get_fastMRI_id(sample_dir)
-        raw_grasp_path = os.path.join(os.path.dirname(self.raw_kspace_path), f'fastMRI_breast_{fastmri_id:03d}_2/grasp_recon_{self.spokes_per_frame}spf_{self.num_frames}frames_slice{self.grasp_slice_idx}.npy')
-        raw_kspace_path = os.path.join(self.raw_kspace_path, f'fastMRI_breast_{fastmri_id:03d}_2.h5')
-        raw_csmap_path = os.path.join(os.path.dirname(self.raw_kspace_path), f'cs_maps/fastMRI_breast_{fastmri_id:03d}_2_cs_maps/cs_map_slice_{self.grasp_slice_idx:03d}.npy')
+        patient_id = f"fastMRI_breast_{fastmri_id:03d}_2"
+        slice_idx = self.slice_map.get(patient_id, self.grasp_slice_idx)
+        if slice_idx is None or slice_idx < 0:
+            slice_idx = self.grasp_slice_idx
+
+        raw_grasp_path = os.path.join(os.path.dirname(self.raw_kspace_path), f'{patient_id}/grasp_recon_{self.spokes_per_frame}spf_{self.num_frames}frames_slice{slice_idx}.npy')
+        raw_kspace_path = os.path.join(self.raw_kspace_path, f'{patient_id}.h5')
+        raw_csmap_path = os.path.join(os.path.dirname(self.raw_kspace_path), f'cs_maps/{patient_id}_cs_maps/cs_map_slice_{slice_idx:03d}.npy')
         
         raw_csmaps = np.load(raw_csmap_path)
         # raw_csmaps = rearrange(raw_csmaps, 'c b h w -> b c h w')
@@ -614,7 +646,7 @@ class SimulatedDataset(Dataset):
 
 
         with h5py.File(raw_kspace_path, "r") as f:
-            raw_kspace_slice = torch.tensor(f[self.dataset_key][self.grasp_slice_idx])
+            raw_kspace_slice = torch.tensor(f[self.dataset_key][slice_idx])
 
         # time-bin k-space
         N_spokes_prep = self.num_frames * self.spokes_per_frame
@@ -677,6 +709,7 @@ class SimulatedSPFDataset(Dataset):
         self.raw_kspace_path = raw_kspace_path
         self.grasp_slice_idx = grasp_slice_idx
         self.dataset_key = dataset_key
+        self.slice_map = load_slice_map(SLICE_MAP_PATH)
 
         # set default parameters to be changed before each call
         self.spokes_per_frame = 16
@@ -792,9 +825,14 @@ class SimulatedSPFDataset(Dataset):
 
         # load raw k-space and GRASP recon
         fastmri_id = self.get_fastMRI_id(sample_dir)
-        raw_grasp_path = os.path.join(os.path.dirname(self.raw_kspace_path), f'fastMRI_breast_{fastmri_id:03d}_2/grasp_recon_{self.spokes_per_frame}spf_{self.num_frames}frames_slice{self.grasp_slice_idx}.npy')
-        raw_kspace_path = os.path.join(self.raw_kspace_path, f'fastMRI_breast_{fastmri_id:03d}_2.h5')
-        raw_csmap_path = os.path.join(os.path.dirname(self.raw_kspace_path), f'cs_maps/fastMRI_breast_{fastmri_id:03d}_2_cs_maps/cs_map_slice_{self.grasp_slice_idx:03d}.npy')
+        patient_id = f"fastMRI_breast_{fastmri_id:03d}_2"
+        slice_idx = self.slice_map.get(patient_id, self.grasp_slice_idx)
+        if slice_idx is None or slice_idx < 0:
+            slice_idx = self.grasp_slice_idx
+
+        raw_grasp_path = os.path.join(os.path.dirname(self.raw_kspace_path), f'{patient_id}/grasp_recon_{self.spokes_per_frame}spf_{self.num_frames}frames_slice{slice_idx}.npy')
+        raw_kspace_path = os.path.join(self.raw_kspace_path, f'{patient_id}.h5')
+        raw_csmap_path = os.path.join(os.path.dirname(self.raw_kspace_path), f'cs_maps/{patient_id}_cs_maps/cs_map_slice_{slice_idx:03d}.npy')
         
         raw_csmaps = np.load(raw_csmap_path)
         # raw_csmaps = rearrange(raw_csmaps, 'c b h w -> b c h w')
@@ -811,7 +849,7 @@ class SimulatedSPFDataset(Dataset):
 
 
         with h5py.File(raw_kspace_path, "r") as f:
-            raw_kspace_slice = torch.tensor(f[self.dataset_key][self.grasp_slice_idx])
+            raw_kspace_slice = torch.tensor(f[self.dataset_key][slice_idx])
 
         # time-bin k-space
         N_spokes_prep = self.num_frames * self.spokes_per_frame
@@ -827,5 +865,3 @@ class SimulatedSPFDataset(Dataset):
 
 
         return smap_torch, simImg_torch, grasp_recon_torch, mask, grasp_path, raw_kspace_slice, raw_csmaps_torch, raw_grasp_recon #, parMap, aif, S0, T10, mask
-
-

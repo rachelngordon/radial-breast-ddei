@@ -1,4 +1,6 @@
 import os
+import csv
+from pathlib import Path
 import matplotlib.pyplot as plt
 import torch
 from einops import rearrange
@@ -21,8 +23,10 @@ from typing import List, Dict
 from scipy.stats import pearsonr
 import nibabel as nib
 import pandas as pd
+from functools import lru_cache
 
 TUMOR_SEG_ROOT = os.environ.get("TUMOR_SEG_ROOT", "/net/scratch2/rachelgordon/zf_data_192_slices/tumor_segmentations_lcr")
+SLICE_MAP_PATH = Path(__file__).resolve().parent / "data" / "largest_tumor_slices.csv"
 
 # ==========================================================
 # EVALUATION FUNCTIONS
@@ -163,6 +167,29 @@ def _load_tumor_mask(patient_id: str, slice_idx: int = None, seg_root: str = TUM
     return tumor_mask.astype(bool)
 
 
+@lru_cache(maxsize=1)
+def _load_slice_map(slice_map_path: Path = SLICE_MAP_PATH) -> Dict[str, int]:
+    """Load patient -> slice index map for non-DRO eval; cache for reuse."""
+    if not slice_map_path.exists():
+        print(f"Slice map not found at {slice_map_path}; falling back to configured slice indices.")
+        return {}
+
+    mapping = {}
+    with open(slice_map_path, newline="") as f:
+        reader = csv.DictReader(f)
+        for row in reader:
+            pid = row.get("fastMRI_breast_id")
+            idx = row.get("largest_slice_idx")
+            if pid is None or idx is None:
+                continue
+            pid = pid.replace(".nii", "")
+            try:
+                mapping[pid] = int(idx)
+            except ValueError:
+                continue
+    return mapping
+
+
 # ==========================================================
 # PLOTTING FUNCTIONS
 # ==========================================================
@@ -246,17 +273,12 @@ def plot_spatial_quality(
 
     # Calculate error map
     error_map = recon_img - grasp_img
-    print(error_map.min())
-    print(error_map.max())
 
     vmin = np.percentile(error_map, 1)
     vmax = np.percentile(error_map, 99)
 
     # Calculate SSIM maps
     ssim, ssim_map = ssim_map_func(grasp_img, recon_img, data_range=data_range, full=True)
-
-    print(ssim_map.min())
-    print(ssim_map.max())
 
     vmin_ssim = np.percentile(ssim_map, 5)
     vmax_ssim = np.percentile(ssim_map, 95)
@@ -761,16 +783,19 @@ def eval_sample(kspace, csmap, ground_truth, x_recon, physics, mask, grasp_img, 
         # For raw data, replace the DRO mask with the correct tumor segmentation when available.
         dro_has_malignant = 'malignant' in mask and mask['malignant'].any()
         patient_id = _get_patient_id_from_grasp_path(grasp_path)
-        raw_tumor_mask = _load_tumor_mask(patient_id, slice_idx=raw_slice_idx)
+        slice_map = _load_slice_map()
+        resolved_slice_idx = slice_map.get(patient_id, raw_slice_idx)
+        raw_tumor_mask = None
+        if resolved_slice_idx is not None and resolved_slice_idx >= 0:
+            raw_tumor_mask = _load_tumor_mask(patient_id, slice_idx=resolved_slice_idx)
 
-        if raw_tumor_mask is not None:
+        if raw_tumor_mask is not None and raw_tumor_mask.any():
             mask = {'malignant': torch.from_numpy(raw_tumor_mask.astype(np.bool_))}
         else:
-            if dro_has_malignant:
-                raise FileNotFoundError(f"Expected malignant tumor mask for {patient_id} at slice {raw_slice_idx} in {TUMOR_SEG_ROOT}, but none was found.")
-            else:
-                # Non-malignant sample: skip plotting by clearing masks.
-                mask = {}
+            # Treat as non-malignant if mask is missing or empty.
+            if dro_has_malignant and resolved_slice_idx is not None and resolved_slice_idx >= 0:
+                print(f"Warning: malignant DRO label but empty/missing tumor mask for {patient_id} (slice {resolved_slice_idx}); skipping temporal plots.")
+            mask = {}
 
         masks_np = {key: val.cpu().numpy().squeeze().astype(bool) for key, val in mask.items() if key == 'malignant'}
 

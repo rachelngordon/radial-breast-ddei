@@ -18,7 +18,7 @@ data:
   train_spokes_per_frame: 8
   slices: 192
   slices_to_eval: 1
-  eval_frequency: 5
+  eval_frequency: 1
 
 # Experiment settings
 experiment:
@@ -30,7 +30,7 @@ dataloader:
   batch_size: 1
   shuffle: true
   num_workers: 2
-  max_subjects: 300
+  max_subjects: 2
   num_random_slices: 1
   slice_idx: 41
   slice_range_start: None
@@ -91,11 +91,11 @@ model:
 
 # Training settings
 training:
-  epochs: 200
+  epochs: 2
   save_interval: 1
   plot_interval: 20
   device: "cuda"  # or "cpu"
-  multigpu: True
+  multigpu: False
   curriculum_learning:
     enabled: False
     phases:

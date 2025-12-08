@@ -699,7 +699,7 @@ def main():
 
                     # raw k-space eval
                     dc_mse_raw_grasp, dc_mae_raw_grasp = eval_grasp(raw_kspace, raw_csmaps, ground_truth, raw_grasp_img, eval_physics, device, eval_dir, dro_eval=False)
-                    dc_mse_raw, dc_mae_raw = eval_sample(raw_kspace, raw_csmaps, ground_truth, raw_x_recon, eval_physics, mask, raw_grasp_img, acceleration, int(N_spokes), eval_dir, label='val0', device=device, dro_eval=False)
+                    dc_mse_raw, dc_mae_raw = eval_sample(raw_kspace, raw_csmaps, ground_truth, raw_x_recon, eval_physics, mask, raw_grasp_img, acceleration, int(N_spokes), eval_dir, label='val0', device=device, dro_eval=False, grasp_path=grasp_path, raw_slice_idx=raw_grasp_slice_idx)
 
                     raw_grasp_dc_mses.append(dc_mse_raw_grasp)
                     raw_grasp_dc_maes.append(dc_mae_raw_grasp)
@@ -1158,7 +1158,7 @@ def main():
                                     epoch_eval_curve_corrs.append(recon_corr)
 
                                 # raw k-space eval
-                                dc_mse_raw, dc_mae_raw = eval_sample(val_raw_kspace, val_raw_csmaps, val_ground_truth, val_raw_x_recon, eval_physics, val_mask, val_raw_grasp_img, acceleration, int(N_spokes), eval_dir, label=f'epoch{epoch}', device=device, dro_eval=False)
+                                dc_mse_raw, dc_mae_raw = eval_sample(val_raw_kspace, val_raw_csmaps, val_ground_truth, val_raw_x_recon, eval_physics, val_mask, val_raw_grasp_img, acceleration, int(N_spokes), eval_dir, label=f'epoch{epoch}', device=device, dro_eval=False, grasp_path=grasp_path, raw_slice_idx=raw_grasp_slice_idx)
 
                                 epoch_eval_raw_dc_mses.append(dc_mse_raw)
                                 epoch_eval_raw_dc_maes.append(dc_mae_raw)
@@ -1850,7 +1850,7 @@ def main():
 
                     # raw k-space
                     dc_mse_raw_grasp, dc_mae_raw_grasp = eval_grasp(raw_kspace, raw_csmaps, ground_truth, raw_grasp_img, physics, device, eval_dir, dro_eval=False)
-                    dc_mse_raw, dc_mae_raw = eval_sample(raw_kspace, raw_csmaps, ground_truth, raw_x_recon, physics, mask, raw_grasp_img, acceleration, int(N_spokes), eval_dir, label=f"{spokes}spf", device=device, dro_eval=False)
+                    dc_mse_raw, dc_mae_raw = eval_sample(raw_kspace, raw_csmaps, ground_truth, raw_x_recon, physics, mask, raw_grasp_img, acceleration, int(N_spokes), eval_dir, label=f"{spokes}spf", device=device, dro_eval=False, grasp_path=grasp_path, raw_slice_idx=raw_grasp_slice_idx)
 
                     stress_test_raw_grasp_dc_mses.append(dc_mse_raw_grasp)
                     stress_test_raw_grasp_dc_maes.append(dc_mae_raw_grasp)

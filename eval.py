@@ -19,6 +19,10 @@ import matplotlib.gridspec as gridspec
 from skimage.measure import find_contours
 from typing import List, Dict
 from scipy.stats import pearsonr
+import nibabel as nib
+import pandas as pd
+
+TUMOR_SEG_ROOT = os.environ.get("TUMOR_SEG_ROOT", "/net/scratch2/rachelgordon/zf_data_192_slices/tumor_segmentations_lcr")
 
 # ==========================================================
 # EVALUATION FUNCTIONS
@@ -103,6 +107,60 @@ def calc_dc(input, reference, device):
     return mse.item(), mae.item()
 
 
+def _get_patient_id_from_grasp_path(grasp_path: str, mapping_csv: str = "data/DROSubID_vs_fastMRIbreastID.csv") -> str:
+    """Maps a DRO sample path back to the fastMRI patient id."""
+    if grasp_path is None:
+        return None
+
+    # DataLoader batches lists of strings when batch_size>0; unwrap singletons.
+    if isinstance(grasp_path, (list, tuple)):
+        if len(grasp_path) == 0:
+            return None
+        grasp_path = grasp_path[0]
+
+    sample_dir = os.path.basename(os.path.dirname(grasp_path))
+    try:
+        dro_id = int(sample_dir.split("_")[1])
+    except (IndexError, ValueError):
+        print(f"Could not parse DRO id from grasp path: {grasp_path}")
+        return None
+
+    if not os.path.exists(mapping_csv):
+        print(f"Mapping CSV not found at {mapping_csv}; cannot fetch patient id.")
+        return None
+
+    id_map = pd.read_csv(mapping_csv)
+    match = id_map[id_map["DRO"] == dro_id]
+    if match.empty:
+        print(f"No fastMRI id found for DRO id {dro_id} in {mapping_csv}.")
+        return None
+
+    fastmri_id = int(match["fastMRIbreast"].iloc[0])
+    return f"fastMRI_breast_{fastmri_id:03d}_2"
+
+
+def _load_tumor_mask(patient_id: str, slice_idx: int = None, seg_root: str = TUMOR_SEG_ROOT) -> np.ndarray:
+    """Loads the tumor segmentation for a raw scan and selects the desired slice."""
+    if patient_id is None:
+        return None
+
+    seg_path = os.path.join(seg_root, f"{patient_id}.nii.gz")
+    if not os.path.exists(seg_path):
+        print(f"Tumor segmentation not found at {seg_path}")
+        return None
+
+    seg_vol = nib.load(seg_path).get_fdata()
+
+    if seg_vol.ndim == 3:
+        num_slices = seg_vol.shape[-1]
+        if slice_idx is None or slice_idx < 0 or slice_idx >= num_slices:
+            slice_sums = seg_vol.sum(axis=tuple(range(seg_vol.ndim - 1)))
+            slice_idx = int(np.argmax(slice_sums))
+        tumor_mask = seg_vol[..., int(slice_idx)]
+    else:
+        tumor_mask = seg_vol
+
+    return tumor_mask.astype(bool)
 
 
 # ==========================================================
@@ -188,9 +246,20 @@ def plot_spatial_quality(
 
     # Calculate error map
     error_map = recon_img - grasp_img
+    print(error_map.min())
+    print(error_map.max())
+
+    vmin = np.percentile(error_map, 1)
+    vmax = np.percentile(error_map, 99)
 
     # Calculate SSIM maps
     ssim, ssim_map = ssim_map_func(grasp_img, recon_img, data_range=data_range, full=True)
+
+    print(ssim_map.min())
+    print(ssim_map.max())
+
+    vmin_ssim = np.percentile(ssim_map, 5)
+    vmax_ssim = np.percentile(ssim_map, 95)
 
     # Create a 1x4 plot grid
     fig, axes = plt.subplots(1, 4, figsize=(24, 6))
@@ -203,11 +272,11 @@ def plot_spatial_quality(
     axes[1].imshow(recon_img, cmap='gray')
     axes[1].set_title("DL Reconstruction")
 
-    im_err_dl = axes[2].imshow(error_map, cmap='coolwarm', vmin=-0.5, vmax=0.5)
+    im_err_dl = axes[2].imshow(error_map, cmap='coolwarm', vmin=vmin, vmax=vmax)
     axes[2].set_title("Error Map (DL Recon - GRASP)")
     fig.colorbar(im_err_dl, ax=axes[2], fraction=0.046, pad=0.04)
 
-    im_ssim_dl = axes[3].imshow(ssim_map, cmap='viridis', vmin=0, vmax=1)
+    im_ssim_dl = axes[3].imshow(ssim_map, cmap='viridis', vmin=vmin_ssim, vmax=vmax_ssim)
     axes[3].set_title(f"SSIM Map (SSIM between DL and GRASP Recons: {round(ssim, 3)})")
     fig.colorbar(im_ssim_dl, ax=axes[3], fraction=0.046, pad=0.04)
     
@@ -522,7 +591,7 @@ def eval_grasp(kspace, csmap, ground_truth, grasp_recon, physics, device, output
 
 
 
-def eval_sample(kspace, csmap, ground_truth, x_recon, physics, mask, grasp_img, acceleration, spokes_per_frame, output_dir, label, device, dro_eval=True):
+def eval_sample(kspace, csmap, ground_truth, x_recon, physics, mask, grasp_img, acceleration, spokes_per_frame, output_dir, label, device, dro_eval=True, grasp_path=None, raw_slice_idx=None):
 
     acceleration = round(acceleration.item(), 1)
 
@@ -610,7 +679,7 @@ def eval_sample(kspace, csmap, ground_truth, x_recon, physics, mask, grasp_img, 
 
         aif_time_points = np.linspace(0, 150, num_frames)
 
-        if mask['malignant'].any() and label is not None:
+        if 'malignant' in mask and mask['malignant'].any() and label is not None:
             
             # --- Plot Spatial Quality at a Peak Enhancement Frame ---
             # Find a frame around peak enhancement (e.g., 1/3 of the way through)
@@ -688,14 +757,28 @@ def eval_sample(kspace, csmap, ground_truth, x_recon, physics, mask, grasp_img, 
 
         recon_mag_np = np.abs(x_recon_complex_np)
         gt_mag_np = np.abs(gt_complex_np)
-        
-        masks_np = {key: val.cpu().numpy().squeeze().astype(bool) for key, val in mask.items()}
+
+        # For raw data, replace the DRO mask with the correct tumor segmentation when available.
+        dro_has_malignant = 'malignant' in mask and mask['malignant'].any()
+        patient_id = _get_patient_id_from_grasp_path(grasp_path)
+        raw_tumor_mask = _load_tumor_mask(patient_id, slice_idx=raw_slice_idx)
+
+        if raw_tumor_mask is not None:
+            mask = {'malignant': torch.from_numpy(raw_tumor_mask.astype(np.bool_))}
+        else:
+            if dro_has_malignant:
+                raise FileNotFoundError(f"Expected malignant tumor mask for {patient_id} at slice {raw_slice_idx} in {TUMOR_SEG_ROOT}, but none was found.")
+            else:
+                # Non-malignant sample: skip plotting by clearing masks.
+                mask = {}
+
+        masks_np = {key: val.cpu().numpy().squeeze().astype(bool) for key, val in mask.items() if key == 'malignant'}
 
         num_frames = recon_mag_np.shape[2]
 
         aif_time_points = np.linspace(0, 150, num_frames)
 
-        if mask['malignant'].any() and label is not None:
+        if 'malignant' in mask and mask['malignant'].any() and label is not None:
             
             # --- Plot Spatial Quality at a Peak Enhancement Frame ---
             # Find a frame around peak enhancement (e.g., 1/3 of the way through)
@@ -866,7 +949,7 @@ def eval_sample_no_grasp(kspace, csmap, ground_truth, x_recon, physics, mask, ac
     
 
     print("\nGenerating diagnostic plots...")
-    if mask['malignant'].any() and label is not None:
+    if 'malignant' in mask and mask['malignant'].any() and label is not None:
         
         # --- Plot Spatial Quality at a Peak Enhancement Frame ---
         # Find a frame around peak enhancement (e.g., 1/3 of the way through)

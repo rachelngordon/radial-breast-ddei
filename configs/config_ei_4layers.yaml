@@ -22,7 +22,7 @@ data:
 
 # Experiment settings
 experiment:
-  output_dir: "output"
+  output_dir: "/home/rachelgordon/mri_recon/radial-breast-ddei/output"
   cluster: "DSI"
 
 # DataLoader settings

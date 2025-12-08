@@ -48,8 +48,8 @@ class Trainer(submitit.helpers.Checkpointable):
 
 def main():
     # --- Executor Configuration ---
-    job_name = "ei_baseline_no_noise_encode_both"
-    config_path = 'configs/config_ei_no_noise_encode_both_dsi.yaml'
+    job_name = "ei_5layers_no_noise_encode_both"
+    config_path = 'configs/config_ei_5layers.yaml'
     num_gpus = 4
 
     log_dir = f"submitit_logs/{job_name}"

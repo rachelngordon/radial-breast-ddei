@@ -6,7 +6,8 @@ import csv
 from scipy.ndimage import label
 
 # Source and destination directories
-SEG_ROOT = Path("/net/scratch2/rachelgordon/zf_data_192_slices/tumor_segmentations")
+# SEG_ROOT = Path("/net/scratch2/rachelgordon/zf_data_192_slices/tumor_segmentations")
+SEG_ROOT = Path("/ess/scratch/scratch1/rachelgordon/zf_data_192_slices/tumor_segmentations")
 OUT_ROOT = SEG_ROOT.parent / "tumor_segmentations_lcr"
 SLICE_CSV = Path("data") / "largest_tumor_slices.csv"
 

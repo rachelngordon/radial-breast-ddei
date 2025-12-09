@@ -22,7 +22,7 @@ data:
 
 # Experiment settings
 experiment:
-  output_dir: "output"
+  output_dir: "/gpfs/data/karczmar-lab/workspaces/rachelgordon/radial-breast-ddei/output"
   cluster: "Randi"
 
 # DataLoader settings

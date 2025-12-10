@@ -24,6 +24,8 @@ from scipy.stats import pearsonr
 import nibabel as nib
 import pandas as pd
 from functools import lru_cache
+from cluster_paths import _swap_base
+
 
 TUMOR_SEG_ROOT = os.environ.get("TUMOR_SEG_ROOT", "/net/scratch2/rachelgordon/zf_data_192_slices/tumor_segmentations_lcr")
 SLICE_MAP_PATH = Path(__file__).resolve().parent / "data" / "largest_tumor_slices.csv"
@@ -143,8 +145,12 @@ def _get_patient_id_from_grasp_path(grasp_path: str, mapping_csv: str = "data/DR
     return f"fastMRI_breast_{fastmri_id:03d}_2"
 
 
-def _load_tumor_mask(patient_id: str, slice_idx: int = None, seg_root: str = TUMOR_SEG_ROOT) -> np.ndarray:
+def _load_tumor_mask(cluster: str, patient_id: str, slice_idx: int = None, seg_root: str = TUMOR_SEG_ROOT) -> np.ndarray:
     """Loads the tumor segmentation for a raw scan and selects the desired slice."""
+
+    if cluster == "Randi":
+        seg_root = _swap_base(seg_root, cluster, path_type="data")
+        
     if patient_id is None:
         return None
 
@@ -613,7 +619,7 @@ def eval_grasp(kspace, csmap, ground_truth, grasp_recon, physics, device, output
 
 
 
-def eval_sample(kspace, csmap, ground_truth, x_recon, physics, mask, grasp_img, acceleration, spokes_per_frame, output_dir, label, device, dro_eval=True, grasp_path=None, raw_slice_idx=None):
+def eval_sample(kspace, csmap, ground_truth, x_recon, physics, mask, grasp_img, acceleration, spokes_per_frame, output_dir, label, device, cluster, dro_eval=True, grasp_path=None, raw_slice_idx=None):
 
     acceleration = round(acceleration.item(), 1)
 
@@ -787,7 +793,7 @@ def eval_sample(kspace, csmap, ground_truth, x_recon, physics, mask, grasp_img, 
         resolved_slice_idx = slice_map.get(patient_id, raw_slice_idx)
         raw_tumor_mask = None
         if resolved_slice_idx is not None and resolved_slice_idx >= 0:
-            raw_tumor_mask = _load_tumor_mask(patient_id, slice_idx=resolved_slice_idx)
+            raw_tumor_mask = _load_tumor_mask(cluster, patient_id, slice_idx=resolved_slice_idx)
 
         if raw_tumor_mask is not None and raw_tumor_mask.any():
             mask = {'malignant': torch.from_numpy(raw_tumor_mask.astype(np.bool_))}

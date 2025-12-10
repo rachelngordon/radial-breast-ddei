@@ -96,8 +96,14 @@ def main():
 
         for patient_id, slice_idx in slice_map:
             raw_kspace_path = Path(args.data_dir) / f"{patient_id}.h5"
+            patient_dir = output_root / patient_id
+            grasp_img_path = patient_dir / f"grasp_recon_{spf}spf_{num_frames}frames_slice{slice_idx}.npy"
+
             if not raw_kspace_path.exists():
                 print(f"Skipping {patient_id}: k-space not found at {raw_kspace_path}")
+                continue
+            if grasp_img_path.exists():
+                print(f"Skipping {patient_id}, slice {slice_idx}: recon already exists at {grasp_img_path}")
                 continue
 
             print(f"Patient {patient_id}, slice {slice_idx}")
@@ -116,9 +122,7 @@ def main():
             zf_kspace_slice = np.expand_dims(zf_kspace[slice_idx], axis=0)
             binned_kspace_slice = np.expand_dims(binned_kspace[slice_idx], axis=0)
 
-            patient_dir = output_root / patient_id
             patient_dir.mkdir(parents=True, exist_ok=True)
-            grasp_img_path = patient_dir / f"grasp_recon_{spf}spf_{num_frames}frames_slice{slice_idx}.npy"
 
             grasp_img_slices = raw_grasp_recon(
                 zf_kspace_slice,

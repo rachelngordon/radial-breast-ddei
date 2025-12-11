@@ -12,7 +12,7 @@ from tqdm import tqdm
 
 from cluster_paths import apply_cluster_paths
 from dataloader import SimulatedDataset
-from eval import eval_sample
+from eval import eval_grasp, eval_sample
 from lsfpnet_encoding import ArtifactRemovalLSFPNet, LSFPNet
 from radial_lsfp import MCNUFFT
 from utils import (
@@ -182,6 +182,7 @@ def main():
 
     results = []
     raw_results = []
+    grasp_results = []
 
     with torch.no_grad():
         for idx, batch in enumerate(tqdm(val_loader, total=num_samples, desc="Inference on validation")):
@@ -281,6 +282,17 @@ def main():
                 rescale=rescale,
             )
 
+            grasp_metrics = eval_grasp(
+                dro_kspace,
+                csmap,
+                ground_truth,
+                dro_grasp_img,
+                eval_physics,
+                device,
+                sample_dir,
+                dro_eval=True,
+            )
+
             raw_dc_mse, raw_dc_mae = eval_sample(
                 raw_kspace,
                 raw_csmaps,
@@ -302,6 +314,7 @@ def main():
             )
 
             ssim, psnr, mse, lpips, dc_mse, dc_mae, recon_corr, grasp_corr = dro_metrics
+            grasp_ssim, grasp_psnr, grasp_mse, grasp_lpips, grasp_dc_mse, grasp_dc_mae = grasp_metrics
             results.append(
                 dict(
                     sample=label,
@@ -315,6 +328,17 @@ def main():
                     grasp_corr=grasp_corr,
                 )
             )
+            grasp_results.append(
+                dict(
+                    sample=label,
+                    ssim=grasp_ssim,
+                    psnr=grasp_psnr,
+                    mse=grasp_mse,
+                    lpips=grasp_lpips,
+                    dc_mse=grasp_dc_mse,
+                    dc_mae=grasp_dc_mae,
+                )
+            )
             raw_results.append(dict(sample=label, raw_dc_mse=raw_dc_mse, raw_dc_mae=raw_dc_mae))
 
     # Save metrics.
@@ -322,19 +346,25 @@ def main():
     with open(metrics_path, "w") as f:
         headers = [
             "sample",
-            "ssim",
-            "psnr",
-            "mse",
-            "lpips",
-            "dc_mse",
-            "dc_mae",
-            "recon_corr",
-            "grasp_corr",
+            "dl_ssim",
+            "dl_psnr",
+            "dl_mse",
+            "dl_lpips",
+            "dl_dc_mse",
+            "dl_dc_mae",
+            "dl_recon_corr",
+            "dl_grasp_corr",
+            "grasp_ssim",
+            "grasp_psnr",
+            "grasp_mse",
+            "grasp_lpips",
+            "grasp_dc_mse",
+            "grasp_dc_mae",
             "raw_dc_mse",
             "raw_dc_mae",
         ]
         f.write(",".join(headers) + "\n")
-        for dro_row, raw_row in zip(results, raw_results):
+        for dro_row, grasp_row, raw_row in zip(results, grasp_results, raw_results):
             row = [
                 dro_row["sample"],
                 f"{dro_row['ssim']:.6f}",
@@ -345,11 +375,48 @@ def main():
                 f"{dro_row['dc_mae']:.6f}",
                 "" if dro_row["recon_corr"] is None else f"{dro_row['recon_corr']:.6f}",
                 "" if dro_row["grasp_corr"] is None else f"{dro_row['grasp_corr']:.6f}",
+                f"{grasp_row['ssim']:.6f}",
+                f"{grasp_row['psnr']:.6f}",
+                f"{grasp_row['mse']:.6f}",
+                f"{grasp_row['lpips']:.6f}",
+                f"{grasp_row['dc_mse']:.6f}",
+                f"{grasp_row['dc_mae']:.6f}",
                 f"{raw_row['raw_dc_mse']:.6f}",
                 f"{raw_row['raw_dc_mae']:.6f}",
             ]
             f.write(",".join(row) + "\n")
 
+    def _mean(values, key):
+        vals = [v[key] for v in values if v[key] is not None]
+        return sum(vals) / len(vals) if vals else None
+
+    dl_summary = {
+        "ssim": _mean(results, "ssim"),
+        "psnr": _mean(results, "psnr"),
+        "mse": _mean(results, "mse"),
+        "lpips": _mean(results, "lpips"),
+        "dc_mse": _mean(results, "dc_mse"),
+        "dc_mae": _mean(results, "dc_mae"),
+        "recon_corr": _mean(results, "recon_corr"),
+    }
+
+    grasp_summary = {
+        "ssim": _mean(grasp_results, "ssim"),
+        "psnr": _mean(grasp_results, "psnr"),
+        "mse": _mean(grasp_results, "mse"),
+        "lpips": _mean(grasp_results, "lpips"),
+        "dc_mse": _mean(grasp_results, "dc_mse"),
+        "dc_mae": _mean(grasp_results, "dc_mae"),
+    }
+
+    recon_corr_str = "" if dl_summary["recon_corr"] is None else f"{dl_summary['recon_corr']:.4f}"
+
+    print("=== Inference Summary (averaged over samples) ===")
+    print(f"DL   -> SSIM: {dl_summary['ssim']:.4f}, PSNR: {dl_summary['psnr']:.2f}, MSE: {dl_summary['mse']:.6f}, "
+          f"LPIPS: {dl_summary['lpips']:.4f}, DC_MSE: {dl_summary['dc_mse']:.6f}, DC_MAE: {dl_summary['dc_mae']:.6f}, "
+          f"EC Corr: {recon_corr_str}")
+    print(f"GRASP-> SSIM: {grasp_summary['ssim']:.4f}, PSNR: {grasp_summary['psnr']:.2f}, MSE: {grasp_summary['mse']:.6f}, "
+          f"LPIPS: {grasp_summary['lpips']:.4f}, DC_MSE: {grasp_summary['dc_mse']:.6f}, DC_MAE: {grasp_summary['dc_mae']:.6f}")
     print(f"Inference complete. Results saved to {inference_dir}")
 
 

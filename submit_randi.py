@@ -48,7 +48,7 @@ class Trainer(submitit.helpers.Checkpointable):
 
 def main():
     # --- Executor Configuration ---
-    job_name = "ei_baseline_non_dro_eval"
+    job_name = "ei_baseline_non_dro_eval_no_rescale"
     config_path = 'configs/randi/config_ei_no_noise_encode_both.yaml'
     num_gpus = 4
 

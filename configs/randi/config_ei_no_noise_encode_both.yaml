@@ -120,6 +120,7 @@ evaluation:
   simulated_dataset_path: "/ess/scratch/scratch1/rachelgordon/dro_dataset"
   chunk_size: 16
   chunk_overlap: 8
+  rescale: False
 
 debugging:
   calc_step_0: True

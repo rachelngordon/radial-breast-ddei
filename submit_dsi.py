@@ -62,13 +62,17 @@ def main():
         slurm_partition="general",
         slurm_job_name=job_name,
         nodes=1,
-        gpus_per_node=num_gpus,
         tasks_per_node=1,
-        cpus_per_task=4,
-        slurm_mem_per_gpu="130000",
+        cpus_per_task=8,                       # 8 CPUs for 4 GPUs is reasonable
+        slurm_gres=f"gpu:h200:{num_gpus}",     # 4× H200 on a single node
         timeout_min=700,
-        # Avoid binding failures on nodes with different CPU layouts by disabling binding via env
-        slurm_additional_parameters={"export": "ALL,SLURM_CPU_BIND=none"},
+
+        # IMPORTANT: no cpu_bind here anymore, this only affects sbatch
+        # and your sbatch doesn't support --cpu-bind
+        # slurm_additional_parameters={"export": "ALL,SLURM_CPU_BIND=off"},
+
+        # Instead: tell the *srun* that submitit uses not to do CPU binding
+        srun_args=["--cpu-bind=none"],
     )
 
     # --- Job Submission ---

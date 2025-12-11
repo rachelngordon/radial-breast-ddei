@@ -121,6 +121,7 @@ evaluation:
   chunk_overlap: 12
   raw_kspace_eval: True
   raw_grasp_slice_idx: 95
+  rescale: True
 
 
 debugging:

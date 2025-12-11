@@ -14,7 +14,7 @@ data:
   eval_spokes: 8
   spf_aug: false
   weight_accelerations: false
-  fpg: 16
+  fpg: 36
   train_spokes_per_frame: 8
   slices: 192
   slices_to_eval: 1
@@ -118,8 +118,9 @@ training:
 evaluation:
   num_samples: 15
   simulated_dataset_path: "/net/scratch2/rachelgordon/dro_dataset"
-  chunk_size: 16
-  chunk_overlap: 8
+  chunk_size: 36
+  chunk_overlap: 18
+  rescale: True
 
 debugging:
   calc_step_0: True

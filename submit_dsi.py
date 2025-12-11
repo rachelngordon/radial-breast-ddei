@@ -65,7 +65,7 @@ def main():
         gpus_per_node=num_gpus,
         tasks_per_node=1,
         cpus_per_task=4,
-        slurm_mem_per_gpu="50000",
+        slurm_mem_per_gpu="130000",
         timeout_min=700,
         # Avoid binding failures on nodes with different CPU layouts by disabling binding via env
         slurm_additional_parameters={"export": "ALL,SLURM_CPU_BIND=none"},

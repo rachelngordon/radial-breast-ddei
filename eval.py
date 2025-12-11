@@ -619,7 +619,7 @@ def eval_grasp(kspace, csmap, ground_truth, grasp_recon, physics, device, output
 
 
 
-def eval_sample(kspace, csmap, ground_truth, x_recon, physics, mask, grasp_img, acceleration, spokes_per_frame, output_dir, label, device, cluster, dro_eval=True, grasp_path=None, raw_slice_idx=None):
+def eval_sample(kspace, csmap, ground_truth, x_recon, physics, mask, grasp_img, acceleration, spokes_per_frame, output_dir, label, device, cluster, dro_eval=True, grasp_path=None, raw_slice_idx=None, rescale=True):
 
     acceleration = round(acceleration.item(), 1)
 
@@ -647,14 +647,16 @@ def eval_sample(kspace, csmap, ground_truth, x_recon, physics, mask, grasp_img, 
     ground_truth_np = ground_truth.cpu().numpy()
     grasp_recon_np = grasp_img.cpu().numpy()
 
+    if rescale:
+        c = np.dot(x_recon_np.flatten(), ground_truth_np.flatten()) / np.dot(x_recon_np.flatten(), x_recon_np.flatten())
+        recon_complex_scaled = torch.tensor(c * x_recon_np, device=device)
+        
+        c_grasp = np.dot(grasp_recon_np.flatten(), ground_truth_np.flatten()) / np.dot(grasp_recon_np.flatten(), grasp_recon_np.flatten())
+        grasp_img = torch.tensor(c_grasp * grasp_recon_np, device=device)
 
-    c = np.dot(x_recon_np.flatten(), ground_truth_np.flatten()) / np.dot(x_recon_np.flatten(), x_recon_np.flatten())
-
-    recon_complex_scaled = torch.tensor(c * x_recon_np, device=device)
-
-    c_grasp = np.dot(grasp_recon_np.flatten(), ground_truth_np.flatten()) / np.dot(grasp_recon_np.flatten(), grasp_recon_np.flatten())
-
-    grasp_img = torch.tensor(c_grasp * grasp_recon_np, device=device)
+    else:
+        recon_complex_scaled = torch.tensor(x_recon_np, device=device)
+        grasp_img = torch.tensor(grasp_recon_np, device=device)
 
 
     # Convert complex images to magnitude

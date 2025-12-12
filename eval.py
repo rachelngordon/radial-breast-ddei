@@ -196,6 +196,12 @@ def _load_slice_map(slice_map_path: Path = SLICE_MAP_PATH) -> Dict[str, int]:
     return mapping
 
 
+def _resolve_plot_label(label: str, grasp_path: str):
+    """Return a plot label and patient id, preferring the fastMRI id mapped from the DRO grasp path."""
+    patient_id = _get_patient_id_from_grasp_path(grasp_path)
+    return patient_id or label, patient_id
+
+
 # ==========================================================
 # PLOTTING FUNCTIONS
 # ==========================================================
@@ -622,6 +628,7 @@ def eval_grasp(kspace, csmap, ground_truth, grasp_recon, physics, device, output
 def eval_sample(kspace, csmap, ground_truth, x_recon, physics, mask, grasp_img, acceleration, spokes_per_frame, output_dir, label, device, cluster, dro_eval=True, grasp_path=None, raw_slice_idx=None, rescale=True):
 
     acceleration = round(acceleration.item(), 1)
+    plot_label, patient_id = _resolve_plot_label(label, grasp_path)
 
     # ==========================================================
     # EVALUATE DATA CONSISTENCY
@@ -709,7 +716,7 @@ def eval_sample(kspace, csmap, ground_truth, x_recon, physics, mask, grasp_img, 
 
         aif_time_points = np.linspace(0, 150, num_frames)
 
-        if 'malignant' in mask and mask['malignant'].any() and label is not None:
+        if 'malignant' in mask and mask['malignant'].any() and plot_label is not None:
             
             # --- Plot Spatial Quality at a Peak Enhancement Frame ---
             # Find a frame around peak enhancement (e.g., 1/3 of the way through)
@@ -720,8 +727,8 @@ def eval_sample(kspace, csmap, ground_truth, x_recon, physics, mask, grasp_img, 
                 gt_img=gt_mag_np[:, :, peak_frame],
                 grasp_img=grasp_mag_np[:, :, peak_frame],
                 time_frame_index=peak_frame,
-                filename=os.path.join(output_dir, f"spatial_quality_{label}.png"),
-                grasp_comparison_filename=os.path.join(output_dir, f"grasp_comparison_{label}.png"),
+                filename=os.path.join(output_dir, f"spatial_quality_{plot_label}.png"),
+                grasp_comparison_filename=os.path.join(output_dir, f"grasp_comparison_{plot_label}.png"),
                 data_range=data_range,
                 acceleration=acceleration,
                 spokes_per_frame=spokes_per_frame,
@@ -736,7 +743,7 @@ def eval_sample(kspace, csmap, ground_truth, x_recon, physics, mask, grasp_img, 
                 grasp_img_stack=grasp_mag_np,
                 masks=masks_np,
                 time_points=aif_time_points,
-                filename=os.path.join(output_dir, f"temporal_curves_{label}.png"),
+                filename=os.path.join(output_dir, f"temporal_curves_{plot_label}.png"),
                 acceleration=acceleration,
                 spokes_per_frame=spokes_per_frame,
                 plot_dro=True
@@ -747,7 +754,7 @@ def eval_sample(kspace, csmap, ground_truth, x_recon, physics, mask, grasp_img, 
                 masks=masks_np,
                 time_points=aif_time_points,
                 num_frames=num_frames,
-                filename=os.path.join(output_dir, f"recon_temporal_curve_{label}.png"),
+                filename=os.path.join(output_dir, f"recon_temporal_curve_{plot_label}.png"),
                 acceleration=acceleration,
                 spokes_per_frame=spokes_per_frame,
             )
@@ -755,7 +762,7 @@ def eval_sample(kspace, csmap, ground_truth, x_recon, physics, mask, grasp_img, 
             plot_time_series(
                 recon_img_stack=recon_mag_np,
                 grasp_img_stack=grasp_mag_np,
-                filename=os.path.join(output_dir, f"time_points_{label}.png"),
+                filename=os.path.join(output_dir, f"time_points_{plot_label}.png"),
                 acceleration=acceleration,
                 spokes_per_frame=spokes_per_frame,
             )
@@ -790,7 +797,6 @@ def eval_sample(kspace, csmap, ground_truth, x_recon, physics, mask, grasp_img, 
 
         # For raw data, replace the DRO mask with the correct tumor segmentation when available.
         dro_has_malignant = 'malignant' in mask and mask['malignant'].any()
-        patient_id = _get_patient_id_from_grasp_path(grasp_path)
         slice_map = _load_slice_map()
         resolved_slice_idx = slice_map.get(patient_id, raw_slice_idx)
         raw_tumor_mask = None
@@ -811,7 +817,7 @@ def eval_sample(kspace, csmap, ground_truth, x_recon, physics, mask, grasp_img, 
 
         aif_time_points = np.linspace(0, 150, num_frames)
 
-        if 'malignant' in mask and mask['malignant'].any() and label is not None:
+        if 'malignant' in mask and mask['malignant'].any() and plot_label is not None:
             
             # --- Plot Spatial Quality at a Peak Enhancement Frame ---
             # Find a frame around peak enhancement (e.g., 1/3 of the way through)
@@ -822,8 +828,8 @@ def eval_sample(kspace, csmap, ground_truth, x_recon, physics, mask, grasp_img, 
                 gt_img=gt_mag_np[:, :, peak_frame],
                 grasp_img=grasp_mag_np[:, :, peak_frame],
                 time_frame_index=peak_frame,
-                filename=os.path.join(output_dir, f"non_dro_spatial_quality_{label}.png"),
-                grasp_comparison_filename=os.path.join(output_dir, f"non_dro_grasp_comparison_{label}.png"),
+                filename=os.path.join(output_dir, f"non_dro_spatial_quality_{plot_label}.png"),
+                grasp_comparison_filename=os.path.join(output_dir, f"non_dro_grasp_comparison_{plot_label}.png"),
                 data_range=data_range,
                 acceleration=acceleration,
                 spokes_per_frame=spokes_per_frame,
@@ -838,7 +844,7 @@ def eval_sample(kspace, csmap, ground_truth, x_recon, physics, mask, grasp_img, 
                 grasp_img_stack=grasp_mag_np,
                 masks=masks_np,
                 time_points=aif_time_points,
-                filename=os.path.join(output_dir, f"non_dro_temporal_curves_{label}.png"),
+                filename=os.path.join(output_dir, f"non_dro_temporal_curves_{plot_label}.png"),
                 acceleration=acceleration,
                 spokes_per_frame=spokes_per_frame,
                 plot_dro=False
@@ -849,7 +855,7 @@ def eval_sample(kspace, csmap, ground_truth, x_recon, physics, mask, grasp_img, 
                 masks=masks_np,
                 time_points=aif_time_points,
                 num_frames=num_frames,
-                filename=os.path.join(output_dir, f"non_dro_recon_temporal_curve_{label}.png"),
+                filename=os.path.join(output_dir, f"non_dro_recon_temporal_curve_{plot_label}.png"),
                 acceleration=acceleration,
                 spokes_per_frame=spokes_per_frame,
             )
@@ -857,7 +863,7 @@ def eval_sample(kspace, csmap, ground_truth, x_recon, physics, mask, grasp_img, 
             plot_time_series(
                 recon_img_stack=recon_mag_np,
                 grasp_img_stack=grasp_mag_np,
-                filename=os.path.join(output_dir, f"non_dro_time_points_{label}.png"),
+                filename=os.path.join(output_dir, f"non_dro_time_points_{plot_label}.png"),
                 acceleration=acceleration,
                 spokes_per_frame=spokes_per_frame,
             )

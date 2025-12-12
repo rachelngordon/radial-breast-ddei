@@ -279,6 +279,7 @@ def main():
                 device,
                 cluster,
                 dro_eval=True,
+                grasp_path=grasp_path,
                 rescale=rescale,
             )
 

@@ -685,7 +685,7 @@ def main():
                     grasp_dc_mses.append(dc_mse_grasp)
                     grasp_dc_maes.append(dc_mae_grasp)
 
-                    ssim, psnr, mse, lpips, dc_mse, dc_mae, recon_corr, grasp_corr = eval_sample(dro_kspace, csmap, ground_truth, x_recon, eval_physics, mask, dro_grasp_img, acceleration, int(N_spokes), eval_dir, label='val0', device=device, cluster=cluster, dro_eval=True, rescale=config['evaluation']['rescale'])
+                    ssim, psnr, mse, lpips, dc_mse, dc_mae, recon_corr, grasp_corr = eval_sample(dro_kspace, csmap, ground_truth, x_recon, eval_physics, mask, dro_grasp_img, acceleration, int(N_spokes), eval_dir, label='val0', device=device, cluster=cluster, dro_eval=True, grasp_path=grasp_path, rescale=config['evaluation']['rescale'])
                     initial_eval_ssims.append(ssim)
                     initial_eval_psnrs.append(psnr)
                     initial_eval_mses.append(mse)
@@ -1147,7 +1147,7 @@ def main():
 
                             ## Evaluation
                             if global_rank == 0 or not config['training']['multigpu']:
-                                ssim, psnr, mse, lpips, dc_mse, dc_mae, recon_corr, _ = eval_sample(val_dro_kspace_batch, val_csmap, val_ground_truth, val_x_recon, eval_physics, val_mask, val_dro_grasp_img, acceleration, int(N_spokes), eval_dir, f'epoch{epoch}', device, cluster=cluster, dro_eval=True, rescale=config['evaluation']['rescale'])
+                                ssim, psnr, mse, lpips, dc_mse, dc_mae, recon_corr, _ = eval_sample(val_dro_kspace_batch, val_csmap, val_ground_truth, val_x_recon, eval_physics, val_mask, val_dro_grasp_img, acceleration, int(N_spokes), eval_dir, f'epoch{epoch}', device, cluster=cluster, dro_eval=True, grasp_path=grasp_path, rescale=config['evaluation']['rescale'])
                                 epoch_eval_ssims.append(ssim)
                                 epoch_eval_psnrs.append(psnr)
                                 epoch_eval_mses.append(mse)
@@ -1827,7 +1827,7 @@ def main():
 
 
                     ## Evaluation
-                    ssim, psnr, mse, lpips, dc_mse, dc_mae, recon_corr, grasp_corr = eval_sample(kspace, csmap, ground_truth, x_recon, physics, mask, dro_grasp_img, acceleration, int(spokes), eval_dir, f"{spokes}spf", device, cluster=cluster, dro_eval=True, rescale=config['evaluation']['rescale'])
+                    ssim, psnr, mse, lpips, dc_mse, dc_mae, recon_corr, grasp_corr = eval_sample(kspace, csmap, ground_truth, x_recon, physics, mask, dro_grasp_img, acceleration, int(spokes), eval_dir, f"{spokes}spf", device, cluster=cluster, dro_eval=True, grasp_path=grasp_path, rescale=config['evaluation']['rescale'])
                     stress_test_ssims.append(ssim)
                     stress_test_psnrs.append(psnr)
                     stress_test_mses.append(mse)

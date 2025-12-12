@@ -48,8 +48,8 @@ class Trainer(submitit.helpers.Checkpointable):
 
 def main():
     # --- Executor Configuration ---
-    job_name = "ei_baseline_4layers"
-    config_path = 'configs/config_ei_4layers.yaml'
+    job_name = "ei_warp"
+    config_path = 'configs/config_ei_warp.yaml'
     num_gpus = 4
 
     log_dir = f"submitit_logs/{job_name}"

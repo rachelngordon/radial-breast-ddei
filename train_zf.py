@@ -1600,25 +1600,25 @@ def main():
                 csvwriter = csv.writer(csvfile)
                 csvwriter.writerow(['Recon', 'SSIM', 'PSNR', 'MSE', 'LPIPS', 'DC MSE', 'DC MAE', 'EC Correlation'])
                 csvwriter.writerow(['DL', 
-                                f'{epoch_eval_ssim:.4f} ± {np.std(epoch_eval_ssims):.4f}', 
-                                f'{epoch_eval_psnr:.4f} ± {np.std(epoch_eval_psnrs):.4f}', 
-                                f'{epoch_eval_mse:.4f} ± {np.std(epoch_eval_mses):.4f}',
-                                f'{epoch_eval_lpips:.4f} ± {np.std(epoch_eval_lpipses):.4f}',  
-                                f'{epoch_eval_dc_mse:.4f} ± {np.std(epoch_eval_dc_mses):.4f}', 
-                                f'{epoch_eval_dc_mae:.4f} ± {np.std(epoch_eval_dc_maes):.4f}', 
-                                f"{epoch_eval_raw_dc_mse:.4f} ± {np.std(epoch_eval_raw_dc_mses):.4f}", 
-                                f"{epoch_eval_raw_dc_mae:.4f} ± {np.std(epoch_eval_raw_dc_maes):.4f}", 
-                                f'{epoch_eval_curve_corr:.4f} ± {np.std(epoch_eval_curve_corrs):.4f}'])
+                                f'{epoch_eval_ssim:.4f} +- {np.std(epoch_eval_ssims):.4f}', 
+                                f'{epoch_eval_psnr:.4f} +- {np.std(epoch_eval_psnrs):.4f}', 
+                                f'{epoch_eval_mse:.4f} +- {np.std(epoch_eval_mses):.4f}',
+                                f'{epoch_eval_lpips:.4f} +- {np.std(epoch_eval_lpipses):.4f}',  
+                                f'{epoch_eval_dc_mse:.4f} +- {np.std(epoch_eval_dc_mses):.4f}', 
+                                f'{epoch_eval_dc_mae:.4f} +- {np.std(epoch_eval_dc_maes):.4f}', 
+                                f"{epoch_eval_raw_dc_mse:.4f} +- {np.std(epoch_eval_raw_dc_mses):.4f}", 
+                                f"{epoch_eval_raw_dc_mae:.4f} +- {np.std(epoch_eval_raw_dc_maes):.4f}", 
+                                f'{epoch_eval_curve_corr:.4f} +- {np.std(epoch_eval_curve_corrs):.4f}'])
                 csvwriter.writerow(['GRASP', 
-                                f'{avg_grasp_ssim:.4f} ± {np.std(grasp_ssims):.4f}', 
-                                f'{avg_grasp_psnr:.4f} ± {np.std(grasp_psnrs):.4f}', 
-                                f'{avg_grasp_mse:.4f} ± {np.std(grasp_mses):.4f}', 
-                                f'{avg_grasp_lpips:.4f} ± {np.std(grasp_lpipses):.4f}', 
-                                f'{avg_grasp_dc_mse:.4f} ± {np.std(grasp_dc_mses):.4f}', 
-                                f'{avg_grasp_dc_mae:.4f} ± {np.std(grasp_dc_maes):.4f}', 
-                                f"{avg_grasp_raw_dc_mse:.6f} ± {np.std(raw_grasp_dc_mses):.4f}",
-                                f"{avg_grasp_raw_dc_mae:.6f} ± {np.std(raw_grasp_dc_maes):.4f}", 
-                                f'{avg_grasp_curve_corr:.4f} ± {np.std(grasp_curve_corrs):.4f}'])
+                                f'{avg_grasp_ssim:.4f} +- {np.std(grasp_ssims):.4f}', 
+                                f'{avg_grasp_psnr:.4f} +- {np.std(grasp_psnrs):.4f}', 
+                                f'{avg_grasp_mse:.4f} +- {np.std(grasp_mses):.4f}', 
+                                f'{avg_grasp_lpips:.4f} +- {np.std(grasp_lpipses):.4f}', 
+                                f'{avg_grasp_dc_mse:.4f} +- {np.std(grasp_dc_mses):.4f}', 
+                                f'{avg_grasp_dc_mae:.4f} +- {np.std(grasp_dc_maes):.4f}', 
+                                f"{avg_grasp_raw_dc_mse:.6f} +- {np.std(raw_grasp_dc_mses):.4f}",
+                                f"{avg_grasp_raw_dc_mae:.6f} +- {np.std(raw_grasp_dc_maes):.4f}", 
+                                f'{avg_grasp_curve_corr:.4f} +- {np.std(grasp_curve_corrs):.4f}'])
 
 
 

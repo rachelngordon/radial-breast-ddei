@@ -656,6 +656,7 @@ def main():
                     raw_x_recon, *_ = model(
                     raw_kspace.to(device), eval_physics, raw_csmaps, acceleration_encoding, start_timepoint_index, epoch="val0", norm=config['model']['norm']
                     )
+                    adj_loss = adj_loss.item()
 
                 # fix orientation of raw k-space recon
                 raw_x_recon = torch.rot90(raw_x_recon, k=2, dims=[-3,-2])
@@ -1119,6 +1120,7 @@ def main():
                                 val_raw_x_recon, *_ = model(
                                 val_raw_kspace.to(device), eval_physics, val_raw_csmaps, acceleration_encoding, start_timepoint_index, epoch="val0", norm=config['model']['norm']
                                 )
+                                val_adj_loss = val_adj_loss.item()
 
                             # fix orientation of raw k-space recon
                             val_raw_x_recon = torch.rot90(val_raw_x_recon, k=2, dims=[-3,-2])
